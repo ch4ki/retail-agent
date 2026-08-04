@@ -48,7 +48,7 @@ def test_guard_violation_triggers_one_repair_then_succeeds(make_deps, source):
         [
             "analyze",
             "STEP: top customers",
-            "SELECT email FROM users",  # rejected by the guard
+            "SELECT email AS contact FROM users",  # rejected by the guard
             "SELECT id, SUM(spend) AS spend FROM users GROUP BY id",  # repaired
             "Your top customer spent $100.",
         ],
@@ -66,9 +66,9 @@ def test_exhausted_repair_budget_degrades_instead_of_looping(make_deps, source):
         [
             "analyze",
             "STEP: top customers",
-            "SELECT email FROM users",
-            "SELECT email FROM users",
-            "SELECT email FROM users",
+            "SELECT email AS contact FROM users",
+            "SELECT email AS contact FROM users",
+            "SELECT email AS contact FROM users",
         ],
         src=source,
     )
@@ -155,18 +155,36 @@ def test_masked_frames_are_stored_not_raw_ones(make_deps, source):
     assert state["redactions"] == 2
 
 
-def test_guard_blocks_a_bare_pii_projection_end_to_end(make_deps, source):
+def test_guard_blocks_unmaskable_pii_projections_end_to_end(make_deps, source):
+    # A live model produced the CONCAT(MAX(...)) form to work around the guard.
+    # It renames the output column, so masking cannot find it — the query must
+    # never reach the warehouse.
+    evasion = (
+        "SELECT u.id AS user_id, "
+        "CONCAT(MAX(u.first_name), ' ', MAX(u.last_name)) AS user_name "
+        "FROM users AS u GROUP BY user_id"
+    )
+    deps = make_deps(
+        ["analyze", "STEP: customer names", evasion, evasion, evasion], src=source
+    )
+    state = turn(build_graph(deps), "list our top customers by name")
+
+    assert source.executed == [], "an unmaskable PII query must never run"
+    assert state["status"] == "degraded"
+
+
+def test_bare_pii_column_runs_and_is_masked_end_to_end(make_deps, source):
     deps = make_deps(
         [
             "analyze",
-            "STEP: customer emails",
+            "STEP: customer contacts",
             "SELECT id, email FROM users",
-            "SELECT id, email FROM users",
-            "SELECT id, email FROM users",
+            "Listed 2 customers.",
         ],
         src=source,
     )
-    state = turn(build_graph(deps), "list every customer email")
+    state = turn(build_graph(deps), "show me customer records")
 
-    assert source.executed == [], "a PII query must never reach the warehouse"
-    assert state["status"] == "degraded"
+    assert len(source.executed) == 1, "a maskable query is allowed to run"
+    assert state["redactions"] == 2
+    assert "@" not in str(state["frames"]["step_1"].frame["email"].iloc[0])

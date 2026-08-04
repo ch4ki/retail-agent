@@ -10,6 +10,7 @@ from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.nodes.schema_qa import render_schema
 from retail_agent.agent.prompts import REPAIR_PROMPT, SQL_PROMPT
 from retail_agent.agent.state import AnalysisStep, SqlAttempt, TurnState
+from retail_agent.llm.messages import message_text
 from retail_agent.safety.sql_guard import check_sql
 
 FENCE = re.compile(r"^```(?:sql)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
@@ -28,7 +29,7 @@ def draft_sql_node(state: TurnState, deps: AgentDeps) -> dict:
 
     prompt = _prompt_for(state, deps, step)
     reply = deps.llm.invoke([HumanMessage(content=prompt)])
-    sql = _strip_fences(str(reply.content))
+    sql = _strip_fences(message_text(reply))
 
     verdict = check_sql(
         sql,

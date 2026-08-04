@@ -104,18 +104,74 @@ def test_stacked_statements_are_rejected():
     assert any("one statement" in v for v in result.violations)
 
 
-def test_bare_pii_projection_is_rejected():
-    result = guard("SELECT email FROM users")
-    assert not result.ok
-    assert any("email" in v for v in result.violations)
+# A restricted column may be projected only in a form the masking layer can
+# still find by output column name — i.e. bare — or inside an aggregate that
+# genuinely collapses identity. Anything else is rejected.
+
+
+def test_bare_pii_column_is_allowed_because_masking_catches_it():
+    # Output column stays `email`, so the policy hashes it before the model sees it.
+    assert guard("SELECT id, email FROM users").ok
+
+
+def test_bare_qualified_pii_column_is_allowed():
+    assert guard("SELECT u.last_name FROM users AS u").ok
 
 
 def test_aliased_pii_projection_is_rejected():
+    # An alias renames the output column, which defeats name-based masking.
     assert not guard("SELECT email AS contact FROM users").ok
 
 
-def test_qualified_pii_projection_is_rejected():
-    assert not guard("SELECT u.last_name FROM users AS u").ok
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT COUNT(email) AS c FROM users",
+        "SELECT COUNT(DISTINCT email) AS c FROM users",
+        "SELECT APPROX_COUNT_DISTINCT(email) AS c FROM users",
+    ],
+)
+def test_counting_aggregates_over_pii_are_allowed(sql):
+    assert guard(sql).ok, guard(sql).violations
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        ("max leaks the value", "SELECT MAX(first_name) AS n FROM users"),
+        ("min leaks the value", "SELECT MIN(email) AS e FROM users"),
+        ("any_value leaks", "SELECT ANY_VALUE(last_name) AS n FROM users"),
+        ("string_agg leaks", "SELECT STRING_AGG(email) AS e FROM users"),
+        ("array_agg leaks", "SELECT ARRAY_AGG(last_name) AS n FROM users"),
+    ],
+)
+def test_non_counting_aggregates_over_pii_are_rejected(label, sql):
+    assert not guard(sql).ok, label
+
+
+def test_concat_of_max_names_is_rejected():
+    # The exact evasion a live model produced after the guard blocked the
+    # bare-but-aliased form: MAX() over a GROUP BY returns the real name.
+    sql = (
+        "SELECT u.id AS user_id, "
+        "CONCAT(MAX(u.first_name), ' ', MAX(u.last_name)) AS user_name, "
+        "SUM(oi.sale_price) AS total_spend "
+        "FROM order_items AS oi JOIN users AS u ON oi.user_id = u.id "
+        "GROUP BY user_id ORDER BY total_spend DESC LIMIT 10"
+    )
+    result = guard(sql)
+
+    assert not result.ok
+    assert any("first_name" in v for v in result.violations)
+
+
+def test_violation_message_does_not_suggest_a_plain_aggregate():
+    # The original message said "use an aggregate", which is what taught a live
+    # model to reach for MAX(). The advice must not re-open the hole.
+    violations = " ".join(guard("SELECT email AS contact FROM users").violations)
+
+    assert "COUNT" in violations
+    assert "use an aggregate" not in violations.lower()
 
 
 def test_select_star_is_rejected():

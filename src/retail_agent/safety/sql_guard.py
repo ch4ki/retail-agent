@@ -36,6 +36,14 @@ FORBIDDEN_NODES: tuple[type[exp.Expression], ...] = tuple(
     getattr(exp, name) for name in _FORBIDDEN_NODE_NAMES if hasattr(exp, name)
 )
 
+# Aggregates that collapse identity. COUNT(email) discloses nothing about any
+# individual. MAX(first_name) grouped by user id returns that person's actual
+# name, so it is not disclosure-safe despite being an aggregate.
+_COUNTING_AGG_NAMES = ("Count", "ApproxDistinct", "CountIf")
+COUNTING_AGGS: tuple[type[exp.Expression], ...] = tuple(
+    getattr(exp, name) for name in _COUNTING_AGG_NAMES if hasattr(exp, name)
+)
+
 
 @dataclass(frozen=True)
 class GuardResult:
@@ -119,18 +127,42 @@ def _check_projections(tree: exp.Expression, restricted: Collection[str]) -> lis
                 )
                 continue
 
-            inner = projection.this if isinstance(projection, exp.Alias) else projection
-            if inner.find(exp.AggFunc) is not None:
-                continue  # aggregates over PII disclose nothing about an individual
+            aliased = isinstance(projection, exp.Alias)
+            inner = projection.this if aliased else projection
+
+            # A bare, unaliased column keeps its name in the result set, which
+            # is what lets the masking policy find and mask it. Renaming it, or
+            # burying it in an expression, defeats that.
+            if not aliased and isinstance(inner, exp.Column):
+                continue
 
             for column in inner.find_all(exp.Column):
-                if column.name.lower() in restricted_lower:
-                    violations.append(
-                        f"Column '{column.name}' is personal data and cannot be "
-                        f"selected directly. Use an aggregate, or select 'id' instead."
-                    )
+                if column.name.lower() not in restricted_lower:
+                    continue
+                if _inside_counting_aggregate(column, inner):
+                    continue
+                violations.append(
+                    f"Column '{column.name}' is personal data. Select it on its "
+                    f"own with no alias (it is masked automatically), wrap it in "
+                    f"COUNT(...), or use 'id' to identify a customer. It cannot "
+                    f"appear inside another expression."
+                )
 
     return _dedupe(violations)
+
+
+def _inside_counting_aggregate(column: exp.Expression, root: exp.Expression) -> bool:
+    """True when the nearest aggregate enclosing `column` only counts rows."""
+    node = column.parent
+    while node is not None:
+        if isinstance(node, COUNTING_AGGS):
+            return True
+        if isinstance(node, exp.AggFunc):
+            return False  # MAX / MIN / ANY_VALUE / STRING_AGG all return the value
+        if node is root:
+            return False
+        node = node.parent
+    return False
 
 
 def _apply_limit(tree: exp.Expression, default_limit: int, max_limit: int) -> str:

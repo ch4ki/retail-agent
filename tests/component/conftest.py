@@ -19,17 +19,30 @@ from retail_agent.safety.pii import PiiPolicy
 
 
 class ScriptedLLM:
-    """Returns queued replies in order. Records every prompt it received."""
+    """Returns queued replies in order. Records every prompt it received.
 
-    def __init__(self, replies: list[str]):
+    `blocks=True` reproduces the shape Gemini actually returns — a list of
+    content blocks carrying thinking signatures — rather than a plain string.
+    Providers disagree here, and a string-only double hides real bugs.
+    """
+
+    def __init__(self, replies: list[str], blocks: bool = False):
         self.replies = list(replies)
+        self.blocks = blocks
         self.prompts: list[str] = []
 
     def invoke(self, messages, **kwargs):
         self.prompts.append(_as_text(messages))
         if not self.replies:
             raise AssertionError("ScriptedLLM ran out of replies")
-        return AIMessage(content=self.replies.pop(0))
+        reply = self.replies.pop(0)
+        if self.blocks:
+            return AIMessage(
+                content=[
+                    {"type": "text", "text": reply, "extras": {"signature": "sig"}}
+                ]
+            )
+        return AIMessage(content=reply)
 
 
 def _as_text(messages) -> str:
@@ -98,10 +111,10 @@ def source():
 
 @pytest.fixture
 def make_deps(settings, source):
-    def _make(replies: list[str], src=None):
+    def _make(replies: list[str], src=None, blocks: bool = False):
         return AgentDeps(
             settings=settings,
-            llm=ScriptedLLM(replies),
+            llm=ScriptedLLM(replies, blocks=blocks),
             source=src or source,
             policy=PiiPolicy.default(),
         )

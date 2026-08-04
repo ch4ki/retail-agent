@@ -25,7 +25,7 @@ def test_draft_sql_strips_markdown_fences(make_deps):
 
 
 def test_draft_sql_records_a_guard_violation_without_executing(make_deps, source):
-    deps = make_deps(["SELECT email FROM users"], src=source)
+    deps = make_deps(["SELECT email AS contact FROM users"], src=source)
     result = draft_sql_node(analysing_state(), deps)
 
     attempt = result["sql_attempts"][-1]
@@ -34,7 +34,7 @@ def test_draft_sql_records_a_guard_violation_without_executing(make_deps, source
 
 
 def test_guard_violation_spends_repair_budget(make_deps):
-    deps = make_deps(["SELECT email FROM users"])
+    deps = make_deps(["SELECT email AS contact FROM users"])
     result = draft_sql_node(analysing_state(), deps)
 
     assert result["repair_budget"] == 1
@@ -48,7 +48,7 @@ def test_guard_injects_a_limit_into_accepted_sql(make_deps):
 
 
 def test_repair_prompt_includes_the_previous_error(make_deps):
-    deps = make_deps(["SELECT email FROM users", "SELECT id FROM users"])
+    deps = make_deps(["SELECT email AS contact FROM users", "SELECT id FROM users"])
     state = analysing_state()
 
     first = draft_sql_node(state, deps)
@@ -125,10 +125,10 @@ def test_synthesize_failure_message_shows_the_last_attempt(make_deps):
     state = analysing_state()
     state["frames"] = {}
     state["sql_attempts"] = [
-        SqlAttempt(step_id="step_1", sql="SELECT email FROM users", violations=("no PII",))
+        SqlAttempt(step_id="step_1", sql="SELECT email AS contact FROM users", violations=("no PII",))
     ]
 
     result = synthesize_node(state, deps)
 
-    assert "SELECT email FROM users" in result["answer"]
+    assert "SELECT email AS contact FROM users" in result["answer"]
     assert "no PII" in result["answer"]

@@ -9,6 +9,7 @@ from retail_agent.agent.nodes.route import last_user_message
 from retail_agent.agent.nodes.schema_qa import render_schema
 from retail_agent.agent.prompts import PLANNER_PROMPT
 from retail_agent.agent.state import AnalysisStep, TurnState
+from retail_agent.llm.messages import message_text
 
 
 def plan_node(state: TurnState, deps: AgentDeps) -> dict:
@@ -18,7 +19,7 @@ def plan_node(state: TurnState, deps: AgentDeps) -> dict:
     prompt = PLANNER_PROMPT.format(max_steps=max_steps, schema=render_schema(deps))
     reply = deps.llm.invoke([HumanMessage(content=f"{prompt}\n\nQuestion: {question}")])
 
-    questions = _parse_steps(str(reply.content))[:max_steps]
+    questions = _parse_steps(message_text(reply))[:max_steps]
     if not questions:
         questions = [question]
 

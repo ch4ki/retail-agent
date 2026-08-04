@@ -8,6 +8,7 @@ from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.nodes.route import last_user_message
 from retail_agent.agent.prompts import PERSONA_DEFAULT, SAFETY_RULES, SYNTHESIS_PROMPT
 from retail_agent.agent.state import TurnState
+from retail_agent.llm.messages import message_text
 from retail_agent.safety.egress import scan_text
 
 
@@ -33,7 +34,7 @@ def synthesize_node(state: TurnState, deps: AgentDeps) -> dict:
         results=results,
     )
     reply = deps.llm.invoke([HumanMessage(content=prompt)])
-    scanned = scan_text(str(reply.content))
+    scanned = scan_text(message_text(reply))
 
     return {
         "answer": scanned.text,
