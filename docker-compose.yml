@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: retail-agent-postgres
+    environment:
+      POSTGRES_USER: retail
+      POSTGRES_PASSWORD: retail
+      POSTGRES_DB: retail_agent
+    ports:
+      - "5433:5432"   # 5433 on the host to avoid clashing with a local postgres
+    volumes:
+      - retail-agent-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U retail -d retail_agent"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  retail-agent-pgdata:
