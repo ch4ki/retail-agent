@@ -121,7 +121,8 @@ def _checkpointer(console: Console, database_url: str):
             yield saver
             return
     except Exception as err:
-        logging.getLogger(__name__).warning("postgres unavailable: %s", err)
+        # Full detail only under --verbose; the console gets one actionable line.
+        logging.getLogger(__name__).debug("postgres unavailable: %s", err)
         console.print(
             "[yellow]Postgres unreachable — this session will not be saved. "
             "Run `docker compose up -d postgres` to enable history.[/yellow]"
