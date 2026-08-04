@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     openrouter_model: str | None = None
     ollama_model: str | None = None
     llm_temperature: float = 0.0
+    # Explicit output cap. Without one, providers reserve credit for the model's
+    # full output ceiling (OpenRouter 402s on this), and per-turn cost is
+    # unbounded. Every prompt here wants a query or a few paragraphs.
+    llm_max_tokens: int = 2048
     google_api_key: str | None = None
     openai_api_key: str | None = None
     openrouter_api_key: str | None = None

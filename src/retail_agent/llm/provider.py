@@ -19,6 +19,7 @@ def build_llm(settings: Settings) -> BaseChatModel:
     provider = settings.llm_provider
     model = settings.resolved_model
     temperature = settings.llm_temperature
+    max_tokens = settings.llm_max_tokens
 
     if provider == "gemini":
         _require(settings.google_api_key, "GOOGLE_API_KEY", provider)
@@ -28,6 +29,7 @@ def build_llm(settings: Settings) -> BaseChatModel:
             model=model,
             google_api_key=settings.google_api_key,
             temperature=temperature,
+            max_output_tokens=max_tokens,
         )
 
     if provider == "openai":
@@ -35,7 +37,10 @@ def build_llm(settings: Settings) -> BaseChatModel:
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(
-            model=model, api_key=settings.openai_api_key, temperature=temperature
+            model=model,
+            api_key=settings.openai_api_key,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
 
     if provider == "openrouter":
@@ -47,13 +52,17 @@ def build_llm(settings: Settings) -> BaseChatModel:
             api_key=settings.openrouter_api_key,
             base_url="https://openrouter.ai/api/v1",
             temperature=temperature,
+            max_tokens=max_tokens,
         )
 
     if provider == "ollama":
         from langchain_ollama import ChatOllama
 
         return ChatOllama(
-            model=model, base_url=settings.ollama_base_url, temperature=temperature
+            model=model,
+            base_url=settings.ollama_base_url,
+            temperature=temperature,
+            num_predict=max_tokens,
         )
 
     raise ValueError(f"Unsupported provider: {provider}")
