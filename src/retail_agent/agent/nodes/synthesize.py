@@ -27,6 +27,20 @@ def synthesize_node(state: TurnState, deps: AgentDeps) -> dict:
     results = "\n\n".join(
         f"### {key}\n{frame.to_markdown()}" for key, frame in frames.items()
     )
+
+    # A step with no frame did not return "no data" — its query never
+    # succeeded. Letting the model infer emptiness from a missing table is how
+    # you get "there were no sales" when the truth is "the query failed".
+    missing = [step for step in state.get("plan", []) if step.id not in frames]
+    if missing:
+        results += "\n\n### Could not be retrieved\n" + "\n".join(
+            f"- {step.question}" for step in missing
+        )
+        results += (
+            "\n\nThese queries failed. Do not describe them as zero or as having "
+            "no data. Say plainly that you could not retrieve them."
+        )
+
     prompt = SYNTHESIS_PROMPT.format(
         persona=PERSONA_DEFAULT,
         safety=SAFETY_RULES,
@@ -38,7 +52,7 @@ def synthesize_node(state: TurnState, deps: AgentDeps) -> dict:
 
     return {
         "answer": scanned.text,
-        "status": state.get("status", "ok"),
+        "status": "degraded" if missing else state.get("status", "ok"),
         "messages": [AIMessage(content=scanned.text)],
     }
 

@@ -17,6 +17,7 @@ from retail_agent.agent.graph import build_graph, run_turn
 from retail_agent.cli.render import render_answer, render_banner, render_error
 from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
+from retail_agent.llm.errors import describe_llm_error
 from retail_agent.llm.provider import MissingCredentialsError, build_llm
 from retail_agent.safety.pii import PiiPolicy
 from retail_agent.store.db import run_migrations
@@ -162,8 +163,11 @@ def _answer(console, graph, deps, user, session_id, question) -> None:
                 config={"configurable": {"thread_id": session_id}},
             )
     except Exception as err:  # the REPL must survive anything
+        # Full detail goes to the log; the user gets one actionable line.
         logging.getLogger(__name__).exception("turn failed")
-        render_error(console, f"That turn failed: {err}")
+        render_error(
+            console, describe_llm_error(err, provider=deps.settings.llm_provider)
+        )
         return
 
     render_answer(console, state)

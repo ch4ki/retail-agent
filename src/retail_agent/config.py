@@ -27,7 +27,13 @@ class Settings(BaseSettings):
 
     # --- LLM ---
     llm_provider: Provider = "gemini"
+    # Applies to whichever provider is active. Prefer the per-provider vars
+    # below when you keep more than one configured.
     llm_model: str | None = None
+    gemini_model: str | None = None
+    openai_model: str | None = None
+    openrouter_model: str | None = None
+    ollama_model: str | None = None
     llm_temperature: float = 0.0
     google_api_key: str | None = None
     openai_api_key: str | None = None
@@ -66,7 +72,13 @@ class Settings(BaseSettings):
 
     @property
     def resolved_model(self) -> str:
-        return self.llm_model or DEFAULT_MODELS[self.llm_provider]
+        """Model for the active provider.
+
+        A model name pinned for one provider must never be sent to another, so
+        the per-provider variable wins over the generic one.
+        """
+        specific = getattr(self, f"{self.llm_provider}_model", None)
+        return specific or self.llm_model or DEFAULT_MODELS[self.llm_provider]
 
 
 @lru_cache(maxsize=1)

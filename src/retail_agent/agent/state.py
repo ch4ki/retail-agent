@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Annotated, Literal, TypedDict
+from decimal import Decimal
+from typing import Annotated, Any, Literal, TypedDict
 
 import pandas as pd
 from langchain_core.messages import AnyMessage, HumanMessage
@@ -36,20 +37,95 @@ class SqlAttempt:
         return bool(self.violations) or self.error is not None
 
 
+# Checkpointed state must be serialisable, so results are stored as plain
+# values rather than a DataFrame. Only a slice is kept: prompts show at most 20
+# rows, and a checkpoint per turn should not carry the whole result set.
+MAX_STORED_ROWS = 100
+
+
 @dataclass
 class MaskedFrame:
     key: str
-    frame: pd.DataFrame
+    columns: tuple[str, ...]
+    rows: tuple[tuple[Any, ...], ...]
     row_count: int
     redactions: int
     dropped_columns: tuple[str, ...] = ()
 
+    @classmethod
+    def from_dataframe(
+        cls,
+        key: str,
+        frame: pd.DataFrame,
+        *,
+        row_count: int,
+        redactions: int,
+        dropped_columns: tuple[str, ...] = (),
+    ) -> "MaskedFrame":
+        head = frame.head(MAX_STORED_ROWS)
+        return cls(
+            key=key,
+            columns=tuple(str(column) for column in frame.columns),
+            rows=tuple(
+                tuple(_cell(value) for value in row)
+                for row in head.itertuples(index=False, name=None)
+            ),
+            row_count=row_count,
+            redactions=redactions,
+            dropped_columns=tuple(dropped_columns),
+        )
+
+    def column(self, name: str) -> list[Any]:
+        index = self.columns.index(name)
+        return [row[index] for row in self.rows]
+
     def to_markdown(self, max_rows: int = 20) -> str:
-        head = self.frame.head(max_rows)
-        table = head.to_markdown(index=False)
-        if self.row_count > max_rows:
-            table += f"\n\n_({self.row_count - max_rows} more rows not shown)_"
+        if not self.columns:
+            return "_(no rows)_"
+
+        shown = self.rows[:max_rows]
+        lines = [
+            "| " + " | ".join(self.columns) + " |",
+            "| " + " | ".join("---" for _ in self.columns) + " |",
+            *("| " + " | ".join(_fmt(v) for v in row) + " |" for row in shown),
+        ]
+        table = "\n".join(lines)
+
+        hidden = self.row_count - len(shown)
+        if hidden > 0:
+            table += f"\n\n_({hidden} more rows not shown)_"
         return table
+
+
+def _cell(value: Any) -> Any:
+    """Coerce a pandas/numpy value into something a checkpointer can store."""
+    try:
+        if value is None or pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass  # arrays and other non-scalars land here
+
+    if isinstance(value, (bool, int, float, str)):
+        return value
+
+    unwrap = getattr(value, "item", None)  # numpy scalars
+    if callable(unwrap):
+        try:
+            return _cell(unwrap())
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+    if isinstance(value, Decimal):
+        return float(value)
+    return str(value)
+
+
+def _fmt(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
 
 
 class TurnState(TypedDict, total=False):

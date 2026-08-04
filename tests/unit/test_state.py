@@ -22,12 +22,11 @@ def test_each_turn_gets_a_unique_id():
 
 
 def test_masked_frame_renders_markdown():
-    frame = MaskedFrame(
-        key="step_1",
-        frame=pd.DataFrame({"state": ["TX", "CA"], "revenue": [10, 20]}),
+    frame = MaskedFrame.from_dataframe(
+        "step_1",
+        pd.DataFrame({"state": ["TX", "CA"], "revenue": [10, 20]}),
         row_count=2,
         redactions=0,
-        dropped_columns=(),
     )
 
     rendered = frame.to_markdown()
@@ -37,12 +36,11 @@ def test_masked_frame_renders_markdown():
 
 
 def test_masked_frame_truncates_long_results():
-    frame = MaskedFrame(
-        key="step_1",
-        frame=pd.DataFrame({"n": range(100)}),
+    frame = MaskedFrame.from_dataframe(
+        "step_1",
+        pd.DataFrame({"n": range(100)}),
         row_count=100,
         redactions=0,
-        dropped_columns=(),
     )
 
     rendered = frame.to_markdown(max_rows=5)

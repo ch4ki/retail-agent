@@ -66,7 +66,7 @@ def test_execute_masks_pii_before_storing_the_frame(make_deps, source):
     result = execute_node(state, deps)
 
     frame = result["frames"]["step_1"]
-    assert "@" not in str(frame.frame["email"].iloc[0])
+    assert "@" not in str(frame.column("email")[0])
     assert result["redactions"] > 0
 
 
@@ -92,9 +92,9 @@ def test_synthesize_scans_output_for_pii(make_deps):
     deps = make_deps(["Our top customer is ada@example.com with $900."])
     state = analysing_state()
     state["frames"] = {
-        "step_1": MaskedFrame(
-            key="step_1",
-            frame=pd.DataFrame({"id": [1], "spend": [900]}),
+        "step_1": MaskedFrame.from_dataframe(
+            "step_1",
+            pd.DataFrame({"id": [1], "spend": [900]}),
             row_count=1,
             redactions=0,
         )
@@ -132,3 +132,52 @@ def test_synthesize_failure_message_shows_the_last_attempt(make_deps):
 
     assert "SELECT email AS contact FROM users" in result["answer"]
     assert "no PII" in result["answer"]
+
+
+def test_partial_step_failure_is_reported_not_glossed_over(make_deps):
+    """If the plan had 3 steps and only 1 produced data, saying 'there is no
+    data' is wrong — the query failed. The turn must be marked degraded and the
+    gap named."""
+    import pandas as pd
+
+    from retail_agent.agent.state import AnalysisStep, SqlAttempt
+
+    deps = make_deps(["Jeans made $106,915."])
+    state = analysing_state()
+    state["plan"] = [
+        AnalysisStep(id="step_1", question="revenue for Jeans"),
+        AnalysisStep(id="step_2", question="revenue for Sweaters"),
+        AnalysisStep(id="step_3", question="units per category"),
+    ]
+    state["frames"] = {
+        "step_1": MaskedFrame.from_dataframe(
+            "step_1", pd.DataFrame({"revenue": [106915]}), row_count=1, redactions=0
+        )
+    }
+    state["sql_attempts"] = [
+        SqlAttempt(step_id="step_2", sql="SELECT bad", error="boom"),
+    ]
+
+    result = synthesize_node(state, deps)
+
+    assert result["status"] == "degraded"
+    prompt = deps.llm.prompts[-1]
+    assert "revenue for Sweaters" in prompt, "the model must know which step failed"
+    assert "units per category" in prompt
+
+
+def test_all_steps_succeeding_stays_ok(make_deps):
+    import pandas as pd
+
+    from retail_agent.agent.state import AnalysisStep
+
+    deps = make_deps(["All good."])
+    state = analysing_state()
+    state["plan"] = [AnalysisStep(id="step_1", question="revenue")]
+    state["frames"] = {
+        "step_1": MaskedFrame.from_dataframe(
+            "step_1", pd.DataFrame({"revenue": [1]}), row_count=1, redactions=0
+        )
+    }
+
+    assert synthesize_node(state, deps)["status"] == "ok"

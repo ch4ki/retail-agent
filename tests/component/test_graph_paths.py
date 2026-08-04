@@ -150,8 +150,8 @@ def test_masked_frames_are_stored_not_raw_ones(make_deps, source):
     )
     state = turn(build_graph(deps))
 
-    stored = state["frames"]["step_1"].frame
-    assert "@" not in str(stored["email"].iloc[0])
+    stored = state["frames"]["step_1"]
+    assert "@" not in str(stored.column("email")[0])
     assert state["redactions"] == 2
 
 
@@ -187,4 +187,33 @@ def test_bare_pii_column_runs_and_is_masked_end_to_end(make_deps, source):
 
     assert len(source.executed) == 1, "a maskable query is allowed to run"
     assert state["redactions"] == 2
-    assert "@" not in str(state["frames"]["step_1"].frame["email"].iloc[0])
+    assert "@" not in str(state["frames"]["step_1"].column("email")[0])
+
+
+def test_state_survives_checkpointing(make_deps, source):
+    """The CLI always runs with a checkpointer, so every value in TurnState
+    must be serialisable. Running without one hid a crash on the first
+    analysis turn."""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    deps = make_deps(
+        [
+            "analyze",
+            "STEP: total spend per customer",
+            "SELECT id, spend FROM users",
+            "Your top customer spent $100.",
+        ],
+        src=source,
+    )
+    graph = build_graph(deps, checkpointer=MemorySaver())
+    state = run_turn(
+        graph,
+        user_id="dana",
+        session_id="s1",
+        question="top customers",
+        repair_budget=2,
+        config={"configurable": {"thread_id": "s1"}},
+    )
+
+    assert state["status"] == "ok"
+    assert state["frames"]["step_1"].row_count == 2

@@ -51,6 +51,11 @@ Try:
 Set `LLM_PROVIDER` in `.env` to `gemini`, `openai`, `openrouter` or `ollama`,
 and supply the matching key. No code change is needed.
 
+To pin a model, use the per-provider variable — `GEMINI_MODEL`, `OPENAI_MODEL`,
+`OPENROUTER_MODEL`, `OLLAMA_MODEL`. A name pinned there is only ever sent to
+that provider, so switching `LLM_PROVIDER` stays safe. The generic `LLM_MODEL`
+applies to whichever provider is active.
+
 ## How it works
 
 A LangGraph state machine owns each turn. The model decides *what* to ask; the

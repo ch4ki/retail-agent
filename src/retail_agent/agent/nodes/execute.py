@@ -34,9 +34,9 @@ def execute_node(state: TurnState, deps: AgentDeps) -> dict:
     masked, report = mask_dataframe(result.rows, deps.policy, salt=deps.settings.pii_salt)
 
     frames = dict(state.get("frames", {}))
-    frames[step.id] = MaskedFrame(
-        key=step.id,
-        frame=masked,
+    frames[step.id] = MaskedFrame.from_dataframe(
+        step.id,
+        masked,
         row_count=result.row_count,
         redactions=report.redactions,
         dropped_columns=report.dropped_columns,
