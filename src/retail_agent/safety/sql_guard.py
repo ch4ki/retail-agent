@@ -1,0 +1,161 @@
+"""Static validation of model-authored SQL.
+
+Parses to an AST rather than pattern-matching text. A regex guard can be
+defeated by comments, casing, or unicode; a parser sees the same tree the
+database will.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Collection
+from dataclasses import dataclass
+
+import sqlglot
+from sqlglot import exp
+
+DIALECT = "bigquery"
+
+# Built defensively: node class names vary slightly across sqlglot releases.
+_FORBIDDEN_NODE_NAMES = (
+    "Insert",
+    "Update",
+    "Delete",
+    "Drop",
+    "Create",
+    "Alter",
+    "TruncateTable",
+    "Merge",
+    "Command",
+    "Grant",
+    "Use",
+    "Set",
+    "Copy",
+    "Export",
+)
+FORBIDDEN_NODES: tuple[type[exp.Expression], ...] = tuple(
+    getattr(exp, name) for name in _FORBIDDEN_NODE_NAMES if hasattr(exp, name)
+)
+
+
+@dataclass(frozen=True)
+class GuardResult:
+    ok: bool
+    sql: str
+    violations: tuple[str, ...] = ()
+
+
+def check_sql(
+    sql: str,
+    *,
+    allowed_tables: Collection[str],
+    restricted_columns: Collection[str],
+    default_limit: int = 500,
+    max_limit: int = 5_000,
+) -> GuardResult:
+    """Validate and normalise a query. Never raises on bad input."""
+    if not sql or not sql.strip():
+        return GuardResult(False, sql, ("Query is empty.",))
+
+    try:
+        statements = [s for s in sqlglot.parse(sql, dialect=DIALECT) if s is not None]
+    except Exception as err:  # sqlglot raises several parse error types
+        return GuardResult(False, sql, (f"Could not parse SQL: {err}",))
+
+    if len(statements) != 1:
+        return GuardResult(
+            False, sql, (f"Expected exactly one statement, found {len(statements)}.",)
+        )
+
+    tree = statements[0]
+    violations: list[str] = []
+    violations += _check_read_only(tree)
+    violations += _check_tables(tree, allowed_tables)
+    violations += _check_projections(tree, restricted_columns)
+
+    if violations:
+        return GuardResult(False, sql, tuple(violations))
+
+    return GuardResult(True, _apply_limit(tree, default_limit, max_limit), ())
+
+
+def _check_read_only(tree: exp.Expression) -> list[str]:
+    found = {
+        type(node).__name__ for node in tree.walk() if isinstance(node, FORBIDDEN_NODES)
+    }
+    if found:
+        return [f"Only read queries are allowed; found {', '.join(sorted(found))}."]
+    if not isinstance(tree, (exp.Select, exp.Union, exp.Subquery, exp.With)):
+        return [f"Only SELECT queries are allowed; found {type(tree).__name__}."]
+    return []
+
+
+def _check_tables(tree: exp.Expression, allowed: Collection[str]) -> list[str]:
+    cte_names = {
+        cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE) if cte.alias_or_name
+    }
+    allowed_lower = {t.lower() for t in allowed}
+
+    violations = []
+    for table in tree.find_all(exp.Table):
+        name = (table.name or "").lower()
+        if not name or name in cte_names or name in allowed_lower:
+            continue
+        violations.append(
+            f"Table '{table.name}' is not available. "
+            f"Allowed tables: {', '.join(sorted(allowed))}."
+        )
+    return violations
+
+
+def _check_projections(tree: exp.Expression, restricted: Collection[str]) -> list[str]:
+    restricted_lower = {c.lower() for c in restricted}
+    violations: list[str] = []
+
+    for select in tree.find_all(exp.Select):
+        for projection in select.expressions:
+            if isinstance(projection, exp.Star) or projection.find(exp.Star):
+                violations.append(
+                    "SELECT * is not allowed. List the columns you need explicitly."
+                )
+                continue
+
+            inner = projection.this if isinstance(projection, exp.Alias) else projection
+            if inner.find(exp.AggFunc) is not None:
+                continue  # aggregates over PII disclose nothing about an individual
+
+            for column in inner.find_all(exp.Column):
+                if column.name.lower() in restricted_lower:
+                    violations.append(
+                        f"Column '{column.name}' is personal data and cannot be "
+                        f"selected directly. Use an aggregate, or select 'id' instead."
+                    )
+
+    return _dedupe(violations)
+
+
+def _apply_limit(tree: exp.Expression, default_limit: int, max_limit: int) -> str:
+    existing = tree.args.get("limit")
+    target = default_limit
+
+    if existing is not None:
+        try:
+            current = int(existing.expression.this)
+            target = min(current, max_limit)
+        except (AttributeError, TypeError, ValueError):
+            target = default_limit
+
+    try:
+        limited = tree.limit(target)
+    except Exception:
+        return tree.sql(dialect=DIALECT)
+    return limited.sql(dialect=DIALECT)
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out

@@ -1,0 +1,188 @@
+import pytest
+
+from retail_agent.safety.sql_guard import check_sql
+
+TABLES = {"orders", "order_items", "products", "users"}
+PII = {"email", "first_name", "last_name", "street_address", "latitude", "longitude"}
+
+
+def guard(sql: str, **kwargs):
+    return check_sql(
+        sql,
+        allowed_tables=TABLES,
+        restricted_columns=PII,
+        default_limit=500,
+        max_limit=5000,
+        **kwargs,
+    )
+
+
+# --- queries that must pass ---
+
+
+def test_simple_select_passes():
+    assert guard("SELECT id, age FROM users LIMIT 10").ok
+
+
+def test_aggregate_over_pii_column_is_allowed():
+    result = guard("SELECT COUNT(DISTINCT email) AS c FROM users")
+    assert result.ok, result.violations
+
+
+def test_cte_name_is_not_treated_as_a_table():
+    sql = """
+        WITH recent AS (SELECT user_id, sale_price FROM order_items)
+        SELECT user_id, SUM(sale_price) AS total FROM recent GROUP BY user_id
+    """
+    assert guard(sql).ok
+
+
+def test_pii_column_in_where_clause_is_allowed():
+    assert guard("SELECT id FROM users WHERE email IS NOT NULL").ok
+
+
+def test_comment_containing_drop_is_harmless():
+    assert guard("SELECT id FROM users -- ; DROP TABLE users").ok
+
+
+def test_fully_qualified_backticked_table_passes():
+    # This is the form the SQL prompt instructs the model to produce. If it
+    # were rejected, every generated query would fail the guard.
+    result = guard(
+        "SELECT id FROM `bigquery-public-data.thelook_ecommerce.users` LIMIT 5"
+    )
+    assert result.ok, result.violations
+
+
+def test_fully_qualified_unquoted_table_passes():
+    assert guard(
+        "SELECT id FROM bigquery-public-data.thelook_ecommerce.users LIMIT 5"
+    ).ok
+
+
+def test_realistic_join_survives_the_rewrite():
+    sql = (
+        "SELECT u.id, SUM(oi.sale_price) AS spend "
+        "FROM `bigquery-public-data.thelook_ecommerce.order_items` oi "
+        "JOIN `bigquery-public-data.thelook_ecommerce.users` u ON u.id = oi.user_id "
+        "WHERE oi.status NOT IN ('Cancelled', 'Returned') "
+        "GROUP BY u.id ORDER BY spend DESC LIMIT 10"
+    )
+    result = guard(sql)
+
+    assert result.ok, result.violations
+    assert "`bigquery-public-data.thelook_ecommerce.users`" in result.sql
+    assert "ORDER BY spend DESC" in result.sql
+    assert "LIMIT 10" in result.sql
+
+
+def test_constant_select_with_no_table_passes():
+    assert guard("SELECT 1 AS x").ok
+
+
+# --- queries that must be rejected ---
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "DELETE FROM users",
+        "UPDATE users SET email = 'x'",
+        "INSERT INTO users (id) VALUES (1)",
+        "DROP TABLE users",
+        "CREATE TABLE evil AS SELECT 1",
+        "TRUNCATE TABLE users",
+    ],
+)
+def test_write_statements_are_rejected(sql):
+    assert not guard(sql).ok
+
+
+def test_stacked_statements_are_rejected():
+    result = guard("SELECT id FROM users; DROP TABLE users")
+    assert not result.ok
+    assert any("one statement" in v for v in result.violations)
+
+
+def test_bare_pii_projection_is_rejected():
+    result = guard("SELECT email FROM users")
+    assert not result.ok
+    assert any("email" in v for v in result.violations)
+
+
+def test_aliased_pii_projection_is_rejected():
+    assert not guard("SELECT email AS contact FROM users").ok
+
+
+def test_qualified_pii_projection_is_rejected():
+    assert not guard("SELECT u.last_name FROM users AS u").ok
+
+
+def test_select_star_is_rejected():
+    result = guard("SELECT * FROM users")
+    assert not result.ok
+    assert any("*" in v for v in result.violations)
+
+
+def test_unknown_table_is_rejected():
+    result = guard("SELECT id FROM billing_secrets")
+    assert not result.ok
+    assert any("billing_secrets" in v for v in result.violations)
+
+
+def test_unparseable_sql_is_rejected_not_raised():
+    result = guard("SELCT id FRM users")
+    assert not result.ok
+    assert result.violations
+
+
+def test_empty_sql_is_rejected():
+    assert not guard("   ").ok
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        ("scalar subquery", "SELECT (SELECT email FROM users LIMIT 1) AS x FROM orders"),
+        ("subquery in FROM", "SELECT e FROM (SELECT email AS e FROM users)"),
+        ("concat is not an aggregate", "SELECT CONCAT(first_name, last_name) AS n FROM users"),
+        ("qualified star", "SELECT u.* FROM users u"),
+    ],
+)
+def test_pii_cannot_be_smuggled_through_nesting(label, sql):
+    assert not guard(sql).ok, label
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        ("union to a hidden table", "SELECT id FROM users UNION ALL SELECT id FROM secrets"),
+        ("delete after a cte", "WITH x AS (SELECT id FROM users) DELETE FROM users"),
+        ("dynamic sql", "EXECUTE IMMEDIATE 'SELECT 1'"),
+        ("data exfiltration", "EXPORT DATA OPTIONS(uri='gs://x') AS SELECT id FROM users"),
+        ("view creation", "CREATE OR REPLACE VIEW v AS SELECT id FROM users"),
+    ],
+)
+def test_evasion_attempts_are_rejected(label, sql):
+    assert not guard(sql).ok, label
+
+
+# --- LIMIT enforcement ---
+
+
+def test_missing_limit_is_injected():
+    result = guard("SELECT id FROM users")
+    assert result.ok
+    assert "LIMIT 500" in result.sql.upper()
+
+
+def test_oversized_limit_is_capped():
+    result = guard("SELECT id FROM users LIMIT 100000")
+    assert result.ok
+    assert "LIMIT 5000" in result.sql.upper()
+
+
+def test_reasonable_limit_is_preserved():
+    result = guard("SELECT id FROM users LIMIT 10")
+    assert result.ok
+    assert "LIMIT 10" in result.sql.upper()
