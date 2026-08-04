@@ -70,6 +70,29 @@ route ─┬─ schema      structural questions, answered from cached metadata
                      └──── repair ──────┘   (budget: 2, held by the graph)
 ```
 
+## Viewing the pipeline in LangGraph Studio
+
+```bash
+uv run langgraph dev
+```
+
+Then open:
+
+```
+https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+```
+
+Studio renders the graph, lets you run a thread against the real BigQuery
+connection, and shows the state after every node — including which SQL the
+guard rejected and how the repair budget was spent.
+
+The graph it loads is `src/retail_agent/agent/studio.py`, which builds the same
+deps the CLI does. It passes no checkpointer, because the Studio server owns
+thread persistence.
+
+Studio does not replace the CLI: the confirmation flow for destructive actions
+(phase 2) is a terminal interaction.
+
 ## Tracing (optional)
 
 Set both `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in `.env` to send
