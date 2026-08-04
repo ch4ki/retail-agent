@@ -1,0 +1,74 @@
+"""Single source of truth for configuration. Everything env-derived lives here."""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Literal
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+Provider = Literal["gemini", "openai", "openrouter", "ollama"]
+
+DEFAULT_MODELS: dict[Provider, str] = {
+    "gemini": "gemini-2.5-flash",
+    "openai": "gpt-4.1-mini",
+    "openrouter": "google/gemini-2.5-flash",
+    "ollama": "llama3.1:8b",
+}
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    # --- LLM ---
+    llm_provider: Provider = "gemini"
+    llm_model: str | None = None
+    llm_temperature: float = 0.0
+    google_api_key: str | None = None
+    openai_api_key: str | None = None
+    openrouter_api_key: str | None = None
+    ollama_base_url: str = "http://localhost:11434"
+
+    # --- BigQuery ---
+    google_cloud_project: str | None = None
+    bq_dataset: str = "bigquery-public-data.thelook_ecommerce"
+    bq_max_bytes_billed: int = 2_000_000_000  # 2 GB per query
+    bq_timeout_seconds: int = 60
+    allowed_tables: frozenset[str] = frozenset(
+        {
+            "orders",
+            "order_items",
+            "products",
+            "users",
+            "inventory_items",
+            "distribution_centers",
+        }
+    )
+
+    # --- Query shaping ---
+    default_row_limit: int = 500
+    max_row_limit: int = 5_000
+
+    # --- Storage ---
+    database_url: str = "postgresql://retail:retail@localhost:5433/retail_agent"
+
+    # --- Safety ---
+    pii_salt: str = "dev-salt-change-me"
+
+    # --- Agent ---
+    repair_budget: int = 2
+    max_analysis_steps: int = 4
+
+    @property
+    def resolved_model(self) -> str:
+        return self.llm_model or DEFAULT_MODELS[self.llm_provider]
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
