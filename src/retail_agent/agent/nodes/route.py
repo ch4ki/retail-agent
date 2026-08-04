@@ -15,12 +15,19 @@ VALID_INTENTS = {"schema", "analyze", "chat"}
 def last_user_message(state: TurnState) -> str:
     for message in reversed(state.get("messages", [])):
         if isinstance(message, HumanMessage):
-            return message_text(message)
+            return message_text(message).strip()
     return ""
 
 
 def route_node(state: TurnState, deps: AgentDeps) -> dict:
     question = last_user_message(state)
+
+    # A turn can arrive with no user message — Studio submits state directly.
+    # Classifying nothing wastes a call and ends with the planner inventing a
+    # step from an empty string.
+    if not question:
+        return {"intent": "chat"}
+
     reply = deps.llm.invoke(
         [SystemMessage(content=ROUTER_PROMPT), HumanMessage(content=question)]
     )

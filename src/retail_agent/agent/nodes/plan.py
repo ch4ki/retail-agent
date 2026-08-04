@@ -14,6 +14,9 @@ from retail_agent.llm.messages import message_text
 
 def plan_node(state: TurnState, deps: AgentDeps) -> dict:
     question = last_user_message(state)
+    if not question:
+        return {"plan": [], "step_index": 0}
+
     max_steps = deps.settings.max_analysis_steps
 
     prompt = PLANNER_PROMPT.format(max_steps=max_steps, schema=render_schema(deps))

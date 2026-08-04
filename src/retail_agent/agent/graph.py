@@ -72,7 +72,11 @@ def _after_route(state: TurnState) -> str:
 
 def _after_draft(state: TurnState) -> str:
     step = _current(state)
-    if step is not None and step.sql:
+    if step is None:
+        # Nothing to draft. draft_sql spends no budget in this case, so
+        # routing back to it would cycle until the recursion limit.
+        return "synthesize"
+    if step.sql:
         return "execute"
     if state.get("repair_budget", 0) > 0:
         return "draft_sql"

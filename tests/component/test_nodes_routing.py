@@ -76,3 +76,42 @@ def test_chat_node_scans_its_output_for_pii(make_deps):
     result = chat_node(state_for("how do I reach them?"), deps)
 
     assert "ada@example.com" not in result["answer"]
+
+
+# Studio lets you submit state directly, so a turn can arrive with no user
+# message. Previously that produced a plan holding one step with an empty
+# question, which then generated SQL for nothing.
+
+
+def test_blank_turn_is_routed_to_chat_without_calling_the_model(make_deps):
+    from retail_agent.agent.state import TurnState
+
+    deps = make_deps([])  # any LLM call would raise "ran out of replies"
+    result = route_node(TurnState(messages=[]), deps)
+
+    assert result["intent"] == "chat"
+    assert deps.llm.prompts == []
+
+
+def test_whitespace_only_question_is_treated_as_blank(make_deps):
+    deps = make_deps([])
+    assert route_node(state_for("   "), deps)["intent"] == "chat"
+
+
+def test_chat_node_asks_for_input_on_a_blank_turn(make_deps):
+    from retail_agent.agent.state import TurnState
+
+    deps = make_deps([])
+    result = chat_node(TurnState(messages=[]), deps)
+
+    assert deps.llm.prompts == [], "no model call for an empty turn"
+    assert result["answer"]
+    assert "?" in result["answer"]
+
+
+def test_planner_never_receives_a_blank_question(make_deps):
+    deps = make_deps(["STEP: something"])
+    result = plan_node(state_for("   "), deps)
+
+    assert result["plan"] == []
+    assert deps.llm.prompts == []

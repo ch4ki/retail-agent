@@ -217,3 +217,24 @@ def test_state_survives_checkpointing(make_deps, source):
 
     assert state["status"] == "ok"
     assert state["frames"]["step_1"].row_count == 2
+
+
+def test_an_empty_plan_terminates_instead_of_looping(make_deps, source):
+    """draft_sql returns nothing when there is no current step and spends no
+    budget, so routing back to it would cycle until the recursion limit."""
+    from retail_agent.agent.graph import _after_draft
+    from retail_agent.agent.state import TurnState
+
+    assert _after_draft(TurnState(plan=[], step_index=0, repair_budget=2)) == "synthesize"
+
+
+def test_blank_turn_runs_end_to_end_without_touching_the_warehouse(make_deps, source):
+    from langchain_core.messages import HumanMessage
+
+    deps = make_deps([])  # no replies queued: any model call fails the test
+    graph = build_graph(deps)
+    state = graph.invoke({"messages": [HumanMessage(content="   ")]})
+
+    assert source.executed == []
+    assert deps.llm.prompts == []
+    assert "?" in state["answer"]
