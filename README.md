@@ -70,6 +70,20 @@ route ─┬─ schema      structural questions, answered from cached metadata
                      └──── repair ──────┘   (budget: 2, held by the graph)
 ```
 
+## Tracing (optional)
+
+Set both `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in `.env` to send
+per-node traces to [LangSmith](https://smith.langchain.com). You get a span per
+graph node — `route`, `plan`, `draft_sql`, `execute`, `synthesize` — plus every
+model call, which is enough to see exactly where a turn went wrong.
+
+The banner tells you when it is on. Enabling it sends prompts and query results
+off the machine; results are PII-masked before the model sees them, so what
+leaves is masked, but it is still your data going to a third party.
+
+Setting only one of the two variables leaves tracing off rather than warning on
+every call.
+
 ## Safety
 
 - **SQL guard** — every query is parsed to an AST before execution. Anything
@@ -91,7 +105,7 @@ route ─┬─ schema      structural questions, answered from cached metadata
 ## Tests
 
 ```bash
-uv run pytest              # 126 tests, no credentials needed
+uv run pytest              # 171 tests, no credentials needed
 uv run pytest -m live      # 4 tests, needs real BigQuery access
 ```
 
@@ -118,7 +132,8 @@ or `ollama`.
 Phase 1 of 4. Built: BigQuery access, SQL guard, PII masking, egress scan,
 bounded self-correction, the turn graph, and the CLI.
 
-Not yet built: observability traces and `/trace`, saved reports with the
-delete-confirmation gate, personas and user preferences (phase 2); the Golden
+LangSmith tracing is wired up and verified. Not yet built: the local
+`traces` table and `/trace` replay, saved reports with the delete-confirmation
+gate, personas and user preferences (phase 2); the Golden
 Bucket of analyst Trios (phase 3); the eval suite (phase 4). Design for all of
 these is in `docs/superpowers/specs/`.

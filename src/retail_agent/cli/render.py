@@ -35,11 +35,21 @@ def render_error(console: Console, message: str, turn_id: str = "") -> None:
     console.print(Panel(f"{message}{suffix}", title="Something went wrong", style="red"))
 
 
-def render_banner(console: Console, provider: str, model: str, project: str) -> None:
+def render_banner(
+    console: Console,
+    provider: str,
+    model: str,
+    project: str,
+    tracing_project: str | None = None,
+) -> None:
+    body = (
+        "Ask about orders, products, customers or revenue.\n"
+        "Type [bold]/help[/bold] for commands, [bold]/quit[/bold] to exit."
+    )
+    if tracing_project:
+        # Prompts leave the machine when this is on, so say so.
+        body += f"\n[dim]Tracing to LangSmith project '{tracing_project}'.[/dim]"
+
     console.print(
-        Panel(
-            "Ask about orders, products, customers or revenue.\n"
-            "Type [bold]/help[/bold] for commands, [bold]/quit[/bold] to exit.",
-            title=f"Retail Analysis Agent · {provider}:{model} · {project}",
-        )
+        Panel(body, title=f"Retail Analysis Agent · {provider}:{model} · {project}")
     )

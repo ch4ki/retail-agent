@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     # --- Storage ---
     database_url: str = "postgresql://retail:retail@localhost:5433/retail_agent"
 
+    # --- Observability ---
+    # Needs both the flag and the key; see obs.tracing.configure_tracing.
+    langsmith_tracing: bool = False
+    langsmith_api_key: str | None = None
+    langsmith_project: str = "retail-agent"
+    langsmith_endpoint: str | None = None
+
     # --- Safety ---
     pii_salt: str = "dev-salt-change-me"
 

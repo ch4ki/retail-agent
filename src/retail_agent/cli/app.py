@@ -19,6 +19,7 @@ from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
 from retail_agent.llm.errors import describe_llm_error
 from retail_agent.llm.provider import MissingCredentialsError, build_llm
+from retail_agent.obs.tracing import configure_tracing
 from retail_agent.safety.pii import PiiPolicy
 from retail_agent.store.db import run_migrations
 
@@ -76,6 +77,10 @@ def _chat(args) -> int:
     console = Console()
     settings = get_settings()
 
+    # Must happen before build_llm: the tracer reads os.environ when the model
+    # is constructed, not when it is called.
+    tracing = configure_tracing(settings)
+
     try:
         deps = AgentDeps(
             settings=settings,
@@ -102,6 +107,7 @@ def _chat(args) -> int:
         settings.llm_provider,
         settings.resolved_model,
         settings.google_cloud_project or "no project set",
+        tracing_project=settings.langsmith_project if tracing else None,
     )
 
     with _checkpointer(console, settings.database_url) as saver:
