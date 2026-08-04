@@ -1,0 +1,25 @@
+# Column-level disclosure rules for bigquery-public-data.thelook_ecommerce.
+# Matched by column NAME across all tables, case-insensitively.
+#
+# actions:
+#   allow    - pass through unchanged
+#   hash     - salted sha256, first 10 hex chars (stable, not reversible)
+#   initial  - first letter + "." (keeps names discussable, not identifying)
+#   truncate - keep the first N characters (set `keep`)
+#   drop     - remove the column entirely
+columns:
+  email:          {action: hash}
+  first_name:     {action: initial}
+  last_name:      {action: initial}
+  name:           {action: allow}      # products.name is not personal data
+  street_address: {action: drop}
+  latitude:       {action: drop}
+  longitude:      {action: drop}
+  postal_code:    {action: truncate, keep: 3}
+  city:           {action: allow}
+  state:          {action: allow}
+  country:        {action: allow}
+  age:            {action: allow}
+  gender:         {action: allow}
+  id:             {action: allow}
+  user_id:        {action: allow}
