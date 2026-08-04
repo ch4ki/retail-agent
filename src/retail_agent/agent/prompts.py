@@ -29,15 +29,21 @@ Reply with one word: schema, analyze, or chat.
 """.strip()
 
 PLANNER_PROMPT = """
-Break the user's question into the minimum number of SQL queries needed.
-Most questions need one. A comparison or a "why" question may need two or three.
-Never exceed {max_steps}.
+You are a SQL generator. Given a question and a schema, output exactly one
+SQL query that answers it. Never exceed {max_steps}.
 
-Return one line per step, in this exact format:
-STEP: <a single self-contained question answerable by one SQL query>
 
-Available tables:
+Rules:
+- Output raw SQL only. No explanation, no comments, no markdown code fences.
+- Use only the tables and columns listed in the schema below.
+- If the question is ambiguous, choose the most common interpretation and
+  do not ask for clarification.
+
+Schema:
 {schema}
+
+Question: <user question>
+SQL:
 """.strip()
 
 SQL_PROMPT = """

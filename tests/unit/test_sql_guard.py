@@ -242,3 +242,76 @@ def test_reasonable_limit_is_preserved():
     result = guard("SELECT id FROM users LIMIT 10")
     assert result.ok
     assert "LIMIT 10" in result.sql.upper()
+
+
+# The prompt asks the model to fully qualify tables. Models forget, and
+# BigQuery then rejects the query. Qualification is mechanical, so the guard
+# does it rather than spending repair budget on it.
+
+DATASET = "bigquery-public-data.thelook_ecommerce"
+
+
+def qualified(sql: str):
+    return check_sql(
+        sql,
+        allowed_tables=TABLES,
+        restricted_columns=PII,
+        default_limit=500,
+        max_limit=5000,
+        qualify_with=DATASET,
+    )
+
+
+def test_bare_table_is_qualified():
+    # sqlglot backticks only the hyphenated project part, which BigQuery
+    # accepts, so assert on the parts rather than one exact rendering.
+    result = qualified("SELECT id FROM users LIMIT 5")
+
+    assert result.ok, result.violations
+    assert "bigquery-public-data" in result.sql
+    assert "thelook_ecommerce.users" in result.sql
+
+
+def test_the_exact_query_that_failed_against_bigquery():
+    sql = (
+        "SELECT p.name, COUNT(oi.id) AS sales_count "
+        "FROM order_items AS oi JOIN products AS p ON oi.product_id = p.id "
+        "WHERE EXTRACT(MONTH FROM oi.created_at) = 3 "
+        "GROUP BY p.name ORDER BY sales_count DESC LIMIT 1"
+    )
+    result = qualified(sql)
+
+    assert result.ok, result.violations
+    assert "thelook_ecommerce.order_items" in result.sql
+    assert "thelook_ecommerce.products" in result.sql
+    assert "LIMIT 1" in result.sql
+
+
+def test_already_qualified_tables_are_untouched():
+    result = qualified(
+        "SELECT id FROM `bigquery-public-data.thelook_ecommerce.users` LIMIT 5"
+    )
+    assert result.ok
+    assert result.sql.count("thelook_ecommerce") == 1
+
+
+def test_cte_names_are_never_qualified():
+    sql = (
+        "WITH recent AS (SELECT user_id FROM order_items) "
+        "SELECT user_id FROM recent LIMIT 10"
+    )
+    result = qualified(sql)
+
+    assert result.ok, result.violations
+    assert "thelook_ecommerce.recent" not in result.sql
+    assert "thelook_ecommerce.order_items" in result.sql
+
+
+def test_qualification_is_optional():
+    result = check_sql(
+        "SELECT id FROM users",
+        allowed_tables=TABLES,
+        restricted_columns=PII,
+    )
+    assert result.ok
+    assert "thelook_ecommerce" not in result.sql

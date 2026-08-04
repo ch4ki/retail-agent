@@ -37,6 +37,7 @@ def draft_sql_node(state: TurnState, deps: AgentDeps) -> dict:
         restricted_columns=deps.policy.restricted_columns(),
         default_limit=deps.settings.default_row_limit,
         max_limit=deps.settings.max_row_limit,
+        qualify_with=deps.settings.bq_dataset,
     )
 
     attempts = list(state.get("sql_attempts", []))

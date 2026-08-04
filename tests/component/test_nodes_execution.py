@@ -181,3 +181,14 @@ def test_all_steps_succeeding_stays_ok(make_deps):
     }
 
     assert synthesize_node(state, deps)["status"] == "ok"
+
+
+def test_unqualified_tables_are_qualified_before_execution(make_deps, source):
+    """A model that forgets the dataset prefix gets a BigQuery 400. The guard
+    fixes it rather than spending a repair attempt on it."""
+    deps = make_deps(["SELECT id FROM users"], src=source)
+    result = draft_sql_node(analysing_state(), deps)
+
+    sql = result["plan"][0].sql
+    assert "thelook_ecommerce.users" in sql
+    assert result["sql_attempts"][-1].violations == ()

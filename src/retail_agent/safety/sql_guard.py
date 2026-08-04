@@ -59,8 +59,14 @@ def check_sql(
     restricted_columns: Collection[str],
     default_limit: int = 500,
     max_limit: int = 5_000,
+    qualify_with: str | None = None,
 ) -> GuardResult:
-    """Validate and normalise a query. Never raises on bad input."""
+    """Validate and normalise a query. Never raises on bad input.
+
+    `qualify_with` is a dataset like "project.dataset". Allowed tables that
+    arrive unqualified are rewritten to use it, because BigQuery rejects bare
+    table names and that is a mechanical fix, not one worth a repair attempt.
+    """
     if not sql or not sql.strip():
         return GuardResult(False, sql, ("Query is empty.",))
 
@@ -75,13 +81,20 @@ def check_sql(
         )
 
     tree = statements[0]
+    cte_names = {
+        cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE) if cte.alias_or_name
+    }
+
     violations: list[str] = []
     violations += _check_read_only(tree)
-    violations += _check_tables(tree, allowed_tables)
+    violations += _check_tables(tree, allowed_tables, cte_names)
     violations += _check_projections(tree, restricted_columns)
 
     if violations:
         return GuardResult(False, sql, tuple(violations))
+
+    if qualify_with:
+        _qualify_tables(tree, qualify_with, cte_names)
 
     return GuardResult(True, _apply_limit(tree, default_limit, max_limit), ())
 
@@ -97,10 +110,9 @@ def _check_read_only(tree: exp.Expression) -> list[str]:
     return []
 
 
-def _check_tables(tree: exp.Expression, allowed: Collection[str]) -> list[str]:
-    cte_names = {
-        cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE) if cte.alias_or_name
-    }
+def _check_tables(
+    tree: exp.Expression, allowed: Collection[str], cte_names: set[str]
+) -> list[str]:
     allowed_lower = {t.lower() for t in allowed}
 
     violations = []
@@ -163,6 +175,22 @@ def _inside_counting_aggregate(column: exp.Expression, root: exp.Expression) -> 
             return False
         node = node.parent
     return False
+
+
+def _qualify_tables(
+    tree: exp.Expression, dataset: str, cte_names: set[str]
+) -> None:
+    """Prefix bare table references with the configured project and dataset."""
+    parts = dataset.split(".")
+    catalog, db = (parts[0], parts[1]) if len(parts) == 2 else ("", parts[-1])
+
+    for table in tree.find_all(exp.Table):
+        name = (table.name or "").lower()
+        if not name or name in cte_names or table.args.get("db"):
+            continue
+        table.set("db", exp.to_identifier(db))
+        if catalog:
+            table.set("catalog", exp.to_identifier(catalog))
 
 
 def _apply_limit(tree: exp.Expression, default_limit: int, max_limit: int) -> str:
