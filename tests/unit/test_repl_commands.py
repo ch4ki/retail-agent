@@ -86,6 +86,10 @@ class FakeDeps:
         self.preferences = InMemoryPreferenceStore()
         self.signals = InMemorySignalStore()
 
+        from retail_agent.store.definitions import InMemoryDefinitionStore
+
+        self.definitions = InMemoryDefinitionStore()
+
         from retail_agent.knowledge.seeds import SEED_TRIOS
 
         self.trios = list(SEED_TRIOS)
@@ -121,6 +125,8 @@ def run(script):
         "/prefs accept",
         "/prefs decline",
         "/trios",
+        "/definitions",
+        "/definitions forget loyal",
     ],
 )
 def test_every_command_runs_without_raising(command):
@@ -276,6 +282,24 @@ def test_declining_changes_nothing_and_stops_asking():
 
     asked_again = _ask(deps, PROPOSAL_THRESHOLD)
     assert "/prefs accept" not in asked_again.text(), "not asked again so soon"
+
+
+def test_definitions_starts_empty_and_says_it_will_ask():
+    console, _, _ = run(["/definitions"])
+
+    assert "not defined any terms" in console.text()
+
+
+def test_a_remembered_definition_can_be_forgotten():
+    """So a user who answered carelessly can be asked again."""
+    console = FakeConsole(["/definitions forget loyal"])
+    deps = FakeDeps()
+    deps.definitions.remember(user_id="dana", term="loyal", definition="3+ orders")
+
+    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+
+    assert deps.definitions.lookup(user_id="dana", term="loyal") is None
+    assert "ask next time" in console.text()
 
 
 def test_trios_lists_what_the_agent_can_settle():

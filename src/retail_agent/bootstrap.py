@@ -14,6 +14,7 @@ from retail_agent.agent.deps import AgentDeps
 from retail_agent.knowledge.seeds import SEED_TRIOS
 from retail_agent.obs.traces import build_trace_store
 from retail_agent.safety.pii import PiiPolicy
+from retail_agent.store.definitions import build_definition_store
 from retail_agent.store.learning import InMemorySignalStore
 from retail_agent.store.personas import build_persona_store
 from retail_agent.store.preferences import build_preference_store
@@ -43,6 +44,7 @@ def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
         personas=build_persona_store(settings),
         preferences=build_preference_store(settings),
         signals=InMemorySignalStore(),
+        definitions=build_definition_store(settings),
         reports=build_report_store(
             settings,
             on_degraded=warn(

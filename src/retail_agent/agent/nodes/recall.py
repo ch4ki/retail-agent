@@ -1,9 +1,17 @@
-"""Retrieve the analysts' judgement before planning anything.
+"""Retrieve the analysts' judgement, then find out what is still undecided.
 
 A node rather than a call inside `plan`, for the same reason the confirmation
 gate is an edge: it belongs to the shape of the turn. `/trace` then shows which
-trios were consulted and which terms the agent had to decide for itself, which
-is exactly what you need when an executive disputes a number.
+trios were consulted, which definitions came from the user, and which terms the
+agent had to decide alone — exactly what you need when an executive disputes a
+number.
+
+Precedence, highest first:
+
+1. **Trios.** A reviewed, versioned decision by the people who own the numbers.
+2. **The user's own definitions**, given when the agent asked and nothing in the
+   corpus covered it. Fills gaps; never overrides.
+3. **Nothing** — the agent asks. If the user declines, it assumes and says so.
 """
 
 from __future__ import annotations
@@ -15,17 +23,17 @@ from retail_agent.agent.nodes.route import last_user_message
 from retail_agent.agent.state import TurnState
 from retail_agent.knowledge.retrieval import retrieve
 from retail_agent.knowledge.trios import unresolved
+from retail_agent.store.definitions import remembered
 
 log = logging.getLogger(__name__)
 
 
 def recall_node(state: TurnState, deps: AgentDeps) -> dict:
-    """Find the trios that bear on this question, and note what none of them
-    settle.
+    """Find what settles this question, and what is left over.
 
     An empty corpus is a valid state, and the important behaviour holds anyway:
-    every business term is then unresolved, so the agent says what it assumed
-    rather than quietly choosing.
+    every business term is then unsettled, so the agent asks — and failing an
+    answer, says what it assumed rather than quietly choosing.
     """
     question = last_user_message(state)
     if not question:
@@ -37,10 +45,67 @@ def recall_node(state: TurnState, deps: AgentDeps) -> dict:
         log.warning("trio retrieval failed (%s); answering without it", err)
         found = []
 
+    open_terms = unresolved(question, found)
+    known = remembered(deps.definitions, state.get("user_id", ""), open_terms)
+
+    # Declined this turn: the user pressed enter rather than defining it, so it
+    # goes to the assumption path instead of being asked about again.
+    declined = set(state.get("declined_terms", []))
+    still_open = [t for t in open_terms if t not in known and t not in declined]
+
+    # Only ask if the answer can be kept. Without somewhere to remember it, the
+    # agent would ask the same person the same question every turn — which is
+    # worse than assuming and saying so.
+    if deps.definitions is None:
+        return {
+            "trio_ids": [trio.id for trio in found],
+            "personal_terms": [],
+            "assumed_terms": [t for t in open_terms if t not in known],
+            "pending_term": "",
+        }
+
     return {
         "trio_ids": [trio.id for trio in found],
-        "assumed_terms": unresolved(question, found),
+        "personal_terms": sorted(known),
+        # Anything the user declined is assumed and disclosed.
+        "assumed_terms": [t for t in open_terms if t in declined],
+        "pending_term": still_open[0] if still_open else "",
     }
+
+
+def await_definition(state: TurnState) -> dict:
+    """A deliberate no-op. The graph breaks *before* this node; the CLI fills
+    `definition_reply` in as though this node had produced it."""
+    return {}
+
+
+def apply_definition(state: TurnState, deps: AgentDeps) -> dict:
+    """Save what the user said, or record that they declined.
+
+    Either way the term stops being pending, so the loop back through `recall`
+    makes progress and cannot ask about the same term twice.
+    """
+    term = state.get("pending_term", "")
+    if not term:
+        return {}
+
+    reply = (state.get("definition_reply") or "").strip()
+    if not reply:
+        # Pressing enter is a valid answer: let the agent choose, and say so.
+        return {
+            "declined_terms": [*state.get("declined_terms", []), term],
+            "pending_term": "",
+            "definition_reply": "",
+        }
+
+    try:
+        deps.definitions.remember(
+            user_id=state.get("user_id", ""), term=term, definition=reply
+        )
+    except Exception as err:  # not worth failing a turn the user just unblocked
+        log.warning("could not save the definition of %r (%s)", term, err)
+
+    return {"pending_term": "", "definition_reply": ""}
 
 
 def recalled(state: TurnState, deps: AgentDeps) -> list:
@@ -51,3 +116,10 @@ def recalled(state: TurnState, deps: AgentDeps) -> list:
     """
     wanted = set(state.get("trio_ids", []))
     return [trio for trio in deps.trios if trio.id in wanted]
+
+
+def personal(state: TurnState, deps: AgentDeps) -> dict[str, str]:
+    """The user's own definitions in play this turn."""
+    return remembered(
+        deps.definitions, state.get("user_id", ""), state.get("personal_terms", [])
+    )

@@ -7,12 +7,13 @@ import re
 from langchain_core.messages import HumanMessage
 
 from retail_agent.agent.deps import AgentDeps
-from retail_agent.agent.nodes.recall import recalled
+from retail_agent.agent.nodes.recall import personal, recalled
 from retail_agent.agent.nodes.schema_qa import render_schema
 from retail_agent.agent.prompts import REPAIR_PROMPT, SQL_PROMPT
 from retail_agent.agent.state import AnalysisStep, SqlAttempt, TurnState
 from retail_agent.llm.messages import message_text
 from retail_agent.knowledge.trios import definitions_block, sql_assumption_note
+from retail_agent.store.definitions import personal_definitions_block
 from retail_agent.safety.sql_guard import check_sql
 
 FENCE = re.compile(r"^```(?:sql)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
@@ -90,7 +91,7 @@ def _prompt_for(state: TurnState, deps: AgentDeps, step: AnalysisStep) -> str:
         schema=schema,
         dataset=deps.settings.bq_dataset,
         prior_results=_prior_results(state),
-        definitions=definitions_block(recalled(state, deps)),
+        definitions=_all_definitions(state, deps),
         assumptions=sql_assumption_note(state.get("assumed_terms", [])),
     )
 
@@ -111,3 +112,16 @@ def _prior_results(state: TurnState) -> str:
 def _strip_fences(text: str) -> str:
     """Remove a ```sql ... ``` wrapper if the model added one despite being told not to."""
     return FENCE.sub("", text).strip()
+
+
+def _all_definitions(state: TurnState, deps: AgentDeps) -> str:
+    """Agreed definitions first, then the user's own.
+
+    Order matters: if both cover a term the corpus wins, and the model reads
+    the reviewed decision before the personal one.
+    """
+    blocks = [
+        definitions_block(recalled(state, deps)),
+        personal_definitions_block(personal(state, deps)),
+    ]
+    return "\n\n".join(b for b in blocks if b)

@@ -186,6 +186,10 @@ class TurnState(TypedDict, total=False):
     confirmation: str
     trio_ids: list[str]
     assumed_terms: list[str]
+    personal_terms: list[str]
+    pending_term: str
+    definition_reply: str
+    declined_terms: list[str]
 
 
 def fresh_scratch(*, repair_budget: int, diagnose_budget: int = 1) -> dict:
@@ -218,6 +222,10 @@ def fresh_scratch(*, repair_budget: int, diagnose_budget: int = 1) -> dict:
         "confirmation": "",
         "trio_ids": [],
         "assumed_terms": [],
+        "personal_terms": [],
+        "pending_term": "",
+        "definition_reply": "",
+        "declined_terms": [],
     }
 
 

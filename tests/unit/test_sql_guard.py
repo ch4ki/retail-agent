@@ -385,3 +385,38 @@ def test_the_rejection_says_what_to_do_instead():
 def test_an_email_address_in_a_string_is_not_a_parameter():
     """`@` is common in ordinary values; only a bound parameter is a problem."""
     assert guard("SELECT id FROM users WHERE email = 'ada@example.com'").ok
+
+
+# TIMESTAMP_SUB with a calendar part. Found live: asked "how many customers are
+# at risk", the model wrote `TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 4
+# MONTH)`, BigQuery rejected it, and the model wrote the identical query twice
+# more — the raw 400 was not enough to tell it what to do instead.
+
+
+@pytest.mark.parametrize("part", ["MONTH", "QUARTER", "YEAR"])
+def test_timestamp_arithmetic_with_a_calendar_part_is_rejected(part):
+    """BigQuery allows only MICROSECOND..DAY on TIMESTAMP_SUB/ADD. MONTH and
+    friends need DATE_SUB on a DATE."""
+    result = guard(
+        f"SELECT id FROM users "
+        f"WHERE created_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 {part})"
+    )
+
+    assert not result.ok
+    assert any("DAY" in v for v in result.violations), result.violations
+
+
+@pytest.mark.parametrize("part", ["DAY", "HOUR", "MINUTE", "SECOND"])
+def test_timestamp_arithmetic_with_a_time_part_is_allowed(part):
+    sql = (
+        f"SELECT id FROM users "
+        f"WHERE created_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 {part})"
+    )
+    assert guard(sql).ok, guard(sql).violations
+
+
+def test_date_sub_with_a_month_is_fine():
+    """The rule is about TIMESTAMP arithmetic, not about months."""
+    assert guard(
+        "SELECT id FROM users WHERE created_at > DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)"
+    ).ok

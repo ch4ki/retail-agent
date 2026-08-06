@@ -30,6 +30,7 @@ from retail_agent.cli.render import (
     render_persona,
     render_personas,
     render_preferences,
+    render_definitions,
     render_stored_trace,
     render_trace,
     render_trios,
@@ -50,6 +51,7 @@ HELP = """
   /trace   explain the last turn; /trace <id> reads a stored one back
   /metrics first-pass SQL validity, self-correction, latency per node
   /trios   the analyst definitions the agent answers from
+  /definitions what you have told it terms mean; forget <term> to reset
   /prefs   answer format, depth, table size; accept|decline a suggestion
   /persona list|show|activate <name> — change the tone, no restart
   /quit    exit (/exit works too)
@@ -167,6 +169,9 @@ def _repl(console, graph, deps, user, session_id) -> int:
         if question.startswith("/persona"):
             _persona(console, deps, user, question)
             continue
+        if question.startswith("/definitions"):
+            _definitions(console, deps, user, question)
+            continue
         if question == "/trios":
             render_trios(console, deps.trios)
             continue
@@ -261,6 +266,23 @@ def _learn(deps, user, question) -> None:
         logging.getLogger(__name__).debug("signal not recorded: %s", err)
 
 
+def _definitions(console, deps, user, command) -> None:
+    """`/definitions` lists what you told the agent; `/definitions forget <term>`
+    drops one so it asks again."""
+    parts = command.split()
+    if len(parts) >= 3 and parts[1] == "forget":
+        term = " ".join(parts[2:])
+        dropped = deps.definitions.forget(user_id=user, term=term)
+        console.print(
+            f"Forgot {term!r}; I will ask next time."
+            if dropped
+            else f"Nothing remembered for {term!r}."
+        )
+        return
+
+    render_definitions(console, deps.definitions.list_definitions(user_id=user))
+
+
 def _persona(console, deps, user, command) -> None:
     """`/persona`, `/persona show`, `/persona activate <name> [version]`.
 
@@ -326,6 +348,20 @@ def _answer(console, graph, deps, user, session_id, question) -> dict | None:
         # The graph breaks before `await_confirmation` when a delete is staged.
         # Show the manifest, take the answer, and fill it in as though that node
         # had produced it.
+        # Two kinds of pause, both breakpoints declared in graph.py: a delete
+        # awaiting a typed token, and a term awaiting a definition.
+        while graph.get_state(config).next == ("await_definition",):
+            values = graph.get_state(config).values
+            console.print(
+                f"\n[cyan]{ask_for_definition(values['pending_term'], DEFINITION_HINTS.get(values['pending_term'], 'it is undefined'))}[/cyan]"
+            )
+            reply = console.input("[bold cyan]definition ›[/bold cyan] ").strip()
+            graph.update_state(
+                config, {"definition_reply": reply}, as_node="await_definition"
+            )
+            with console.status("thinking…"):
+                state = graph.invoke(None, config)
+
         while graph.get_state(config).next == ("await_confirmation",):
             render_manifest(console, graph.get_state(config).values["pending_action"])
             typed = console.input("[bold yellow]›[/bold yellow] ").strip()

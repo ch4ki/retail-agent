@@ -88,6 +88,7 @@ def check_sql(
     violations: list[str] = []
     violations += _check_read_only(tree)
     violations += _check_no_parameters(tree)
+    violations += _check_timestamp_intervals(tree)
     violations += _check_tables(tree, allowed_tables, cte_names)
     violations += _check_projections(tree, restricted_columns)
 
@@ -128,6 +129,37 @@ def _check_no_parameters(tree: exp.Expression) -> list[str]:
             "rather than `>= @threshold`). If the value is a judgement call, "
             "pick a defensible one; it will be stated in the answer."
         ]
+    return []
+
+
+# BigQuery accepts only MICROSECOND..DAY on TIMESTAMP_SUB / TIMESTAMP_ADD.
+# MONTH, QUARTER and YEAR are a 400, and the raw error does not say what to do
+# instead — observed live, the same rejected query written three times.
+_CALENDAR_PARTS = frozenset({"MONTH", "QUARTER", "YEAR", "WEEK", "ISOYEAR"})
+_TIMESTAMP_MATH = ("TimestampSub", "TimestampAdd")
+TIMESTAMP_MATH_NODES: tuple[type[exp.Expression], ...] = tuple(
+    getattr(exp, name) for name in _TIMESTAMP_MATH if hasattr(exp, name)
+)
+
+
+def _check_timestamp_intervals(tree: exp.Expression) -> list[str]:
+    """Catch a calendar interval on TIMESTAMP arithmetic before BigQuery does."""
+    if not TIMESTAMP_MATH_NODES:
+        return []
+
+    for node in tree.walk():
+        if not isinstance(node, TIMESTAMP_MATH_NODES):
+            continue
+        # `unit` is a Var node, not a string, so read its name rather than
+        # coercing the node.
+        unit = node.args.get("unit")
+        name = (getattr(unit, "name", "") or str(unit or "")).upper()
+        if name in _CALENDAR_PARTS:
+            return [
+                "TIMESTAMP_SUB and TIMESTAMP_ADD accept only MICROSECOND "
+                "through DAY. Express the period in DAY (90 DAY rather than 3 "
+                "MONTH), or use DATE_SUB on a DATE column."
+            ]
     return []
 
 

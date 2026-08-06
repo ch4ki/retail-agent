@@ -17,7 +17,11 @@ from retail_agent.agent.nodes.chat import chat_node
 from retail_agent.agent.nodes.diagnose import diagnose_node
 from retail_agent.agent.nodes.execute import execute_node
 from retail_agent.agent.nodes.plan import plan_node
-from retail_agent.agent.nodes.recall import recall_node
+from retail_agent.agent.nodes.recall import (
+    apply_definition,
+    await_definition,
+    recall_node,
+)
 from retail_agent.agent.nodes.report_ops import (
     apply_delete,
     await_confirmation,
@@ -42,6 +46,8 @@ def build_graph(deps: AgentDeps, checkpointer=None):
     node("schema", partial(schema_node, deps=deps))
     node("chat", partial(chat_node, deps=deps))
     node("recall", partial(recall_node, deps=deps))
+    node("await_definition", await_definition)
+    node("apply_definition", partial(apply_definition, deps=deps))
     node("plan", partial(plan_node, deps=deps))
     node("report_ops", partial(report_ops_node, deps=deps))
     node("await_confirmation", await_confirmation)
@@ -75,7 +81,18 @@ def build_graph(deps: AgentDeps, checkpointer=None):
     )
     builder.add_edge("await_confirmation", "apply_delete")
     builder.add_edge("apply_delete", END)
-    builder.add_edge("recall", "plan")
+    # Asking what a term means is a breakpoint, like the delete confirmation:
+    # declared here rather than inside a node, and the node that acts on the
+    # reply sits on the far side of it. The loop back through `recall` is what
+    # lets a second undefined term be asked about after the first is settled;
+    # `apply_definition` always clears `pending_term`, so it terminates.
+    builder.add_conditional_edges(
+        "recall",
+        _needs_definition,
+        {"await_definition": "await_definition", "plan": "plan"},
+    )
+    builder.add_edge("await_definition", "apply_definition")
+    builder.add_edge("apply_definition", "recall")
     builder.add_edge("plan", "draft_sql")
 
     builder.add_conditional_edges(
@@ -100,7 +117,7 @@ def build_graph(deps: AgentDeps, checkpointer=None):
     # rendering, and so the node before it never re-executes on resume.
     return builder.compile(
         checkpointer=checkpointer,
-        interrupt_before=["await_confirmation"],
+        interrupt_before=["await_confirmation", "await_definition"],
     )
 
 
@@ -143,9 +160,16 @@ def _describe(name: str, state: TurnState) -> str:
         return f"{len(state.get('plan', []))} step(s)"
     if name == "recall":
         ids = state.get("trio_ids", [])
-        assumed = state.get("assumed_terms", [])
-        found = f"{len(ids)} trio(s): {', '.join(ids)}" if ids else "no trio matched"
-        return f"{found}; assuming: {', '.join(assumed)}" if assumed else found
+        parts = [f"{len(ids)} trio(s): {', '.join(ids)}" if ids else "no trio matched"]
+        if state.get("personal_terms"):
+            parts.append(f"user-defined: {', '.join(state['personal_terms'])}")
+        if state.get("pending_term"):
+            parts.append(f"asking about: {state['pending_term']}")
+        if state.get("assumed_terms"):
+            parts.append(f"assuming: {', '.join(state['assumed_terms'])}")
+        return "; ".join(parts)
+    if name == "apply_definition":
+        return f"defined {state.get('pending_term') or 'the term'}"
     if name == "diagnose":
         return "empty result — redrafting to match more loosely"
     if name in {"draft_sql", "execute"}:
@@ -182,6 +206,11 @@ def _after_route(state: TurnState) -> str:
     if intent == "report_op":
         return "report_ops"
     return "recall"
+
+
+def _needs_definition(state: TurnState) -> str:
+    """A term nothing settles means the user is asked before anything runs."""
+    return "await_definition" if state.get("pending_term") else "plan"
 
 
 def _needs_confirmation(state: TurnState) -> str:

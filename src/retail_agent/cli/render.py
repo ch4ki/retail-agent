@@ -274,3 +274,24 @@ def render_trios(console: Console, trios) -> None:
         f"[dim]{len(live)} trio(s). A term with no entry here is stated as an "
         f"assumption in the answer.[/dim]"
     )
+
+
+def render_definitions(console: Console, definitions) -> None:
+    """What this user has told the agent, and how to change it.
+
+    Shown separately from `/trios` on purpose: these are one person's working
+    definitions, not decisions the analytics team agreed.
+    """
+    if not definitions:
+        console.print(
+            "You have not defined any terms yet. I will ask when one comes up."
+        )
+        return
+
+    table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+    table.add_column("term")
+    table.add_column("your definition", overflow="fold")
+    for entry in definitions:
+        table.add_row(entry.term, entry.definition)
+    console.print(table)
+    console.print("[dim]/definitions forget <term> to be asked again[/dim]")

@@ -192,3 +192,16 @@ class PreferenceRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class UserDefinitionRow(Base):
+    """What one user told the agent a term means. Personal, not the corpus."""
+
+    __tablename__ = "user_definitions"
+
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    term: Mapped[str] = mapped_column(String, primary_key=True)
+    definition: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
