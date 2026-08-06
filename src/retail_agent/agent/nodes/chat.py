@@ -6,10 +6,11 @@ from langchain_core.messages import AIMessage, SystemMessage
 
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.nodes.route import last_user_message
-from retail_agent.agent.prompts import CHAT_PROMPT, PERSONA_DEFAULT, SAFETY_RULES
+from retail_agent.agent.prompts import CHAT_PROMPT, SAFETY_RULES
 from retail_agent.agent.state import TurnState
 from retail_agent.llm.messages import message_text
 from retail_agent.safety.egress import scan_text
+from retail_agent.store.personas import active_body
 
 
 BLANK_TURN_REPLY = (
@@ -27,7 +28,7 @@ def chat_node(state: TurnState, deps: AgentDeps) -> dict:
         }
 
     system = SystemMessage(
-        content=CHAT_PROMPT.format(persona=PERSONA_DEFAULT, safety=SAFETY_RULES)
+        content=CHAT_PROMPT.format(persona=active_body(deps.personas), safety=SAFETY_RULES)
     )
     reply = deps.llm.invoke([system, *state.get("messages", [])])
     scanned = scan_text(message_text(reply))

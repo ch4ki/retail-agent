@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.nodes.route import last_user_message, render_history
 from retail_agent.agent.prompts import (
-    PERSONA_DEFAULT,
     REPORT_BODY_PROMPT,
     REPORT_OP_PROMPT,
     SAFETY_RULES,
@@ -25,6 +24,7 @@ from retail_agent.agent.prompts import (
 from retail_agent.agent.state import PendingAction, TurnState
 from retail_agent.llm.messages import message_text
 from retail_agent.safety.egress import scan_text
+from retail_agent.store.personas import active_body
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ def _save(state: TurnState, deps: AgentDeps, op: ReportOp) -> dict:
         [
             HumanMessage(
                 content=REPORT_BODY_PROMPT.format(
-                    persona=PERSONA_DEFAULT, safety=SAFETY_RULES, history=history
+                    persona=active_body(deps.personas), safety=SAFETY_RULES, history=history
                 )
             )
         ]

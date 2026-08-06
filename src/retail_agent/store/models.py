@@ -13,11 +13,13 @@ from datetime import datetime
 from sqlalchemy import (
     ARRAY,
     BigInteger,
+    Boolean,
     DateTime,
     Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -135,4 +137,35 @@ class TurnEventRow(Base):
     __table_args__ = (
         Index("turn_events_turn_idx", "turn_id", "seq"),
         Index("turn_events_node_idx", "node"),
+    )
+
+
+class PersonaRow(Base):
+    """One row per version. Editing appends; nothing is overwritten, because a
+    rollback is only possible if the previous body still exists."""
+
+    __tablename__ = "personas"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    updated_by: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="personas_name_version_key"),
+        # At most one active persona, enforced by the database rather than by
+        # remembering to clear the old one first.
+        Index(
+            "personas_single_active_idx",
+            "is_active",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
     )

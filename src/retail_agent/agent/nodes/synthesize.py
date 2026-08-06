@@ -6,10 +6,11 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.nodes.route import last_user_message
-from retail_agent.agent.prompts import PERSONA_DEFAULT, SAFETY_RULES, SYNTHESIS_PROMPT
+from retail_agent.agent.prompts import SAFETY_RULES, SYNTHESIS_PROMPT
 from retail_agent.agent.state import TurnState
 from retail_agent.llm.messages import message_text
 from retail_agent.safety.egress import scan_text
+from retail_agent.store.personas import active_body
 
 
 def synthesize_node(state: TurnState, deps: AgentDeps) -> dict:
@@ -42,7 +43,7 @@ def synthesize_node(state: TurnState, deps: AgentDeps) -> dict:
         )
 
     prompt = SYNTHESIS_PROMPT.format(
-        persona=PERSONA_DEFAULT,
+        persona=active_body(deps.personas),
         safety=SAFETY_RULES,
         question=question,
         results=results,

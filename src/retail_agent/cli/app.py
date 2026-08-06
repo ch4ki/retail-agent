@@ -20,6 +20,8 @@ from retail_agent.cli.render import (
     render_error,
     render_manifest,
     render_metrics,
+    render_persona,
+    render_personas,
     render_stored_trace,
     render_trace,
 )
@@ -101,6 +103,7 @@ def _chat(args) -> int:
             source=BigQuerySource(settings),
             policy=PiiPolicy.default(),
             traces=build_trace_store(settings),
+            personas=build_persona_store(settings),
             reports=build_report_store(
                 settings,
                 on_degraded=lambda: console.print(
@@ -185,6 +188,9 @@ def _repl(console, graph, deps, user, session_id) -> int:
         if question.startswith("/trace"):
             _trace(console, deps, user, last_turn, question)
             continue
+        if question.startswith("/persona"):
+            _persona(console, deps, user, question)
+            continue
         if question == "/metrics":
             render_metrics(console, deps.traces.metrics(owner_id=user))
             continue
@@ -192,6 +198,35 @@ def _repl(console, graph, deps, user, session_id) -> int:
         last_turn = (
             _answer(console, graph, deps, user, session_id, question) or last_turn
         )
+
+
+def _persona(console, deps, user, command) -> None:
+    """`/persona`, `/persona show`, `/persona activate <name> [version]`.
+
+    Activating by an older version is the rollback path: editing appends a
+    version rather than overwriting, so the previous body is still there.
+    """
+    parts = command.split()
+    action = parts[1] if len(parts) > 1 else "list"
+
+    if action == "show":
+        render_persona(console, deps.personas.active())
+        return
+
+    if action == "activate":
+        if len(parts) < 3:
+            console.print("Usage: /persona activate <name> [version]")
+            return
+        version = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None
+        try:
+            persona = deps.personas.activate(name=parts[2], version=version)
+        except KeyError:
+            console.print(f"No persona named {parts[2]!r}. Try /persona list.")
+            return
+        console.print(f"Now speaking as [bold]{persona.name}[/bold] v{persona.version}.")
+        return
+
+    render_personas(console, deps.personas.list_personas(), deps.personas.active())
 
 
 def _show_reports(console, deps, user) -> None:

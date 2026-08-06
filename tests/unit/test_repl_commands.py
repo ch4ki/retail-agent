@@ -4,17 +4,25 @@ succeeds, the whole suite passes, and the command is broken. These exercise the
 dispatch loop itself.
 """
 
+import io
+
 import pytest
+from rich.console import Console
 
 from retail_agent.cli.app import HELP, _repl
 
 
 class FakeConsole:
-    """Answers `input` from a script and records everything printed."""
+    """Answers `input` from a script; renders through a real console.
+
+    Printing `str(arg)` would record "<rich.panel.Panel object at 0x...>" for
+    anything boxed, so assertions would pass on output a user cannot read.
+    Rendering for real is the only way these tests mean anything.
+    """
 
     def __init__(self, script):
         self.script = list(script)
-        self.printed: list[str] = []
+        self._console = Console(record=True, width=100, file=io.StringIO())
 
     def input(self, _prompt=""):
         if not self.script:
@@ -22,7 +30,11 @@ class FakeConsole:
         return self.script.pop(0)
 
     def print(self, *args, **kwargs):
-        self.printed.append(" ".join(str(a) for a in args))
+        self._console.print(*args, **kwargs)
+
+    @property
+    def printed(self) -> list[str]:
+        return [line for line in self._console.export_text().splitlines() if line.strip()]
 
     def status(self, *_args, **_kwargs):
         class _Null:
@@ -35,7 +47,7 @@ class FakeConsole:
         return _Null()
 
     def text(self) -> str:
-        return "\n".join(self.printed)
+        return self._console.export_text()
 
 
 class FakeStore:
@@ -54,8 +66,15 @@ class FakeDeps:
     def __init__(self):
         from retail_agent.obs.traces import InMemoryTraceStore
 
+        from retail_agent.store.personas import (
+            DEFAULT_PERSONA,
+            InMemoryPersonaStore,
+        )
+
         self.reports = FakeStore()
         self.traces = InMemoryTraceStore()
+        self.personas = InMemoryPersonaStore()
+        self.personas.seed(DEFAULT_PERSONA)
         self.settings = type("S", (), {"llm_provider": "gemini"})()
 
 
@@ -68,7 +87,19 @@ def run(script):
 
 @pytest.mark.parametrize(
     "command",
-    ["/help", "/reports", "/undo", "/trace", "/trace abc123", "/metrics"],
+    [
+        "/help",
+        "/reports",
+        "/undo",
+        "/trace",
+        "/trace abc123",
+        "/metrics",
+        "/persona",
+        "/persona list",
+        "/persona show",
+        "/persona activate analyst",
+        "/persona activate nosuchpersona",
+    ],
 )
 def test_every_command_runs_without_raising(command):
     """A NameError here is invisible to `import app` and to every other test."""
@@ -109,6 +140,29 @@ def test_metrics_with_no_turns_says_so():
     console, _, _ = run(["/metrics"])
 
     assert "no turns recorded" in console.text().lower()
+
+
+def test_persona_show_names_the_active_one():
+    console, _, _ = run(["/persona show"])
+
+    assert "analyst" in console.text().lower()
+
+
+def test_activating_an_unknown_persona_says_so_rather_than_raising():
+    console, deps, _ = run(["/persona activate nosuchpersona"])
+
+    assert "no persona" in console.text().lower()
+    assert deps.personas.active().name == "analyst", "unchanged"
+
+
+def test_activating_switches_the_voice():
+    console = FakeConsole(["/persona activate terse"])
+    deps = FakeDeps()
+    deps.personas.save(name="terse", body="Be brief.", updated_by="ceo")
+
+    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+
+    assert deps.personas.active().name == "terse"
 
 
 def test_undo_reaches_the_store():

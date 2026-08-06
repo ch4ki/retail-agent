@@ -194,3 +194,38 @@ def render_metrics(console: Console, metrics: dict) -> None:
             latency.add_row(node, str(p50))
         console.print("\n[bold]Median latency per node[/bold]")
         console.print(latency)
+
+
+def render_personas(console: Console, personas, active) -> None:
+    """The tone options and which one is live."""
+    if not personas:
+        console.print("No personas saved.")
+        return
+
+    table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+    table.add_column(" ")
+    table.add_column("name")
+    table.add_column("v", justify="right")
+    table.add_column("updated by", style="dim")
+    for persona in personas:
+        live = active is not None and persona.name == active.name
+        table.add_row(
+            "→" if live else " ",
+            f"[bold]{persona.name}[/bold]" if live else persona.name,
+            str(persona.version),
+            persona.updated_by,
+        )
+    console.print(table)
+
+
+def render_persona(console: Console, persona) -> None:
+    if persona is None:
+        console.print("No persona is active; using the built-in default.")
+        return
+    console.print(
+        Panel(
+            persona.body,
+            title=f"{persona.name} v{persona.version} · set by {persona.updated_by}",
+            style="cyan",
+        )
+    )
