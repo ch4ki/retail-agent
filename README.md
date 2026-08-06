@@ -220,10 +220,15 @@ The exit code is the point: `0` ships, `1` does not. A PII leak fails the run
 outright however high the accuracy, because the alternative is trading a
 customer's email address against a percentage point.
 
+The first live run scored **44.7%** — 21 correct, 15 wrong, 11 unanswered, no
+PII leaks — and found a defect none of the 785 path-based tests could see: on
+multi-step plans the agent inlines the previous step's truncated results into
+the next query as literals, then answers from them. See §5.7 of the design doc.
+
 ## Tests
 
 ```bash
-uv run pytest              # 576 tests, no credentials or database needed
+uv run pytest              # 785 tests, no credentials or database needed
 uv run pytest -m db        # 72 tests, needs `docker compose up -d postgres`
 uv run pytest -m live      # 7 tests, needs real BigQuery access and an LLM key
 uv run pytest -m vector    # 14 tests, needs DENSE_RETRIEVAL deps; 9 need an OpenAI key
@@ -268,6 +273,7 @@ metric definitions that connect them — with hybrid lexical/dense retrieval, a
 measured relevance floor, a clarifying question when a term is undefined that is
 remembered per user, and promotion of an answered definition into the corpus.
 
-Not yet built: the eval suite. It is designed in
+Not yet built: the LLM judge for narrative quality, and system-level learning.
+Both are designed in
 [docs/design.md](docs/design.md), which marks each requirement Built, Partial or
 Designed and names the command or test that demonstrates each Built claim.
