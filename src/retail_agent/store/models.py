@@ -1,0 +1,75 @@
+"""SQLAlchemy models — the persistence shape of saved reports.
+
+Deliberately separate from the `Report` and `AuditEntry` dataclasses in
+`reports.py`. Those are the domain types the whole application passes around,
+and `InMemoryReportStore` must be able to produce them without importing
+SQLAlchemy or holding a session. Rows are converted at the boundary.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import ARRAY, DateTime, Index, String, Text, func, text
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class ReportRow(Base):
+    __tablename__ = "reports"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    session_id: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        # Every read filters on owner and excludes tombstones.
+        Index(
+            "reports_owner_live_idx",
+            "owner_id",
+            text("created_at DESC"),
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        # "delete all reports mentioning Client X" is resolved by this index.
+        Index(
+            "reports_fts_idx",
+            text("to_tsvector('english', title || ' ' || body)"),
+            postgresql_using="gin",
+        ),
+    )
+
+
+class ReportAuditRow(Base):
+    """One row per destructive action that actually happened.
+
+    `action_id` is the primary key, and that is load-bearing: a replayed
+    confirmation hits the conflict, inserts nothing, and so deletes nothing.
+    """
+
+    __tablename__ = "report_audit"
+
+    action_id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    report_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    token: Mapped[str] = mapped_column(Text, nullable=False)
+    performed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    undone_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        Index("report_audit_owner_idx", "owner_id", text("performed_at DESC")),
+    )
