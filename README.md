@@ -182,9 +182,9 @@ default.
 ## Tests
 
 ```bash
-uv run pytest              # 413 tests, no credentials or database needed
-uv run pytest -m db        # 51 tests, needs `docker compose up -d postgres`
-uv run pytest -m live      # 6 tests, needs real BigQuery access and an LLM key
+uv run pytest              # 570 tests, no credentials or database needed
+uv run pytest -m db        # 72 tests, needs `docker compose up -d postgres`
+uv run pytest -m live      # 7 tests, needs real BigQuery access and an LLM key
 ```
 
 The safety modules are pure functions and are tested first, against an
