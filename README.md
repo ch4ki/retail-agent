@@ -4,6 +4,11 @@ A CLI chat agent that answers questions about the theLook e-commerce dataset in
 BigQuery. It writes SQL, runs it behind a static safety guard, masks personal
 data before the model ever sees it, and explains the results.
 
+- **[Design document](docs/design.md)** — architecture, services, and how each
+  requirement is handled, with what is built vs designed marked per section
+- **[Example run](docs/example-run.md)** — an annotated transcript of a real
+  session against live BigQuery
+
 ## Requirements
 
 - Python 3.12+
@@ -44,7 +49,14 @@ Try:
 › what data do you have?
 › who are our top 10 customers by spend?
 › why does brand X outperform brand Y?
+› save that as a report with action items for Q2
+› delete all reports mentioning revenue
+› /reports        list what you have saved
+› /undo           reverse the last deletion
 ```
+
+See [docs/example-run.md](docs/example-run.md) for an annotated transcript of a
+real session, including the confirmation flow.
 
 ## Using a different LLM
 
@@ -63,11 +75,14 @@ graph decides *what is allowed*. Every safety property is an edge in
 `src/retail_agent/agent/graph.py`, not an instruction in a prompt.
 
 ```
-route ─┬─ schema      structural questions, answered from cached metadata
-       ├─ chat        follow-ups, answered from conversation history
-       └─ plan → draft_sql → guard → dry_run → execute → mask → synthesize → egress
-                     ↑                  │
-                     └──── repair ──────┘   (budget: 2, held by the graph)
+start_turn → route ─┬─ schema      answered from cached metadata, no SQL
+                    ├─ chat        follow-ups, answered from history
+                    ├─ report_ops  save / list / stage a delete
+                    │                └─ await_confirmation ─→ apply_delete
+                    │                   (a breakpoint: nothing writes before you answer)
+                    └─ plan → draft_sql → guard → dry_run → execute → mask
+                                  ↑                │              → synthesize → egress
+                                  └──── repair ────┘  (budget: 3, held by the graph)
 ```
 
 ## Viewing the pipeline in LangGraph Studio
@@ -91,7 +106,8 @@ deps the CLI does. It passes no checkpointer, because the Studio server owns
 thread persistence.
 
 Studio does not replace the CLI: the confirmation flow for destructive actions
-(phase 2) is a terminal interaction.
+is a terminal interaction. Studio does show it paused, though — `pending_action`
+in the state panel is the exact manifest awaiting your answer.
 
 ## Tracing (optional)
 
@@ -121,6 +137,10 @@ every call.
   data. This is the second line of defence, not the first.
 - **Cost ceiling** — every query is dry-run first and capped by
   `BQ_MAX_BYTES_BILLED` (2 GB by default).
+- **Confirmed deletes** — removing saved reports shows the exact list first and
+  requires typing the token it asks for (`y` for one, `DELETE <n>` for several).
+  Deletes are soft, audited and reversible with `/undo`. Ownership is a SQL
+  predicate on every statement, so it holds even if the model is compromised.
 - **Bounded self-correction** — a failed query is retried at most twice. The
   counter lives in graph state, so the bound holds regardless of what the model
   decides. When it runs out the agent explains what it tried instead of looping.
@@ -128,8 +148,9 @@ every call.
 ## Tests
 
 ```bash
-uv run pytest              # 171 tests, no credentials needed
-uv run pytest -m live      # 4 tests, needs real BigQuery access
+uv run pytest              # 239 tests, no credentials or database needed
+uv run pytest -m db        # 14 tests, needs `docker compose up -d postgres`
+uv run pytest -m live      # 6 tests, needs real BigQuery access and an LLM key
 ```
 
 The safety modules are pure functions and are tested first, against an
@@ -143,20 +164,23 @@ PII never reaches the warehouse at all.
 **"Could not connect to BigQuery"** — run `gcloud auth application-default
 login`, and set `GOOGLE_CLOUD_PROJECT` if you have more than one project.
 
-**"Could not reach the database"** — run `docker compose up -d postgres`. It
-binds host port **5433**, not 5432, to avoid clashing with a local install.
-The agent still runs without it; you just lose conversation history.
+**"Could not reach the database"** — run `docker compose up -d postgres` then
+`uv run retail-agent migrate`. It binds host port **5433**, not 5432, to avoid
+clashing with a local install. The agent still runs without it; you lose
+conversation history across restarts and saved reports, and it says so.
 
 **Rate limits on the Gemini free tier** — switch `LLM_PROVIDER` to `openrouter`
 or `ollama`.
 
 ## Status
 
-Phase 1 of 4. Built: BigQuery access, SQL guard, PII masking, egress scan,
-bounded self-correction, the turn graph, and the CLI.
+Built: BigQuery access, SQL guard, PII masking, egress scan, bounded
+self-correction, the turn graph, the CLI, and the saved-reports library with its
+delete-confirmation gate, audit trail and `/undo`.
 
-LangSmith tracing is wired up and verified. Not yet built: the local
-`traces` table and `/trace` replay, saved reports with the delete-confirmation
-gate, personas and user preferences (phase 2); the Golden
-Bucket of analyst Trios (phase 3); the eval suite (phase 4). Design for all of
-these is in `docs/superpowers/specs/`.
+LangSmith tracing is wired and verified. Not yet built: the local `traces` table
+and `/trace` replay, the `diagnose` edge for empty results, provider fallback and
+circuit breaker, personas and user preferences; the Golden Bucket of analyst
+Trios; the eval suite. Every one of those is designed in
+[docs/design.md](docs/design.md), which marks each requirement Built, Partial or
+Designed.
