@@ -11,7 +11,7 @@ that function.
 """
 
 from retail_agent.agent.deps import AgentDeps
-from retail_agent.cli.app import build_deps
+from retail_agent.cli.chat import build_deps
 from retail_agent.config import Settings
 
 # Nothing listening here, so every store takes its degraded path.

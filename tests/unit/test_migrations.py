@@ -73,11 +73,21 @@ def test_migrations_match_the_models():
     config.set_main_option("sqlalchemy.url", to_sqlalchemy_url(settings.database_url))
     command.upgrade(config, "head")
 
+    # The same filter the migration environment uses, from the same place.
+    # LangGraph's PostgresSaver owns the checkpoint_* tables; without this they
+    # read as "tables the models forgot", which is the opposite of true.
+    from retail_agent.store.db import include_object
+
     structural = {"add_table", "remove_table", "add_column", "remove_column"}
     engine = create_db_engine(settings.database_url)
     try:
         with engine.connect() as conn:
-            diffs = compare_metadata(MigrationContext.configure(conn), Base.metadata)
+            diffs = compare_metadata(
+                MigrationContext.configure(
+                    conn, opts={"include_object": include_object}
+                ),
+                Base.metadata,
+            )
     finally:
         engine.dispose()
 

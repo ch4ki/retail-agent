@@ -19,6 +19,19 @@ from sqlalchemy.orm import Session, sessionmaker
 log = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+# LangGraph's PostgresSaver creates and migrates these itself. Alembic must not
+# manage them, propose dropping them on autogenerate, or count them as drift.
+# Defined here rather than in migrations/env.py because env.py can only be
+# imported by Alembic — it reads `alembic.context` at module scope — and this
+# rule needs to be readable from a test as well.
+LANGGRAPH_TABLES = frozenset(
+    {"checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations"}
+)
+
+
+def include_object(obj, name, type_, reflected, compare_to) -> bool:
+    return not (type_ == "table" and name in LANGGRAPH_TABLES)
 ALEMBIC_INI = PROJECT_ROOT / "alembic.ini"
 
 # psycopg 3 rather than the psycopg2 default SQLAlchemy assumes.

@@ -10,20 +10,10 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from retail_agent.config import Settings
-from retail_agent.store.db import to_sqlalchemy_url
+from retail_agent.store.db import include_object, to_sqlalchemy_url
 from retail_agent.store.models import Base
 
 config = context.config
-
-# LangGraph's PostgresSaver owns the checkpoint_* tables and migrates them
-# itself. Alembic must not manage — or, on autogenerate, propose dropping —
-# them.
-LANGGRAPH_TABLES = {
-    "checkpoints",
-    "checkpoint_blobs",
-    "checkpoint_writes",
-    "checkpoint_migrations",
-}
 
 target_metadata = Base.metadata
 
@@ -33,10 +23,6 @@ def _database_url() -> str:
     if override and not override.startswith("driver://"):
         return override
     return to_sqlalchemy_url(Settings().database_url)
-
-
-def include_object(obj, name, type_, reflected, compare_to):
-    return not (type_ == "table" and name in LANGGRAPH_TABLES)
 
 
 def run_migrations_offline() -> None:

@@ -9,7 +9,7 @@ import io
 import pytest
 from rich.console import Console
 
-from retail_agent.cli.app import HELP, _repl
+from retail_agent.cli.chat import HELP, _repl
 
 
 class FakeConsole:
