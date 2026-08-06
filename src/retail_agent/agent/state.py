@@ -173,6 +173,7 @@ class TurnState(TypedDict, total=False):
     sql_attempts: list[SqlAttempt]
     frames: dict[str, MaskedFrame]
     repair_budget: int
+    diagnose_budget: int
     redactions: int
     answer: str
     status: Status
@@ -181,7 +182,7 @@ class TurnState(TypedDict, total=False):
     confirmation: str
 
 
-def fresh_scratch(*, repair_budget: int) -> dict:
+def fresh_scratch(*, repair_budget: int, diagnose_budget: int = 1) -> dict:
     """Everything one turn accumulates. Nothing here may survive into the next.
 
     Applied by `start_turn`, the graph's first node, so it holds on every entry
@@ -205,6 +206,7 @@ def fresh_scratch(*, repair_budget: int) -> dict:
         "answer": "",
         "status": "ok",
         "repair_budget": repair_budget,
+        "diagnose_budget": diagnose_budget,
         "pending_action": None,
         "events": [],
         "confirmation": "",

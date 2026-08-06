@@ -14,6 +14,7 @@ from langgraph.graph import END, START, StateGraph
 
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.nodes.chat import chat_node
+from retail_agent.agent.nodes.diagnose import diagnose_node
 from retail_agent.agent.nodes.execute import execute_node
 from retail_agent.agent.nodes.plan import plan_node
 from retail_agent.agent.nodes.report_ops import (
@@ -45,6 +46,7 @@ def build_graph(deps: AgentDeps, checkpointer=None):
     node("apply_delete", partial(apply_delete, deps=deps))
     node("draft_sql", partial(draft_sql_node, deps=deps))
     node("execute", partial(execute_node, deps=deps))
+    node("diagnose", partial(diagnose_node, deps=deps))
     node("synthesize", partial(synthesize_node, deps=deps))
 
     builder.add_edge(START, "start_turn")
@@ -81,8 +83,13 @@ def build_graph(deps: AgentDeps, checkpointer=None):
     builder.add_conditional_edges(
         "execute",
         _after_execute,
-        {"draft_sql": "draft_sql", "synthesize": "synthesize"},
+        {
+            "draft_sql": "draft_sql",
+            "diagnose": "diagnose",
+            "synthesize": "synthesize",
+        },
     )
+    builder.add_edge("diagnose", "draft_sql")
     builder.add_edge("synthesize", END)
 
     # The confirmation gate. It lives here, in the file that owns control flow,
@@ -131,6 +138,8 @@ def _describe(name: str, state: TurnState) -> str:
         return f"intent={state.get('intent', '')}"
     if name == "plan":
         return f"{len(state.get('plan', []))} step(s)"
+    if name == "diagnose":
+        return "empty result — redrafting to match more loosely"
     if name in {"draft_sql", "execute"}:
         attempts = state.get("sql_attempts", [])
         if not attempts:
@@ -187,11 +196,42 @@ def _after_draft(state: TurnState) -> str:
 
 
 def _after_execute(state: TurnState) -> str:
+    # A query that succeeded and returned nothing gets one look on its own
+    # budget, before the step is treated as answered.
+    if _returned_nothing(state) and state.get("diagnose_budget", 0) > 0:
+        return "diagnose"
     if state.get("step_index", 0) >= len(state.get("plan", [])):
         return "synthesize"
     if _last_attempt_failed(state) and state.get("repair_budget", 0) <= 0:
         return "synthesize"
     return "draft_sql"
+
+
+def _returned_nothing(state: TurnState) -> bool:
+    """No rows, or the aggregate spelling of no rows.
+
+    `SUM(x) WHERE brand = 'Levis'` against a column holding `Levi's` returns one
+    row containing NULL, not zero rows. Checking `row_count == 0` alone misses
+    the case this edge exists for — confirmed against live BigQuery.
+    """
+    attempts = state.get("sql_attempts", [])
+    if not attempts:
+        return False
+
+    last = attempts[-1]
+    if last.failed:
+        return False
+    if last.row_count == 0:
+        return True
+    if last.row_count != 1:
+        return False
+
+    frame = state.get("frames", {}).get(last.step_id)
+    if frame is None or len(frame.rows) != 1:
+        return False
+    # Every column null in the only row: an aggregate that matched nothing. A
+    # row with any value in it is a real answer, even a partial one.
+    return all(value is None for value in frame.rows[0])
 
 
 def _current(state: TurnState):

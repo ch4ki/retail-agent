@@ -12,4 +12,7 @@ from retail_agent.agent.state import TurnState, fresh_scratch
 
 
 def start_turn_node(state: TurnState, deps: AgentDeps) -> dict:
-    return fresh_scratch(repair_budget=deps.settings.repair_budget)
+    return fresh_scratch(
+        repair_budget=deps.settings.repair_budget,
+        diagnose_budget=deps.settings.diagnose_budget,
+    )

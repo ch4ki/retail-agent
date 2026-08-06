@@ -94,6 +94,13 @@ class FakeSource:
 
     frames: dict[str, pd.DataFrame]
     failing: set[str] = field(default_factory=set)
+    # SQL containing one of these runs fine and returns nothing — the shape of
+    # a literal that does not match, which is not an error anywhere.
+    empty_for: set[str] = field(default_factory=set)
+    # The same non-match through an aggregate: SUM() over no rows returns one
+    # row holding NULL. That is what BigQuery actually returns, and it is the
+    # shape the live failure took.
+    null_aggregate_for: set[str] = field(default_factory=set)
     dialect: str = "bigquery"
     executed: list[str] = field(default_factory=list)
 
@@ -126,6 +133,11 @@ class FakeSource:
         for marker in self.failing:
             if marker in sql:
                 raise QuerySyntaxError(f"Syntax error near {marker}")
+        if any(marker in sql for marker in self.empty_for):
+            return QueryResult(rows=pd.DataFrame(), bytes_billed=1_000, row_count=0)
+        if any(marker in sql for marker in self.null_aggregate_for):
+            frame = pd.DataFrame({"total_revenue": [None]})
+            return QueryResult(rows=frame, bytes_billed=1_000, row_count=1)
         frame = next(iter(self.frames.values()), pd.DataFrame())
         return QueryResult(rows=frame, bytes_billed=1_000, row_count=len(frame))
 

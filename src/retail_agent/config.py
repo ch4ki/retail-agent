@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     # Failures tolerated per turn, not per step. The turn ends on the failure
     # that empties it, so this is the attempt count: 3 attempts, 2 retries.
     repair_budget: int = 3
+    # Empty results get their own budget. An empty result is not necessarily a
+    # bug — sometimes "no orders matched" is the true answer — so spending the
+    # syntax budget on it would starve genuinely broken SQL.
+    diagnose_budget: int = 1
     max_analysis_steps: int = 10
     # Prior messages shown to the router and planner so that "compare that to
     # April" resolves to something queryable. Bounded: history grows for a whole
