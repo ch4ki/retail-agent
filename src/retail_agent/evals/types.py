@@ -35,6 +35,13 @@ class EvalCase:
     tolerance: float = 1e-6
     # Ranked answers compare row by row; scalars take the single cell.
     ranked: bool = False
+    # Which of the agent's columns holds the answer, when it returns more than
+    # one. Live: asked which month of 2023 was busiest, the agent returned
+    # (year, month, total_orders) with the right month in it, and taking column
+    # 0 scored 2023 against an expected 12. A hint, not a contract — the agent
+    # picks its own aliases, so a name that is not there falls back to the first
+    # column.
+    answer_column: str = ""
     notes: str = ""
 
 

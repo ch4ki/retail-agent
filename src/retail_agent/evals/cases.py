@@ -297,11 +297,17 @@ EVAL_CASES: tuple[EvalCase, ...] = (
     ),
     EvalCase(
         id="top-country-by-users",
-        question="Which country has the most users, and how many?",
+        question="Which country has the most users?",
         reference_sql=f"""
-            SELECT COUNT(*) AS n FROM {DATASET}.users`
-            GROUP BY country ORDER BY n DESC LIMIT 1
+            SELECT country FROM {DATASET}.users`
+            GROUP BY country ORDER BY COUNT(*) DESC, country LIMIT 1
         """,
+        answer_column="country",
+        notes=(
+            "Originally asked '...and how many?' while the reference returned "
+            "only the count, so a correct 'China' scored wrong. A two-part "
+            "question needs a two-part reference or neither part."
+        ),
     ),
     EvalCase(
         id="top-5-countries-ranked",
@@ -348,6 +354,7 @@ EVAL_CASES: tuple[EvalCase, ...] = (
             ORDER BY SUM(oi.sale_price) DESC, p.brand
             LIMIT 1
         """,
+        answer_column="brand",
     ),
     EvalCase(
         id="top-5-brands-ranked",
@@ -377,6 +384,7 @@ EVAL_CASES: tuple[EvalCase, ...] = (
             ORDER BY SUM(oi.sale_price) DESC, p.category
             LIMIT 1
         """,
+        answer_column="category",
     ),
     EvalCase(
         id="gross-margin-pct",
@@ -398,7 +406,10 @@ EVAL_CASES: tuple[EvalCase, ...] = (
     ),
     EvalCase(
         id="products-never-sold",
-        question="How many products have never appeared in any order?",
+        question=(
+            "How many products have never appeared in any order item at all, "
+            "counting cancelled and returned ones too?"
+        ),
         reference_sql=f"""
             SELECT COUNT(*) AS n FROM {DATASET}.products` AS p
             WHERE NOT EXISTS (
@@ -447,7 +458,10 @@ EVAL_CASES: tuple[EvalCase, ...] = (
     ),
     EvalCase(
         id="busiest-month-2023",
-        question="Which month of 2023 had the most orders?",
+        question=(
+            "Which calendar month of 2023 had the most orders? "
+            "Answer with the month number, 1 to 12."
+        ),
         reference_sql=f"""
             SELECT EXTRACT(MONTH FROM created_at) AS month
             FROM {DATASET}.orders`
@@ -455,6 +469,12 @@ EVAL_CASES: tuple[EvalCase, ...] = (
               AND created_at < TIMESTAMP('2024-01-01')
             GROUP BY month ORDER BY COUNT(*) DESC, month LIMIT 1
         """,
+        answer_column="month",
+        notes=(
+            "The agent returns (year, month, total_orders), so the column is "
+            "named. It also answered '2023-12' once, which is correct but "
+            "unscoreable — hence the question pins the format."
+        ),
     ),
     EvalCase(
         id="first-order-year",

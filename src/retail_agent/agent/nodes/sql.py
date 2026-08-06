@@ -97,16 +97,94 @@ def _prompt_for(state: TurnState, deps: AgentDeps, step: AnalysisStep) -> str:
 
 
 def _prior_results(state: TurnState) -> str:
-    """Render earlier steps' results into text, so a later step in the same
-    plan can build on them (e.g. joining against a number already fetched)."""
+    """What a later step is told about the steps before it.
+
+    This used to render each earlier frame as markdown truncated to five rows,
+    headed "Results already gathered". That produced fabricated answers: the
+    model has no way to *reference* those rows from SQL, so it copied the ones
+    it could see into a literal and left a comment asking for the rest —
+
+        SELECT AVG(age) FROM (SELECT 54 AS age UNION ALL SELECT 25 ...)
+        /* Add the remaining 95 rows here */
+
+    — which passed the guard, ran cleanly and answered confidently from five
+    sampled rows out of a hundred.
+
+    So the rule is structural rather than an instruction: a multi-row result is
+    described by its *query*, never its rows. A model cannot inline data it was
+    never shown. A single row is different — it cannot be truncated, and
+    "the average is 41, now find who is above it" genuinely needs the number —
+    so those are still passed as values.
+    """
     frames = state.get("frames", {})
     if not frames:
         return ""
-    rendered = "\n\n".join(
-        f"Result of {key}:\n{frame.to_markdown(max_rows=5)}"
-        for key, frame in frames.items()
+
+    sql_by_step = {
+        step.id: step.sql for step in state.get("plan", []) if getattr(step, "sql", None)
+    }
+
+    blocks = []
+    for step_id, frame in frames.items():
+        if len(frame.rows) == 1 and frame.row_count == 1:
+            values = ", ".join(
+                f"{column} = {value!r}"
+                for column, value in zip(frame.columns, frame.rows[0])
+            )
+            blocks.append(f"{step_id} returned exactly one row: {values}")
+            continue
+
+        # Multi-row: describe the shape and hand over the query, not the data.
+        columns = ", ".join(frame.columns)
+        query = _without_display_limit(sql_by_step.get(step_id))
+        if query:
+            blocks.append(
+                f"{step_id} returned {frame.row_count} rows of ({columns}). "
+                f"Its query was:\n{query}"
+            )
+        else:
+            # No recorded query, so there is nothing to compose against.
+            # Naming it anyway would invite an invented table reference.
+            blocks.append(f"{step_id} returned {frame.row_count} rows of ({columns}).")
+
+    return (
+        "Results already gathered in this analysis:\n"
+        + "\n\n".join(blocks)
+        + "\n\nWrite ONE self-contained query. Where you need the rows above, "
+        "repeat or nest the query that produced them — never copy result values "
+        "into a literal, and never write a placeholder comment for rows you "
+        "cannot see. Only the single-row values quoted above may be used "
+        "directly."
     )
-    return f"Results already gathered in this analysis:\n{rendered}"
+
+
+def _without_display_limit(sql: str | None) -> str | None:
+    """Drop the outermost LIMIT before handing a query to the next step.
+
+    The guard appends a LIMIT so results stay printable. That bound is about
+    display, not meaning, and passing it along made the model reproduce it
+    faithfully — `SELECT AVG(age) FROM (SELECT age FROM users LIMIT 100)`
+    averages a hundred rows and calls it the average age. The truncation simply
+    moved out of the prompt and into the SQL.
+
+    Only the outer one goes. A LIMIT the question asked for ("top 10 customers")
+    lives in a subquery and is part of what that step computed.
+    """
+    if not sql:
+        return sql
+    try:
+        import sqlglot
+
+        tree = sqlglot.parse_one(sql, read="bigquery")
+    except Exception:
+        # Malformed SQL should not break drafting; the guard is the authority
+        # on validity, and it already accepted or rejected this.
+        return sql
+
+    limit = tree.args.get("limit")
+    if limit is not None:
+        tree.set("limit", None)
+    return tree.sql(dialect="bigquery")
 
 
 def _strip_fences(text: str) -> str:

@@ -78,7 +78,12 @@ def run_case(case: EvalCase, *, ask: Ask, execute: Execute) -> CaseResult:
         )
 
     expected = _extract(reference, ranked=case.ranked)
-    actual = _extract(answer.rows, ranked=case.ranked)
+    actual = _extract(
+        answer.rows,
+        ranked=case.ranked,
+        columns=answer.columns,
+        answer_column=case.answer_column,
+    )
 
     if actual is None:
         result = Outcome.ERROR, "the agent returned no rows to score"
@@ -139,11 +144,30 @@ def run_suite(
     return evaluate_gate(results, threshold=threshold, baseline=baseline)
 
 
-def _extract(rows: Sequence[Sequence[Any]], *, ranked: bool) -> Any:
+def _extract(
+    rows: Sequence[Sequence[Any]],
+    *,
+    ranked: bool,
+    columns: Sequence[str] = (),
+    answer_column: str = "",
+) -> Any:
     """The comparable value: a column for a ranked case, one cell otherwise."""
     if not rows:
         return None
     if ranked:
         return [row[0] if row else None for row in rows]
+
     first = rows[0]
-    return first[0] if first else None
+    if not first:
+        return None
+
+    # A scalar question answered with several columns: take the one the case
+    # named, so extra context the agent chose to return does not score as a
+    # wrong answer.
+    if answer_column and columns:
+        wanted = answer_column.strip().lower()
+        for index, name in enumerate(columns):
+            if str(name).strip().lower() == wanted and index < len(first):
+                return first[index]
+
+    return first[0]

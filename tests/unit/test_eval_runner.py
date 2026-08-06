@@ -273,3 +273,74 @@ def test_a_single_row_scalar_answer_reports_plainly():
     result = run_case(CASE, ask=lambda _q: answer(1254), execute=lambda _sql: [[5746]])
 
     assert "rows" not in result.detail
+
+
+# --- picking the right column out of the agent's answer ---
+
+
+def test_the_named_answer_column_is_used_when_the_agent_returns_extras():
+    """Live: asked which month of 2023 was busiest, the agent returned
+    (year, month, total_orders) with the right month in it. Taking column 0
+    scored 2023 against an expected 12 and called a correct answer wrong."""
+    case = EvalCase(
+        id="busiest-month",
+        question="q",
+        reference_sql="s",
+        answer_column="month",
+    )
+
+    result = run_case(
+        case,
+        ask=lambda _q: AgentAnswer(
+            text="", rows=[[2023, 12, 1580]], columns=("year", "month", "total_orders")
+        ),
+        execute=lambda _sql: [[12]],
+    )
+
+    assert result.outcome is Outcome.PASS
+
+
+def test_a_missing_named_column_falls_back_to_the_first():
+    """The name is a hint, not a contract — the agent chooses its own aliases."""
+    case = EvalCase(id="c", question="q", reference_sql="s", answer_column="month")
+
+    result = run_case(
+        case,
+        ask=lambda _q: AgentAnswer(text="", rows=[[12]], columns=("m",)),
+        execute=lambda _sql: [[12]],
+    )
+
+    assert result.outcome is Outcome.PASS
+
+
+def test_the_column_name_match_ignores_case():
+    case = EvalCase(id="c", question="q", reference_sql="s", answer_column="Month")
+
+    result = run_case(
+        case,
+        ask=lambda _q: AgentAnswer(text="", rows=[[2023, 12]], columns=("year", "month")),
+        execute=lambda _sql: [[12]],
+    )
+
+    assert result.outcome is Outcome.PASS
+
+
+def test_without_a_named_column_the_first_is_still_used():
+    """Unchanged for the 40-odd cases that return a single column."""
+    result = run_case(CASE, ask=lambda _q: answer(5746), execute=lambda _sql: [[5746]])
+
+    assert result.outcome is Outcome.PASS
+
+
+def test_a_ranked_case_ignores_the_answer_column():
+    """Ranked cases compare a whole ordered column; the hint does not apply."""
+    case = EvalCase(id="c", question="q", reference_sql="s", ranked=True,
+                    answer_column="brand")
+
+    result = run_case(
+        case,
+        ask=lambda _q: AgentAnswer(text="", rows=[["a"], ["b"]], columns=("brand",)),
+        execute=lambda _sql: [["a"], ["b"]],
+    )
+
+    assert result.outcome is Outcome.PASS
