@@ -60,3 +60,18 @@ def test_repair_prompt_carries_the_sql_rules():
 
     assert "{dataset}" in rules
     assert "CURRENT_TIMESTAMP()" in rules
+
+
+def test_planner_is_told_definitions_are_not_a_retrieval_step():
+    """Live failure: asked "how many loyal customers", the planner's first step
+    was "retrieve the definition of loyal customers from the business context
+    or documentation". That is not a query. It burned a step, produced a
+    meaningless one, and spent the diagnose budget — so when the real step
+    returned zero rows there was nothing left to challenge it.
+
+    `recall` has already looked. Whatever it found is in the prompt; whatever
+    it did not find is stated as an assumption."""
+    rules = _flat(PLANNER_PROMPT)
+
+    assert "definition" in rules
+    assert "already" in rules

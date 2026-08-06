@@ -215,3 +215,50 @@ def test_planner_never_receives_a_blank_question(make_deps):
 
     assert result == {}
     assert deps.llm.prompts == []
+
+
+# A planner step that is not a query. Observed live, twice, including after the
+# prompt was told not to: "Retrieve the definition or criteria for identifying
+# 'loyal customers' from the provided schema or documentation."
+
+
+def test_a_step_that_looks_up_a_definition_is_dropped(make_deps):
+    """`recall` already looked. Such a step cannot become a query, and it costs
+    an attempt and part of the diagnose budget before failing."""
+    deps = make_deps(
+        [
+            {
+                "steps": [
+                    "Retrieve the definition of 'loyal customers' from the documentation.",
+                    "Count users with 3 or more orders.",
+                ]
+            }
+        ]
+    )
+
+    result = plan_node(state_for("how many loyal customers?"), deps)
+
+    assert [s.question for s in result["plan"]] == ["Count users with 3 or more orders."]
+
+
+def test_dropping_every_step_falls_back_to_the_question(make_deps):
+    """Better to answer the question directly than to answer nothing."""
+    deps = make_deps(
+        [{"steps": ["Find the criteria for loyal customers in the documentation."]}]
+    )
+
+    result = plan_node(state_for("how many loyal customers?"), deps)
+
+    assert [s.question for s in result["plan"]] == ["how many loyal customers?"]
+
+
+def test_an_ordinary_step_mentioning_a_defined_metric_survives(make_deps):
+    """The filter must not eat real work — "definition" appearing in a genuine
+    retrieval step is not the same as a step whose whole purpose is lookup."""
+    deps = make_deps(
+        [{"steps": ["Count customers matching the churn definition of 90 days."]}]
+    )
+
+    result = plan_node(state_for("how many churned?"), deps)
+
+    assert len(result["plan"]) == 1

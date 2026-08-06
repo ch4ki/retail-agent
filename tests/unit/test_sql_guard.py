@@ -349,3 +349,39 @@ def test_qualified_star_is_still_rejected():
 def test_star_inside_a_value_returning_aggregate_is_still_rejected():
     """ARRAY_AGG(*) would hand back whole rows, PII included."""
     assert not guard("SELECT ARRAY_AGG(t) AS rows FROM (SELECT * FROM users) AS t").ok
+
+
+# Bind parameters. Found in a live session: asked "how many loyal customers do
+# we have?", the model had no agreed threshold, reached for `@threshold` as a
+# placeholder, and BigQuery rejected it three times — burning the whole repair
+# budget on the same 400 because nothing told it to inline a value.
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT user_id FROM orders GROUP BY user_id HAVING COUNT(id) > @threshold",
+        "SELECT id FROM users WHERE age > ?",
+        "SELECT id FROM users WHERE age > :min_age",
+    ],
+)
+def test_bind_parameters_are_rejected(sql):
+    """Nothing binds them, so the query cannot run. Catching it here costs a
+    guard rejection; letting it through costs a billed round trip."""
+    result = guard(sql)
+
+    assert not result.ok
+    assert any("parameter" in v.lower() for v in result.violations)
+
+
+def test_the_rejection_says_what_to_do_instead():
+    """The repair prompt shows the model this text. "Invalid query" would have
+    it try the same thing again."""
+    result = guard("SELECT id FROM users WHERE age > @min_age")
+
+    assert any("literal" in v.lower() for v in result.violations)
+
+
+def test_an_email_address_in_a_string_is_not_a_parameter():
+    """`@` is common in ordinary values; only a bound parameter is a problem."""
+    assert guard("SELECT id FROM users WHERE email = 'ada@example.com'").ok

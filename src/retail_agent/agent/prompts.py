@@ -46,6 +46,10 @@ Rules:
 - Every step is a retrieval step. Never write a step that compares,
   explains, summarises or ranks what earlier steps returned — comparing,
   ranking and explaining happen after retrieval, not as a query.
+- Never plan a step to look up what a term means. Definitions have already
+  been retrieved: any that exist appear above, and any that do not are stated
+  as an assumption in the answer. A step like "find the definition of loyal
+  customers" cannot be turned into a query and wastes an attempt.
 - Name the tables or columns from the schema each step relies on.
 - Each step must stand on its own. The conversation below is there to resolve
   references: if the question says "that", "the same period" or "compared to
@@ -73,7 +77,11 @@ Schema:
 
 {definitions}
 
+{assumptions}
+
 Rules:
+- Never use query parameters (@name, ?, :name). Nothing binds them, so the
+  query fails. Write concrete literals.
 - Fully qualify tables as `{dataset}.<table>`.
 - Revenue is order_items.sale_price. Exclude order_items with status
   'Cancelled' or 'Returned'.

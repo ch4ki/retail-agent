@@ -139,6 +139,44 @@ SEED_TRIOS: tuple[Trio, ...] = (
         version=1,
     ),
     Trio(
+        id="loyal-customers",
+        question="How many loyal customers do we have?",
+        sql=(
+            "SELECT COUNT(*) AS loyal_customers FROM (\n"
+            "  SELECT o.user_id\n"
+            "  FROM `bigquery-public-data.thelook_ecommerce.orders` AS o\n"
+            "  WHERE o.status NOT IN ('Cancelled', 'Returned')\n"
+            "  GROUP BY o.user_id\n"
+            "  HAVING COUNT(DISTINCT o.order_id) >= 3\n"
+            ")"
+        ),
+        report=(
+            "5,746 customers have placed three or more completed orders — 5.7% "
+            "of everyone who has ordered at all.\n\n"
+            "The distribution is steep: 71% of customers have ordered exactly "
+            "once, and the three-order threshold is where repeat behaviour "
+            "starts to look deliberate rather than incidental.\n\n"
+            "1. Treat the one-order majority as the acquisition problem it is.\n"
+            "2. Measure loyalty movement quarterly at this threshold rather "
+            "than re-cutting it each time it is asked."
+        ),
+        metric_definitions={
+            "loyal": (
+                "three or more completed orders, all time, counting distinct "
+                "orders and excluding Cancelled and Returned. Count orders, not "
+                "order_items — joining to order_items multiplies rows per order "
+                "and inflates the count"
+            ),
+            "engaged": (
+                "at least two completed orders in the trailing 180 days. Unlike "
+                "loyal, this is a recency measure, not a lifetime one"
+            ),
+        },
+        tags=("loyal", "engaged", "customers", "retention", "orders"),
+        author="analytics",
+        version=1,
+    ),
+    Trio(
         id="brand-performance",
         question="Which brands are performing well?",
         sql=(

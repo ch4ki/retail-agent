@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
@@ -15,6 +16,28 @@ from retail_agent.agent.state import AnalysisStep, TurnState
 
 
 log = logging.getLogger(__name__)
+
+
+# A step whose purpose is to look something up rather than query it. `recall`
+# has already done that: whatever the analysts defined is in the prompt, and
+# whatever they did not is stated as an assumption. Observed live twice — the
+# second time after the prompt was explicitly told not to, which is why this is
+# a filter in code rather than another sentence asking nicely.
+_LOOKUP_STEP = re.compile(
+    r"\b(?:retrieve|find|look\s*up|determine|obtain|identify|clarify)\b"
+    r"[^.]*\b(?:definition|criteria|documentation|business\s+context)\b",
+    re.IGNORECASE,
+)
+
+
+def is_lookup_step(text: str) -> bool:
+    """True for a step that cannot become a query.
+
+    Narrow on purpose: "count customers matching the churn definition" is real
+    work and must survive. Only a step whose verb is a lookup *and* whose
+    object is a definition is dropped.
+    """
+    return bool(_LOOKUP_STEP.search(text))
 
 
 class Plan(BaseModel):
@@ -58,7 +81,16 @@ def plan_node(state: TurnState, deps: AgentDeps) -> dict:
 
     # An empty list is possible even on success; asking the original question as
     # a single step beats answering nothing.
-    questions = [text for text in steps if text.strip()][:max_steps]
+    usable = []
+    for text in steps:
+        if not text.strip():
+            continue
+        if is_lookup_step(text):
+            log.info("dropping non-retrieval step: %r", text)
+            continue
+        usable.append(text)
+
+    questions = usable[:max_steps]
     if not questions:
         log.warning("planner returned no steps for %r; using it verbatim", question)
         questions = [question]

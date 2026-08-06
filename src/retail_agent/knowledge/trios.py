@@ -171,3 +171,23 @@ def assumption_note(terms: list[str]) -> str:
         "column or the alias is not a definition and does not help anyone. "
         "Do not apologise, and do not refuse to answer."
     )
+
+
+def sql_assumption_note(terms: list[str]) -> str:
+    """What the SQL writer needs when a term has no agreed definition.
+
+    Different advice from `assumption_note`, which tells the narrator to
+    disclose the choice. Here the model has to *make* one: given no threshold,
+    it will otherwise reach for a bind parameter — `HAVING COUNT(*) >
+    @threshold` — which nothing binds and BigQuery rejects. That happened in a
+    live session and cost the entire repair budget to the same 400.
+    """
+    if not terms:
+        return ""
+    described = "; ".join(f"{term} ({UNDEFINED_TERMS[term]})" for term in terms)
+    return (
+        f"No agreed definition exists for: {described}. Choose one concrete, "
+        "defensible value and write it as a LITERAL in the query — never a "
+        "query parameter such as @threshold, ? or :name, because nothing binds "
+        "them and the query will fail. Prefer a round, explainable number."
+    )

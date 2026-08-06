@@ -87,6 +87,7 @@ def check_sql(
 
     violations: list[str] = []
     violations += _check_read_only(tree)
+    violations += _check_no_parameters(tree)
     violations += _check_tables(tree, allowed_tables, cte_names)
     violations += _check_projections(tree, restricted_columns)
 
@@ -107,6 +108,26 @@ def _check_read_only(tree: exp.Expression) -> list[str]:
         return [f"Only read queries are allowed; found {', '.join(sorted(found))}."]
     if not isinstance(tree, (exp.Select, exp.Union, exp.Subquery, exp.With)):
         return [f"Only SELECT queries are allowed; found {type(tree).__name__}."]
+    return []
+
+
+def _check_no_parameters(tree: exp.Expression) -> list[str]:
+    """Reject `@name`, `?` and `:name`.
+
+    Nothing binds them, so the query cannot run — BigQuery returns a 400. The
+    model reaches for them when it has no agreed value to use, which is exactly
+    the case where an undefined business term is in play. Catching it here
+    costs a guard rejection with instructions; letting it through costs a
+    billed round trip and, three times over, the whole repair budget.
+    """
+    kinds = (exp.Parameter, exp.Placeholder, exp.SessionParameter)
+    if any(isinstance(node, kinds) for node in tree.walk()):
+        return [
+            "Query parameters are not supported — nothing binds them. Choose a "
+            "concrete value and write it as a literal (for example `>= 3` "
+            "rather than `>= @threshold`). If the value is a judgement call, "
+            "pick a defensible one; it will be stated in the answer."
+        ]
     return []
 
 
