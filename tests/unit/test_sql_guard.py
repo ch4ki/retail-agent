@@ -315,3 +315,37 @@ def test_qualification_is_optional():
     )
     assert result.ok
     assert "thelook_ecommerce" not in result.sql
+
+
+# COUNT(*) is not SELECT *. Found by the seed corpus: a hand-written analyst
+# query counting churned customers was rejected by the guard.
+
+
+def test_count_star_is_allowed():
+    """`COUNT(*)` discloses a row count and nothing about any individual. It is
+    also the single most common aggregate there is — rejecting it means every
+    "how many" question burns the repair budget and then degrades."""
+    result = guard("SELECT COUNT(*) AS n FROM users")
+
+    assert result.ok, result.violations
+
+
+def test_count_star_inside_a_cte_is_allowed():
+    sql = """
+        WITH recent AS (SELECT user_id FROM orders)
+        SELECT COUNT(*) AS n FROM recent
+    """
+    assert guard(sql).ok
+
+
+def test_bare_select_star_is_still_rejected():
+    assert not guard("SELECT * FROM users").ok
+
+
+def test_qualified_star_is_still_rejected():
+    assert not guard("SELECT u.* FROM users AS u").ok
+
+
+def test_star_inside_a_value_returning_aggregate_is_still_rejected():
+    """ARRAY_AGG(*) would hand back whole rows, PII included."""
+    assert not guard("SELECT ARRAY_AGG(t) AS rows FROM (SELECT * FROM users) AS t").ok

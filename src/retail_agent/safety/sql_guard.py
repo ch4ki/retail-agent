@@ -133,14 +133,21 @@ def _check_projections(tree: exp.Expression, restricted: Collection[str]) -> lis
 
     for select in tree.find_all(exp.Select):
         for projection in select.expressions:
-            if isinstance(projection, exp.Star) or projection.find(exp.Star):
+            aliased = isinstance(projection, exp.Alias)
+            inner = projection.this if aliased else projection
+
+            # `COUNT(*)` is not `SELECT *`. It returns a row count and discloses
+            # nothing about any individual, and it is the most common aggregate
+            # there is — rejecting it makes every "how many" question fail the
+            # guard, spend the repair budget, and degrade.
+            star = projection.find(exp.Star)
+            if isinstance(projection, exp.Star) or (
+                star is not None and not _inside_counting_aggregate(star, inner)
+            ):
                 violations.append(
                     "SELECT * is not allowed. List the columns you need explicitly."
                 )
                 continue
-
-            aliased = isinstance(projection, exp.Alias)
-            inner = projection.this if aliased else projection
 
             # A bare, unaliased column keeps its name in the result set, which
             # is what lets the masking policy find and mask it. Renaming it, or
