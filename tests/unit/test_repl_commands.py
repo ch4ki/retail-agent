@@ -34,7 +34,7 @@ class FakeConsole:
 
     @property
     def printed(self) -> list[str]:
-        return [line for line in self._console.export_text().splitlines() if line.strip()]
+        return [line for line in self.text().splitlines() if line.strip()]
 
     def status(self, *_args, **_kwargs):
         class _Null:
@@ -47,7 +47,10 @@ class FakeConsole:
         return _Null()
 
     def text(self) -> str:
-        return self._console.export_text()
+        # `clear=False` matters: rich empties the record buffer on export, so
+        # without it the second assertion in a test reads an empty string and
+        # passes or fails for the wrong reason.
+        return self._console.export_text(clear=False)
 
 
 class FakeStore:
@@ -77,7 +80,10 @@ class FakeDeps:
 
         self.personas = InMemoryPersonaStore()
         self.personas.seed(DEFAULT_PERSONA)
+        from retail_agent.store.learning import InMemorySignalStore
+
         self.preferences = InMemoryPreferenceStore()
+        self.signals = InMemorySignalStore()
         self.settings = type("S", (), {"llm_provider": "gemini"})()
 
 
@@ -107,6 +113,8 @@ def run(script):
         "/prefs depth nonsense",
         "/prefs bogus value",
         "/prefs depth",
+        "/prefs accept",
+        "/prefs decline",
     ],
 )
 def test_every_command_runs_without_raising(command):
@@ -200,6 +208,68 @@ def test_prefs_are_per_user():
 
     assert shared.get(user_id="dana").answer_format == "bullets"
     assert shared.get(user_id="sam").answer_format == "prose"
+
+
+# --- learning: proposed, never applied silently ---
+
+
+def _ask(deps, times, phrase="keep it brief"):
+    """Drive real turns through the REPL so the signal path is the real one."""
+    from retail_agent.store.learning import PROPOSAL_THRESHOLD  # noqa: F401
+
+    console = FakeConsole([phrase] * times + ["/quit"])
+    # graph=None would raise inside _answer, which the REPL catches and renders
+    # as an error — the signal is recorded before that, which is the point.
+    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+    return console
+
+
+def test_repeated_phrasing_produces_a_proposal_not_a_change():
+    from retail_agent.store.learning import PROPOSAL_THRESHOLD
+
+    deps = FakeDeps()
+
+    console = _ask(deps, PROPOSAL_THRESHOLD)
+
+    assert "keep it brief" in console.text(), "the evidence is quoted back"
+    assert "/prefs accept" in console.text()
+    assert deps.preferences.get(user_id="dana").depth == "standard", (
+        "nothing changed without being asked"
+    )
+
+
+def test_one_mention_proposes_nothing():
+    deps = FakeDeps()
+
+    console = _ask(deps, 1)
+
+    assert "/prefs accept" not in console.text()
+
+
+def test_accepting_applies_the_setting():
+    from retail_agent.store.learning import PROPOSAL_THRESHOLD
+
+    deps = FakeDeps()
+    _ask(deps, PROPOSAL_THRESHOLD)
+
+    console = FakeConsole(["/prefs accept"])
+    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+
+    assert deps.preferences.get(user_id="dana").depth == "summary"
+
+
+def test_declining_changes_nothing_and_stops_asking():
+    from retail_agent.store.learning import PROPOSAL_THRESHOLD
+
+    deps = FakeDeps()
+    _ask(deps, PROPOSAL_THRESHOLD)
+
+    console = FakeConsole(["/prefs decline"])
+    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+    assert deps.preferences.get(user_id="dana").depth == "standard"
+
+    asked_again = _ask(deps, PROPOSAL_THRESHOLD)
+    assert "/prefs accept" not in asked_again.text(), "not asked again so soon"
 
 
 def test_undo_reaches_the_store():

@@ -106,6 +106,7 @@ def _chat(args) -> int:
             traces=build_trace_store(settings),
             personas=build_persona_store(settings),
             preferences=build_preference_store(settings),
+            signals=InMemorySignalStore(),
             reports=build_report_store(
                 settings,
                 on_degraded=lambda: console.print(
@@ -200,16 +201,22 @@ def _repl(console, graph, deps, user, session_id) -> int:
             render_metrics(console, deps.traces.metrics(owner_id=user))
             continue
 
+        _learn(deps, user, question)
         last_turn = (
             _answer(console, graph, deps, user, session_id, question) or last_turn
         )
+        _offer_proposal(console, deps, user)
 
 
 def _prefs(console, deps, user, command) -> None:
-    """`/prefs` shows them; `/prefs <setting> <value>` changes one."""
+    """`/prefs` shows them; `/prefs <setting> <value>` changes one;
+    `/prefs accept|decline` answers a suggestion the agent made."""
     from retail_agent.store.preferences import PreferenceError, coerce, preferred
 
     parts = command.split()
+    if len(parts) == 2 and parts[1] in {"accept", "decline"}:
+        _answer_proposal(console, deps, user, accepted=parts[1] == "accept")
+        return
     if len(parts) == 1:
         render_preferences(console, preferred(deps.preferences, user))
         return
@@ -227,6 +234,58 @@ def _prefs(console, deps, user, command) -> None:
     updated = deps.preferences.set(user_id=user, **{field: parsed})
     console.print(f"Set [bold]{field}[/bold] to {value}.")
     render_preferences(console, updated)
+
+
+def _answer_proposal(console, deps, user, *, accepted: bool) -> None:
+    """Apply or refuse the pending suggestion.
+
+    Either way the evidence for that field is cleared, so the counters that
+    produced the question cannot immediately produce it again.
+    """
+    from retail_agent.store.learning import next_proposal
+    from retail_agent.store.preferences import preferred
+
+    proposal = next_proposal(
+        deps.signals, user_id=user, current=preferred(deps.preferences, user)
+    )
+    if proposal is None:
+        console.print("Nothing to accept or decline.")
+        return
+
+    if accepted:
+        deps.preferences.set(user_id=user, **{proposal.field: proposal.value})
+        console.print(f"Set [bold]{proposal.field}[/bold] to {proposal.value}.")
+    else:
+        deps.signals.decline(
+            user_id=user, field=proposal.field, value=proposal.value
+        )
+        console.print("Left as it was.")
+    deps.signals.clear(user_id=user, field=proposal.field)
+
+
+def _offer_proposal(console, deps, user) -> None:
+    """Ask, once there is enough evidence. Never change anything unasked: a
+    personalisation the reader cannot account for is worse than none."""
+    from retail_agent.store.learning import next_proposal
+    from retail_agent.store.preferences import preferred
+
+    proposal = next_proposal(
+        deps.signals, user_id=user, current=preferred(deps.preferences, user)
+    )
+    if proposal is not None:
+        console.print(f"\n[dim]{proposal.question()}[/dim]")
+
+
+def _learn(deps, user, question) -> None:
+    """Accumulate evidence from how the question was phrased. Deterministic, so
+    the proposal can quote what the user actually typed."""
+    from retail_agent.store.learning import detect
+
+    try:
+        for signal in detect(question):
+            deps.signals.record(user_id=user, signal=signal)
+    except Exception as err:  # learning is never worth a failed turn
+        logging.getLogger(__name__).debug("signal not recorded: %s", err)
 
 
 def _persona(console, deps, user, command) -> None:

@@ -14,6 +14,7 @@ from retail_agent.config import Settings
 from retail_agent.datasources.base import DataSource
 from retail_agent.safety.pii import PiiPolicy
 from retail_agent.obs.traces import TraceStore
+from retail_agent.store.learning import SignalStore
 from retail_agent.store.personas import PersonaStore
 from retail_agent.store.preferences import PreferenceStore
 from retail_agent.store.reports import ReportStore
@@ -29,3 +30,4 @@ class AgentDeps:
     traces: TraceStore
     personas: PersonaStore | None = None
     preferences: PreferenceStore | None = None
+    signals: SignalStore | None = None
