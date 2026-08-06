@@ -39,8 +39,10 @@ from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
 from retail_agent.llm.errors import describe_llm_error
 from retail_agent.llm.provider import MissingCredentialsError, build_llm
+from retail_agent.knowledge.trios import UNDEFINED_TERMS as DEFINITION_HINTS
 from retail_agent.obs.traces import from_state as trace_from_state
 from retail_agent.obs.tracing import configure_tracing
+from retail_agent.store.definitions import ask_for_definition
 from retail_agent.store.preferences import preferred
 
 HELP = """
