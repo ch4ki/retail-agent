@@ -19,8 +19,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
 from rich.console import Console
 
-from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.graph import build_graph, run_turn
+from retail_agent.bootstrap import build_deps
 from retail_agent.cli.render import (
     render_answer,
     render_banner,
@@ -37,14 +37,9 @@ from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
 from retail_agent.llm.errors import describe_llm_error
 from retail_agent.llm.provider import MissingCredentialsError, build_llm
-from retail_agent.obs.traces import build_trace_store
 from retail_agent.obs.traces import from_state as trace_from_state
 from retail_agent.obs.tracing import configure_tracing
-from retail_agent.safety.pii import PiiPolicy
-from retail_agent.store.learning import InMemorySignalStore
-from retail_agent.store.personas import build_persona_store
-from retail_agent.store.preferences import build_preference_store, preferred
-from retail_agent.store.reports import build_report_store
+from retail_agent.store.preferences import preferred
 
 HELP = """
 [bold]Commands[/bold]
@@ -56,36 +51,6 @@ HELP = """
 Everything else is treated as a question about the data.
 """.strip()
 
-
-
-def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
-    """Assemble everything the graph needs from the stores.
-
-    Split out of `_chat` so it can be exercised without credentials — a missing
-    name in here used to surface only when a user ran the app, and was reported
-    as a BigQuery problem.
-    """
-
-    def warn(message: str):
-        return (lambda: console.print(f"[yellow]{message}[/yellow]")) if console else None
-
-    return AgentDeps(
-        settings=settings,
-        llm=llm,
-        source=source,
-        policy=PiiPolicy.default(),
-        traces=build_trace_store(settings),
-        personas=build_persona_store(settings),
-        preferences=build_preference_store(settings),
-        signals=InMemorySignalStore(),
-        reports=build_report_store(
-            settings,
-            on_degraded=warn(
-                "Reports will not be saved — Postgres is unreachable. Run "
-                "`docker compose up -d postgres && uv run retail-agent migrate`."
-            ),
-        ),
-    )
 
 
 def run_chat(args) -> int:

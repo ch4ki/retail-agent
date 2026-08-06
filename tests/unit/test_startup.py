@@ -11,7 +11,7 @@ that function.
 """
 
 from retail_agent.agent.deps import AgentDeps
-from retail_agent.cli.chat import build_deps
+from retail_agent.bootstrap import build_deps
 from retail_agent.config import Settings
 
 # Nothing listening here, so every store takes its degraded path.
@@ -71,3 +71,37 @@ def test_degradation_is_reported_to_the_user():
     build_deps(_settings(), llm=object(), source=object(), console=console)
 
     assert any("Postgres is unreachable" in m for m in console.messages)
+
+
+# --- the other entry point ---
+
+
+def test_the_studio_graph_builds():
+    """LangGraph Studio loads `studio.py` at import time and had its own copy
+    of the wiring. When `traces` was added to the CLI's construction and not to
+    that copy, `langgraph dev` failed to load and no test noticed — the module
+    could not be built without credentials, so nothing tried.
+
+    It goes through `build_deps` now, and this builds it with the credentialed
+    parts injected.
+    """
+    from retail_agent.agent.studio import build_studio_graph
+
+    assert build_studio_graph(llm=object(), source=object())
+
+
+def test_both_entry_points_use_the_same_wiring():
+    """The guarantee is structural: one function, two callers. A second
+    construction site is what broke Studio, so this asserts there is not one."""
+    import inspect
+
+    from retail_agent.agent import studio
+    from retail_agent.cli import chat
+
+    for module in (studio, chat):
+        source = inspect.getsource(module)
+        assert "AgentDeps(" not in source, (
+            f"{module.__name__} constructs AgentDeps directly; it should call "
+            f"build_deps so a new dependency cannot be added to one path only"
+        )
+        assert "build_deps" in source
