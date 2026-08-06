@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openrouter_api_key: str | None = None
     ollama_base_url: str = "http://localhost:11434"
+    # Providers to fall back to, in order, when the primary keeps failing.
+    # Comma-separated; ones without credentials are dropped rather than fatal.
+    # Empty means no chain, which is the common single-provider case.
+    llm_fallbacks: str = ""
+    llm_retry_attempts: int = 3
+    llm_breaker_threshold: int = 3
+    llm_breaker_cooldown_seconds: float = 60.0
 
     # --- BigQuery ---
     google_cloud_project: str | None = None
@@ -93,13 +100,24 @@ class Settings(BaseSettings):
 
     @property
     def resolved_model(self) -> str:
-        """Model for the active provider.
+        """Model for the active provider."""
+        return self.model_for(self.llm_provider)
 
-        A model name pinned for one provider must never be sent to another, so
-        the per-provider variable wins over the generic one.
+    def model_for(self, provider: str) -> str:
+        """Model for any provider in the chain.
+
+        A name pinned for one provider must never be sent to another, so the
+        per-provider variable wins over the generic one — and the generic
+        `LLM_MODEL` applies only to the *active* provider. Without that second
+        rule, setting `LLM_MODEL=gemini-2.5-pro` would send "gemini-2.5-pro" to
+        the OpenAI fallback the moment Gemini went down.
         """
-        specific = getattr(self, f"{self.llm_provider}_model", None)
-        return specific or self.llm_model or DEFAULT_MODELS[self.llm_provider]
+        specific = getattr(self, f"{provider}_model", None)
+        if specific:
+            return specific
+        if provider == self.llm_provider and self.llm_model:
+            return self.llm_model
+        return DEFAULT_MODELS[provider]
 
 
 @lru_cache(maxsize=1)

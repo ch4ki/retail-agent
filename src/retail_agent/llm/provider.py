@@ -1,14 +1,20 @@
 """Provider factory. One env var switches the whole agent between backends.
 
-Retry, fallback chains and the circuit breaker arrive in phase 2; this file is
-the seam they attach to.
+`build_llm` returns the primary alone when nothing else is configured, and a
+`ResilientChatModel` over the whole chain when it is — so the retry, fallback
+and circuit-breaker behaviour is opt-in per deployment and invisible to every
+caller either way.
 """
 
 from __future__ import annotations
 
+import logging
+
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from retail_agent.config import Settings
+
+log = logging.getLogger(__name__)
 
 
 class MissingCredentialsError(RuntimeError):
@@ -16,8 +22,50 @@ class MissingCredentialsError(RuntimeError):
 
 
 def build_llm(settings: Settings) -> BaseChatModel:
-    provider = settings.llm_provider
-    model = settings.resolved_model
+    """The model the agent calls: one provider, or a chain over several."""
+    chain = build_chain(settings)
+    if len(chain) == 1:
+        return chain[0][1]
+
+    from retail_agent.llm.resilience import CircuitBreaker, ResilientChatModel
+
+    return ResilientChatModel(
+        chain,
+        attempts=settings.llm_retry_attempts,
+        breaker=CircuitBreaker(
+            threshold=settings.llm_breaker_threshold,
+            cooldown_seconds=settings.llm_breaker_cooldown_seconds,
+        ),
+    )
+
+
+def build_chain(settings: Settings) -> list[tuple[str, BaseChatModel]]:
+    """The primary first, then each usable fallback.
+
+    A fallback whose credentials are missing is dropped with a warning: naming
+    a provider you have no key for should cost you that fallback, not the
+    agent. The primary is never dropped — a missing primary key is a
+    configuration error the user needs to see at startup.
+    """
+    chain: list[tuple[str, BaseChatModel]] = [
+        (settings.llm_provider, build_one(settings, settings.llm_provider))
+    ]
+    seen = {settings.llm_provider}
+
+    for name in (p.strip() for p in settings.llm_fallbacks.split(",")):
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        try:
+            chain.append((name, build_one(settings, name)))
+        except (MissingCredentialsError, ValueError) as err:
+            log.warning("fallback provider %s unavailable: %s", name, err)
+
+    return chain
+
+
+def build_one(settings: Settings, provider: str) -> BaseChatModel:
+    model = settings.model_for(provider)
     temperature = settings.llm_temperature
     max_tokens = settings.llm_max_tokens
 
