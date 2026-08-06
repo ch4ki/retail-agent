@@ -126,8 +126,10 @@ The executive asked:
 Query results:
 {results}
 
-Write the answer. Lead with the direct answer in one sentence, then the
-supporting detail. Use a markdown table when comparing more than two things.
+Write the answer.
+
+{style}
+
 If the results are empty or do not answer the question, say so plainly instead
 of speculating.
 """.strip()

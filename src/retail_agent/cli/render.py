@@ -10,12 +10,18 @@ from rich.table import Table
 from retail_agent.agent.state import TurnState
 
 
-def render_answer(console: Console, state: TurnState) -> None:
+def render_answer(console: Console, state: TurnState, prefs=None) -> None:
     answer = state.get("answer", "")
     if not answer:
         return
 
     console.print(Markdown(answer))
+
+    from retail_agent.store.preferences import DEFAULT_PREFERENCES
+
+    prefs = prefs or DEFAULT_PREFERENCES
+    if not prefs.show_attempt_footnote:
+        return
 
     footnotes = []
     if state.get("status") == "degraded":
@@ -229,3 +235,17 @@ def render_persona(console: Console, persona) -> None:
             style="cyan",
         )
     )
+
+
+def render_preferences(console: Console, prefs) -> None:
+    """Current settings, with what each one does and how to change it."""
+    from retail_agent.store.preferences import DESCRIPTIONS
+
+    table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+    table.add_column("setting")
+    table.add_column("value")
+    table.add_column("accepts", style="dim", overflow="fold")
+    for field, description in DESCRIPTIONS.items():
+        table.add_row(field, str(getattr(prefs, field)), description)
+    console.print(table)
+    console.print("[dim]Change one with: /prefs <setting> <value>[/dim]")

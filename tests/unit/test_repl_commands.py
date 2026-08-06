@@ -73,8 +73,11 @@ class FakeDeps:
 
         self.reports = FakeStore()
         self.traces = InMemoryTraceStore()
+        from retail_agent.store.preferences import InMemoryPreferenceStore
+
         self.personas = InMemoryPersonaStore()
         self.personas.seed(DEFAULT_PERSONA)
+        self.preferences = InMemoryPreferenceStore()
         self.settings = type("S", (), {"llm_provider": "gemini"})()
 
 
@@ -99,6 +102,11 @@ def run(script):
         "/persona show",
         "/persona activate analyst",
         "/persona activate nosuchpersona",
+        "/prefs",
+        "/prefs depth deep",
+        "/prefs depth nonsense",
+        "/prefs bogus value",
+        "/prefs depth",
     ],
 )
 def test_every_command_runs_without_raising(command):
@@ -163,6 +171,35 @@ def test_activating_switches_the_voice():
     _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
 
     assert deps.personas.active().name == "terse"
+
+
+def test_prefs_change_is_persisted():
+    console, deps, _ = run(["/prefs depth deep"])
+
+    assert deps.preferences.get(user_id="dana").depth == "deep"
+    assert "deep" in console.text()
+
+
+def test_a_rejected_pref_value_explains_the_options_and_changes_nothing():
+    console, deps, _ = run(["/prefs depth nonsense"])
+
+    assert "summary" in console.text(), "the options are named"
+    assert deps.preferences.get(user_id="dana").depth == "standard", "unchanged"
+
+
+def test_prefs_are_per_user():
+    """Manager A wants tables, Manager B wants bullets."""
+    from retail_agent.store.preferences import InMemoryPreferenceStore
+
+    shared = InMemoryPreferenceStore()
+    for user, fmt in (("dana", "bullets"), ("sam", "prose")):
+        console = FakeConsole([f"/prefs answer_format {fmt}"])
+        deps = FakeDeps()
+        deps.preferences = shared
+        _repl(console, graph=None, deps=deps, user=user, session_id="s1")
+
+    assert shared.get(user_id="dana").answer_format == "bullets"
+    assert shared.get(user_id="sam").answer_format == "prose"
 
 
 def test_undo_reaches_the_store():

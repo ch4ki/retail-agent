@@ -22,6 +22,7 @@ from retail_agent.cli.render import (
     render_metrics,
     render_persona,
     render_personas,
+    render_preferences,
     render_stored_trace,
     render_trace,
 )
@@ -104,6 +105,7 @@ def _chat(args) -> int:
             policy=PiiPolicy.default(),
             traces=build_trace_store(settings),
             personas=build_persona_store(settings),
+            preferences=build_preference_store(settings),
             reports=build_report_store(
                 settings,
                 on_degraded=lambda: console.print(
@@ -188,6 +190,9 @@ def _repl(console, graph, deps, user, session_id) -> int:
         if question.startswith("/trace"):
             _trace(console, deps, user, last_turn, question)
             continue
+        if question.startswith("/prefs"):
+            _prefs(console, deps, user, question)
+            continue
         if question.startswith("/persona"):
             _persona(console, deps, user, question)
             continue
@@ -198,6 +203,30 @@ def _repl(console, graph, deps, user, session_id) -> int:
         last_turn = (
             _answer(console, graph, deps, user, session_id, question) or last_turn
         )
+
+
+def _prefs(console, deps, user, command) -> None:
+    """`/prefs` shows them; `/prefs <setting> <value>` changes one."""
+    from retail_agent.store.preferences import PreferenceError, coerce, preferred
+
+    parts = command.split()
+    if len(parts) == 1:
+        render_preferences(console, preferred(deps.preferences, user))
+        return
+    if len(parts) < 3:
+        console.print("Usage: /prefs <setting> <value>  — /prefs lists them.")
+        return
+
+    field, value = parts[1], " ".join(parts[2:])
+    try:
+        parsed = coerce(field, value)
+    except PreferenceError as err:
+        console.print(f"[yellow]{err}[/yellow]")
+        return
+
+    updated = deps.preferences.set(user_id=user, **{field: parsed})
+    console.print(f"Set [bold]{field}[/bold] to {value}.")
+    render_preferences(console, updated)
 
 
 def _persona(console, deps, user, command) -> None:
@@ -286,7 +315,7 @@ def _answer(console, graph, deps, user, session_id, question) -> dict | None:
         return state or None
 
     _persist(deps, state)
-    render_answer(console, state)
+    render_answer(console, state, prefs=preferred(deps.preferences, user))
     return state
 
 

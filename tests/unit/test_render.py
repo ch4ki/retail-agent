@@ -11,9 +11,9 @@ def state_with(**overrides):
     return state
 
 
-def rendered(state) -> str:
+def rendered(state, prefs=None) -> str:
     console = Console(record=True, width=100)
-    render_answer(console, state)
+    render_answer(console, state, prefs=prefs)
     return console.export_text()
 
 
@@ -188,3 +188,33 @@ def test_the_attempt_count_excludes_the_diagnosis_marker():
 
     assert "2 query attempts" in rendered(state)
     assert "3 query attempts" not in rendered(state)
+
+
+# --- preferences honoured at render time, not asked for ---
+
+
+def test_the_footnote_can_be_switched_off():
+    """A preference applied at render cannot be ignored by a model having an
+    off day — unlike the layout instructions, which can only be asked for."""
+    from retail_agent.store.preferences import Preferences
+
+    state = state_with(answer="Revenue was $10.", redactions=4)
+
+    assert "masked" in rendered(state)
+    assert "masked" not in rendered(
+        state, prefs=Preferences(show_attempt_footnote=False)
+    )
+
+
+def test_row_caps_are_enforced_on_stored_frames():
+    from retail_agent.agent.state import MaskedFrame
+    from retail_agent.store.preferences import Preferences
+    import pandas as pd
+
+    frame = MaskedFrame.from_dataframe(
+        pd.DataFrame({"n": range(50)}), row_count=50, redactions=0
+    )
+
+    assert frame.to_markdown(max_rows=Preferences(max_table_rows=5).max_table_rows).count(
+        "\n|"
+    ) == 6, "header separator plus five rows"

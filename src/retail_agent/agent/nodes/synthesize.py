@@ -11,6 +11,7 @@ from retail_agent.agent.state import TurnState
 from retail_agent.llm.messages import message_text
 from retail_agent.safety.egress import scan_text
 from retail_agent.store.personas import active_body
+from retail_agent.store.preferences import preferred, style_instruction
 
 
 def synthesize_node(state: TurnState, deps: AgentDeps) -> dict:
@@ -44,6 +45,9 @@ def synthesize_node(state: TurnState, deps: AgentDeps) -> dict:
 
     prompt = SYNTHESIS_PROMPT.format(
         persona=active_body(deps.personas),
+        style=style_instruction(
+            preferred(deps.preferences, state.get("user_id", ""))
+        ),
         safety=SAFETY_RULES,
         question=question,
         results=results,
