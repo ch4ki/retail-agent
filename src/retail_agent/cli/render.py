@@ -23,7 +23,10 @@ def render_answer(console: Console, state: TurnState) -> None:
     redactions = state.get("redactions", 0)
     if redactions:
         footnotes.append(f"{redactions} personal-data values masked")
-    attempts = len(state.get("sql_attempts", []))
+    # A diagnosis marker is not a try the agent made; see SqlAttempt.
+    attempts = len(
+        [a for a in state.get("sql_attempts", []) if not a.is_diagnosis]
+    )
     if attempts > 1:
         footnotes.append(f"{attempts} query attempts")
 

@@ -167,3 +167,24 @@ def test_trace_on_a_turn_with_no_events_says_so():
     console = Console(record=True, width=110)
     render_trace(console, {})
     assert "no turn" in console.export_text().lower()
+
+
+def test_the_attempt_count_excludes_the_diagnosis_marker():
+    """A diagnosed turn drafts twice and runs twice. Recording the diagnosis as
+    a failed attempt is what lets draft_sql reuse its repair prompt, but the
+    user must not be told the agent tried three times."""
+    from retail_agent.agent.state import SqlAttempt
+
+    state = state_with(
+        answer="Revenue was $10,650.80.",
+        sql_attempts=[
+            SqlAttempt(step_id="step_1", sql="SELECT 1", row_count=1),
+            SqlAttempt(
+                step_id="step_1", sql="SELECT 1", error="empty", is_diagnosis=True
+            ),
+            SqlAttempt(step_id="step_1", sql="SELECT 2", row_count=4),
+        ],
+    )
+
+    assert "2 query attempts" in rendered(state)
+    assert "3 query attempts" not in rendered(state)

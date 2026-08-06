@@ -49,6 +49,7 @@ def diagnose_node(state: TurnState, deps: AgentDeps) -> dict:
             sql=last.sql,
             executed_sql=last.executed_sql,
             error=EMPTY_RESULT_DIAGNOSIS,
+            is_diagnosis=True,
         )
     )
 

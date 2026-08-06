@@ -53,6 +53,8 @@ Try:
 › delete all reports mentioning revenue
 › /reports        list what you have saved
 › /undo           reverse the last deletion
+› /trace          explain the last turn: nodes, timings, every SQL attempt
+› /metrics        first-pass SQL validity, self-correction, latency per node
 ```
 
 See [docs/example-run.md](docs/example-run.md) for an annotated transcript of a
@@ -66,7 +68,12 @@ and supply the matching key. No code change is needed.
 To pin a model, use the per-provider variable — `GEMINI_MODEL`, `OPENAI_MODEL`,
 `OPENROUTER_MODEL`, `OLLAMA_MODEL`. A name pinned there is only ever sent to
 that provider, so switching `LLM_PROVIDER` stays safe. The generic `LLM_MODEL`
-applies to whichever provider is active.
+applies to whichever provider is active, and is never sent to a fallback.
+
+For downtime rather than preference, set a chain: `LLM_FALLBACKS=openai,ollama`.
+Transient failures are retried on the current provider with jittered backoff, a
+rejected key moves on immediately, and a provider that keeps failing is skipped
+until a cooldown elapses.
 
 ## How it works
 
@@ -82,8 +89,13 @@ start_turn → route ─┬─ schema      answered from cached metadata, no SQL
                     │                   (a breakpoint: nothing writes before you answer)
                     └─ plan → draft_sql → guard → dry_run → execute → mask
                                   ↑                │              → synthesize → egress
-                                  └──── repair ────┘  (budget: 3, held by the graph)
+                                  ├──── repair ────┤  (budget: 3, held by the graph)
+                                  └─── diagnose ───┘  (budget: 1, for empty results)
 ```
+
+The two budgets are separate on purpose. An empty result is not a broken query —
+sometimes "no orders matched" is the true answer — so diagnosing one must not
+consume the retries that exist for SQL that genuinely failed.
 
 ## Viewing the pipeline in LangGraph Studio
 
@@ -148,8 +160,8 @@ every call.
 ## Tests
 
 ```bash
-uv run pytest              # 239 tests, no credentials or database needed
-uv run pytest -m db        # 14 tests, needs `docker compose up -d postgres`
+uv run pytest              # 303 tests, no credentials or database needed
+uv run pytest -m db        # 27 tests, needs `docker compose up -d postgres`
 uv run pytest -m live      # 6 tests, needs real BigQuery access and an LLM key
 ```
 
@@ -170,17 +182,17 @@ clashing with a local install. The agent still runs without it; you lose
 conversation history across restarts and saved reports, and it says so.
 
 **Rate limits on the Gemini free tier** — switch `LLM_PROVIDER` to `openrouter`
-or `ollama`.
+or `ollama`, or set `LLM_FALLBACKS` so the agent moves on by itself.
 
 ## Status
 
-Built: BigQuery access, SQL guard, PII masking, egress scan, bounded
-self-correction, the turn graph, the CLI, and the saved-reports library with its
-delete-confirmation gate, audit trail and `/undo`.
+Built: BigQuery access, SQL guard, PII masking, egress scan, the turn graph and
+the CLI; the saved-reports library with its delete-confirmation gate, audit
+trail and `/undo`; turn traces with `/trace`, `/trace <id>` and `/metrics`; and
+the full resilience story — bounded self-correction, the `diagnose` edge for
+empty results, and a provider fallback chain with a circuit breaker.
 
-LangSmith tracing is wired and verified. Not yet built: the local `traces` table
-and `/trace` replay, the `diagnose` edge for empty results, provider fallback and
-circuit breaker, personas and user preferences; the Golden Bucket of analyst
-Trios; the eval suite. Every one of those is designed in
+Not yet built: personas and user preferences, the Golden Bucket of analyst
+Trios, and the eval suite. Every one of those is designed in
 [docs/design.md](docs/design.md), which marks each requirement Built, Partial or
-Designed.
+Designed and names the command or test that demonstrates each Built claim.

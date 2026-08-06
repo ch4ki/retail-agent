@@ -39,6 +39,10 @@ class SqlAttempt:
     error: str | None = None
     row_count: int | None = None
     bytes_billed: int | None = None
+    # A diagnosis is not a try. It is recorded as a failed attempt so that
+    # `draft_sql` reuses its repair prompt without knowing diagnosis exists,
+    # but it never ran, so it must not be counted as an attempt the user made.
+    is_diagnosis: bool = False
 
     @property
     def failed(self) -> bool:
