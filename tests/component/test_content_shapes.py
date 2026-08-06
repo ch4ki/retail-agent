@@ -13,14 +13,14 @@ from retail_agent.agent.graph import build_graph, run_turn
 
 def turn(graph, question):
     return run_turn(
-        graph, user_id="dana", session_id="s1", question=question, repair_budget=2
+        graph, user_id="dana", session_id="s1", question=question
     )
 
 
 @pytest.mark.parametrize("blocks", [False, True], ids=["string-content", "block-content"])
 def test_schema_question_routes_to_schema(make_deps, source, blocks):
     deps = make_deps(
-        ["schema", "We hold orders, products and customers."],
+        [{"intent": "schema"}, "We hold orders, products and customers."],
         src=source,
         blocks=blocks,
     )
@@ -35,8 +35,8 @@ def test_schema_question_routes_to_schema(make_deps, source, blocks):
 def test_analysis_turn_produces_runnable_sql(make_deps, source, blocks):
     deps = make_deps(
         [
-            "analyze",
-            "STEP: total spend per customer",
+            {"intent": "analyze"},
+            {"steps": ["total spend per customer"]},
             "SELECT id, spend FROM users",
             "Your top customer spent $100.",
         ],
@@ -53,7 +53,7 @@ def test_analysis_turn_produces_runnable_sql(make_deps, source, blocks):
 
 @pytest.mark.parametrize("blocks", [False, True], ids=["string-content", "block-content"])
 def test_answer_is_never_a_python_repr(make_deps, source, blocks):
-    deps = make_deps(["chat", "Glad that helped."], src=source, blocks=blocks)
+    deps = make_deps([{"intent": "chat"}, "Glad that helped."], src=source, blocks=blocks)
     state = turn(build_graph(deps), "thanks")
 
     assert state["answer"] == "Glad that helped."

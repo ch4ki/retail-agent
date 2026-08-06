@@ -51,3 +51,40 @@ def test_bad_column_is_classified_as_a_syntax_error(source):
         source.execute(
             "SELECT nope FROM `bigquery-public-data.thelook_ecommerce.orders` LIMIT 1"
         )
+
+
+# Structured output varies more across providers than plain text does
+# (json_schema vs function_calling vs json_mode), and the component tests use a
+# double that validates rather than negotiates. These call the real provider.
+
+
+def _llm():
+    from retail_agent.config import Settings
+    from retail_agent.llm.provider import build_llm
+
+    try:
+        return build_llm(Settings())
+    except Exception as err:
+        pytest.skip(f"LLM unavailable: {err}")
+
+
+def test_router_schema_works_against_the_real_provider():
+    from retail_agent.agent.nodes.route import RouteDecision
+
+    decision = _llm().with_structured_output(RouteDecision).invoke(
+        "Which category is this: 'what tables do you have?'"
+    )
+
+    assert decision.intent in {"schema", "analyze", "chat"}
+
+
+def test_planner_schema_works_against_the_real_provider():
+    from retail_agent.agent.nodes.plan import Plan
+
+    plan = _llm().with_structured_output(Plan).invoke(
+        "Break into retrieval steps: compare revenue for brand X and brand Y."
+    )
+
+    assert isinstance(plan.steps, list)
+    assert all(isinstance(step, str) for step in plan.steps)
+    assert plan.steps, "a comparison should decompose into at least one step"

@@ -1,11 +1,12 @@
 from rich.console import Console
 
-from retail_agent.agent.state import SqlAttempt, new_turn_state
+from retail_agent.agent.state import SqlAttempt, fresh_scratch, new_turn_state
 from retail_agent.cli.render import render_answer, render_error
 
 
 def state_with(**overrides):
-    state = new_turn_state(user_id="d", session_id="s", question="q", repair_budget=2)
+    state = new_turn_state(user_id="d", session_id="s", question="q")
+    state.update(fresh_scratch(repair_budget=2))
     state.update(overrides)
     return state
 
@@ -51,3 +52,38 @@ def test_error_panel_includes_the_turn_id():
 
     assert "It broke." in text
     assert "abc123" in text
+
+
+def _action(count):
+    from retail_agent.agent.state import PendingAction
+
+    return PendingAction(
+        action_id="a1",
+        report_ids=tuple(f"id{i}" for i in range(count)),
+        titles=tuple(f"Report {i}" for i in range(count)),
+        token="y" if count == 1 else f"DELETE {count}",
+    )
+
+
+def test_manifest_lists_the_titles_and_the_required_token():
+    from retail_agent.cli.render import render_manifest
+
+    console = Console(record=True, width=100)
+    render_manifest(console, _action(2))
+    output = console.export_text()
+
+    assert "Report 0" in output
+    assert "Report 1" in output
+    assert "DELETE 2" in output
+
+
+def test_manifest_shows_every_title_it_is_given():
+    """Truncating would mean confirming a deletion you cannot see."""
+    from retail_agent.cli.render import render_manifest
+
+    console = Console(record=True, width=100)
+    render_manifest(console, _action(30))
+    output = console.export_text()
+
+    assert "Report 0" in output
+    assert "Report 29" in output

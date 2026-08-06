@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     openai_model: str | None = None
     openrouter_model: str | None = None
     ollama_model: str | None = None
-    llm_temperature: float = 0.75
+    llm_temperature: float = 0.0
     # Explicit output cap. Without one, providers reserve credit for the model's
     # full output ceiling (OpenRouter 402s on this), and per-turn cost is
     # unbounded. Every prompt here wants a query or a few paragraphs.
@@ -78,8 +78,14 @@ class Settings(BaseSettings):
     pii_salt: str = "dev-salt-change-me"
 
     # --- Agent ---
-    repair_budget: int = 2
-    max_analysis_steps: int = 4
+    # Failures tolerated per turn, not per step. The turn ends on the failure
+    # that empties it, so this is the attempt count: 3 attempts, 2 retries.
+    repair_budget: int = 3
+    max_analysis_steps: int = 10
+    # Prior messages shown to the router and planner so that "compare that to
+    # April" resolves to something queryable. Bounded: history grows for a whole
+    # session, and every turn pays for it in tokens.
+    history_messages: int = 6
 
     @property
     def resolved_model(self) -> str:

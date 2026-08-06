@@ -13,6 +13,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from retail_agent.config import Settings
 from retail_agent.datasources.base import DataSource
 from retail_agent.safety.pii import PiiPolicy
+from retail_agent.store.reports import ReportStore
 
 
 @dataclass(frozen=True)
@@ -21,3 +22,4 @@ class AgentDeps:
     llm: BaseChatModel
     source: DataSource
     policy: PiiPolicy
+    reports: ReportStore

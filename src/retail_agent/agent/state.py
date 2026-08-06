@@ -11,7 +11,7 @@ import pandas as pd
 from langchain_core.messages import AnyMessage, HumanMessage
 from langgraph.graph.message import add_messages
 
-Intent = Literal["chat", "schema", "analyze"]
+Intent = Literal["chat", "schema", "analyze", "report_op"]
 Status = Literal["ok", "degraded", "refused"]
 
 
@@ -20,14 +20,22 @@ class AnalysisStep:
     id: str
     question: str
     sql: str | None = None
-    result_key: str | None = None
 
 
 @dataclass
 class SqlAttempt:
+    """One try at answering a step: what the model wrote, and what became of it.
+
+    `draft_sql` opens the record with the guard's verdict; `execute` completes
+    the same record with the outcome. One row per attempt rather than one per
+    node visit, so `len(sql_attempts)` is the number of tries — the count the
+    CLI shows the user and the denominator of the self-correction rate.
+    """
+
     step_id: str
-    sql: str
+    sql: str  # as the model wrote it
     violations: tuple[str, ...] = ()
+    executed_sql: str | None = None  # after the guard qualified and limited it
     error: str | None = None
     row_count: int | None = None
     bytes_billed: int | None = None
@@ -35,6 +43,22 @@ class SqlAttempt:
     @property
     def failed(self) -> bool:
         return bool(self.violations) or self.error is not None
+
+
+@dataclass
+class PendingAction:
+    """A destructive operation resolved against the store, awaiting a typed
+    confirmation.
+
+    Staged by `report_ops`, read by `apply_delete` on the far side of the
+    breakpoint. It lives in graph state rather than in a transient payload so
+    that `get_state()` shows exactly what is pending.
+    """
+
+    action_id: str
+    report_ids: tuple[str, ...]
+    titles: tuple[str, ...]
+    token: str  # what the user must type back, verbatim
 
 
 # Checkpointed state must be serialisable, so results are stored as plain
@@ -45,7 +69,6 @@ MAX_STORED_ROWS = 100
 
 @dataclass
 class MaskedFrame:
-    key: str
     columns: tuple[str, ...]
     rows: tuple[tuple[Any, ...], ...]
     row_count: int
@@ -55,7 +78,6 @@ class MaskedFrame:
     @classmethod
     def from_dataframe(
         cls,
-        key: str,
         frame: pd.DataFrame,
         *,
         row_count: int,
@@ -64,7 +86,6 @@ class MaskedFrame:
     ) -> "MaskedFrame":
         head = frame.head(MAX_STORED_ROWS)
         return cls(
-            key=key,
             columns=tuple(str(column) for column in frame.columns),
             rows=tuple(
                 tuple(_cell(value) for value in row)
@@ -142,21 +163,43 @@ class TurnState(TypedDict, total=False):
     redactions: int
     answer: str
     status: Status
+    pending_action: PendingAction | None
+    confirmation: str
 
 
-def new_turn_state(
-    *, user_id: str, session_id: str, question: str, repair_budget: int
-) -> TurnState:
+def fresh_scratch(*, repair_budget: int) -> dict:
+    """Everything one turn accumulates. Nothing here may survive into the next.
+
+    Applied by `start_turn`, the graph's first node, so it holds on every entry
+    point: the CLI, LangGraph Studio, and a server invoking the compiled graph
+    with nothing but `messages` on a thread that already has state.
+
+    A field left out of this dict is inherited by the following turn. That has
+    cost us a repair budget that was already spent (so the turn degraded having
+    never retried) and a result frame that let a failed turn answer with the
+    previous turn's numbers. `test_every_turn_state_field_is_classified` fails
+    if a new `TurnState` field is not listed here or declared durable.
+    """
+    return {
+        "turn_id": uuid.uuid4().hex[:12],
+        "intent": "analyze",
+        "plan": [],
+        "step_index": 0,
+        "sql_attempts": [],
+        "frames": {},
+        "redactions": 0,
+        "answer": "",
+        "status": "ok",
+        "repair_budget": repair_budget,
+        "pending_action": None,
+        "confirmation": "",
+    }
+
+
+def new_turn_state(*, user_id: str, session_id: str, question: str) -> TurnState:
+    """Seed a CLI turn. Scratch is the graph's job — see `fresh_scratch`."""
     return TurnState(
         user_id=user_id,
         session_id=session_id,
-        turn_id=uuid.uuid4().hex[:12],
         messages=[HumanMessage(content=question)],
-        plan=[],
-        step_index=0,
-        sql_attempts=[],
-        frames={},
-        repair_budget=repair_budget,
-        redactions=0,
-        status="ok",
     )

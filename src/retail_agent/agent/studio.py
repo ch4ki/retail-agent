@@ -17,6 +17,7 @@ from retail_agent.datasources.bigquery import BigQuerySource
 from retail_agent.llm.provider import build_llm
 from retail_agent.obs.tracing import configure_tracing
 from retail_agent.safety.pii import PiiPolicy
+from retail_agent.store.reports import build_report_store
 
 
 def build_studio_graph():
@@ -28,6 +29,7 @@ def build_studio_graph():
         llm=build_llm(settings),
         source=BigQuerySource(settings),
         policy=PiiPolicy.default(),
+        reports=build_report_store(settings),
     )
     # No checkpointer: the Studio server owns thread persistence.
     return build_graph(deps)

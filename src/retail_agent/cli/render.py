@@ -30,6 +30,23 @@ def render_answer(console: Console, state: TurnState) -> None:
         console.print(f"[dim]{' · '.join(footnotes)}[/dim]")
 
 
+def render_manifest(console: Console, action) -> None:
+    """Show exactly what is about to be deleted, in full.
+
+    Every title is printed. A truncated list would mean asking someone to
+    confirm a deletion they cannot see.
+    """
+    lines = "\n".join(f"  • {title}" for title in action.titles)
+    console.print(
+        Panel(
+            f"About to delete {len(action.report_ids)} report(s):\n\n{lines}\n\n"
+            f"Type [bold]{action.token}[/bold] to confirm. Anything else cancels.",
+            title="Confirm deletion",
+            style="yellow",
+        )
+    )
+
+
 def render_error(console: Console, message: str, turn_id: str = "") -> None:
     suffix = f"\n\n[dim]turn {turn_id}[/dim]" if turn_id else ""
     console.print(Panel(f"{message}{suffix}", title="Something went wrong", style="red"))

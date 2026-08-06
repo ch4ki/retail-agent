@@ -16,6 +16,17 @@ from retail_agent.datasources.base import (
     TableSchema,
 )
 from retail_agent.safety.pii import PiiPolicy
+from retail_agent.store.memory_reports import InMemoryReportStore
+
+
+class ScriptExhausted(BaseException):
+    """Deliberately not an `Exception`.
+
+    Nodes catch `Exception` around model calls to degrade gracefully. If the
+    fake raised one, running out of replies would look like a provider failure
+    and the test would quietly pass through the fallback path instead of
+    failing. This one propagates through those handlers.
+    """
 
 
 class ScriptedLLM:
@@ -32,10 +43,7 @@ class ScriptedLLM:
         self.prompts: list[str] = []
 
     def invoke(self, messages, **kwargs):
-        self.prompts.append(_as_text(messages))
-        if not self.replies:
-            raise AssertionError("ScriptedLLM ran out of replies")
-        reply = self.replies.pop(0)
+        reply = self._next(messages)
         if self.blocks:
             return AIMessage(
                 content=[
@@ -43,6 +51,34 @@ class ScriptedLLM:
                 ]
             )
         return AIMessage(content=reply)
+
+    def with_structured_output(self, schema, **kwargs):
+        """Mirror the real runnable: the caller gets a validated model back.
+
+        Queue a dict (or an instance) for these calls. Validation is real, so a
+        reply the schema rejects fails the test rather than reaching the node.
+        """
+        return _ScriptedStructured(self, schema)
+
+    def _next(self, messages):
+        self.prompts.append(_as_text(messages))
+        if not self.replies:
+            raise ScriptExhausted("ScriptedLLM ran out of replies")
+        return self.replies.pop(0)
+
+
+class _ScriptedStructured:
+    def __init__(self, llm: "ScriptedLLM", schema):
+        self._llm = llm
+        self._schema = schema
+
+    def invoke(self, messages, **kwargs):
+        reply = self._llm._next(messages)
+        if isinstance(reply, self._schema):
+            return reply
+        if isinstance(reply, dict):
+            return self._schema(**reply)
+        return self._schema.model_validate_json(reply)
 
 
 def _as_text(messages) -> str:
@@ -110,13 +146,19 @@ def source():
 
 
 @pytest.fixture
-def make_deps(settings, source):
-    def _make(replies: list[str], src=None, blocks: bool = False):
+def reports():
+    return InMemoryReportStore()
+
+
+@pytest.fixture
+def make_deps(settings, source, reports):
+    def _make(replies: list, src=None, blocks: bool = False, store=None):
         return AgentDeps(
             settings=settings,
             llm=ScriptedLLM(replies, blocks=blocks),
             source=src or source,
             policy=PiiPolicy.default(),
+            reports=store or reports,
         )
 
     return _make

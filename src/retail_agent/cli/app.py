@@ -14,7 +14,12 @@ from rich.console import Console
 
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.graph import build_graph, run_turn
-from retail_agent.cli.render import render_answer, render_banner, render_error
+from retail_agent.cli.render import (
+    render_answer,
+    render_banner,
+    render_error,
+    render_manifest,
+)
 from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
 from retail_agent.llm.errors import describe_llm_error
@@ -22,10 +27,13 @@ from retail_agent.llm.provider import MissingCredentialsError, build_llm
 from retail_agent.obs.tracing import configure_tracing
 from retail_agent.safety.pii import PiiPolicy
 from retail_agent.store.db import run_migrations
+from retail_agent.store.reports import build_report_store
 
 HELP = """
 [bold]Commands[/bold]
   /help    show this
+  /reports list saved reports
+  /undo    restore the last deletion
   /quit    exit
 
 Everything else is treated as a question about the data.
@@ -65,7 +73,7 @@ def _migrate() -> int:
         )
         return 1
 
-    console.print(f"Applied: {applied or 'nothing new'}")
+    console.print(f"Database is at revision [bold]{applied}[/bold].")
     return 0
 
 
@@ -87,6 +95,14 @@ def _chat(args) -> int:
             llm=build_llm(settings),
             source=BigQuerySource(settings),
             policy=PiiPolicy.default(),
+            reports=build_report_store(
+                settings,
+                on_degraded=lambda: console.print(
+                    "[yellow]Reports will not be saved — Postgres is "
+                    "unreachable. Run `docker compose up -d postgres && "
+                    "uv run retail-agent migrate`.[/yellow]"
+                ),
+            ),
         )
     except MissingCredentialsError as err:
         render_error(console, str(err))
@@ -153,11 +169,37 @@ def _repl(console, graph, deps, user, session_id) -> int:
         if question == "/help":
             console.print(HELP)
             continue
+        if question == "/reports":
+            _show_reports(console, deps, user)
+            continue
+        if question == "/undo":
+            _undo(console, deps, user)
+            continue
 
         _answer(console, graph, deps, user, session_id, question)
 
 
+def _show_reports(console, deps, user) -> None:
+    saved = deps.reports.list_reports(owner_id=user)
+    if not saved:
+        console.print("No saved reports yet.")
+        return
+    for report in saved:
+        console.print(
+            f"[bold]{report.title}[/bold]  "
+            f"[dim]{report.id} · {report.created_at:%Y-%m-%d}[/dim]"
+        )
+
+
+def _undo(console, deps, user) -> None:
+    restored = deps.reports.undo(owner_id=user)
+    console.print(
+        f"Restored {restored} report(s)." if restored else "Nothing to undo."
+    )
+
+
 def _answer(console, graph, deps, user, session_id, question) -> None:
+    config = {"configurable": {"thread_id": session_id}}
     try:
         with console.status("thinking…"):
             state = run_turn(
@@ -165,9 +207,20 @@ def _answer(console, graph, deps, user, session_id, question) -> None:
                 user_id=user,
                 session_id=session_id,
                 question=question,
-                repair_budget=deps.settings.repair_budget,
-                config={"configurable": {"thread_id": session_id}},
+                config=config,
             )
+
+        # The graph breaks before `await_confirmation` when a delete is staged.
+        # Show the manifest, take the answer, and fill it in as though that node
+        # had produced it.
+        while graph.get_state(config).next == ("await_confirmation",):
+            render_manifest(console, graph.get_state(config).values["pending_action"])
+            typed = console.input("[bold yellow]›[/bold yellow] ").strip()
+            graph.update_state(
+                config, {"confirmation": typed}, as_node="await_confirmation"
+            )
+            with console.status("working…"):
+                state = graph.invoke(None, config)
     except Exception as err:  # the REPL must survive anything
         # Full detail goes to the log; the user gets one actionable line.
         logging.getLogger(__name__).exception("turn failed")

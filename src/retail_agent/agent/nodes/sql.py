@@ -17,12 +17,19 @@ FENCE = re.compile(r"^```(?:sql)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 
 
 def current_step(state: TurnState) -> AnalysisStep | None:
+    """Return the plan step the graph is currently working on, or None if done."""
     plan = state.get("plan", [])
     index = state.get("step_index", 0)
     return plan[index] if 0 <= index < len(plan) else None
 
 
 def draft_sql_node(state: TurnState, deps: AgentDeps) -> dict:
+    """Ask the model for SQL for the current step, then validate it with the guard.
+
+    Records the attempt either way. On success the step's `sql` is set and
+    `execute_node` will run it next; on failure `sql` stays None and the repair
+    budget is spent, which is what routes the graph back here for another try.
+    """
     step = current_step(state)
     if step is None:
         return {}
@@ -48,7 +55,6 @@ def draft_sql_node(state: TurnState, deps: AgentDeps) -> dict:
         id=step.id,
         question=step.question,
         sql=verdict.sql if verdict.ok else None,
-        result_key=step.result_key,
     )
 
     update: dict = {"plan": plan, "sql_attempts": attempts}
@@ -58,6 +64,8 @@ def draft_sql_node(state: TurnState, deps: AgentDeps) -> dict:
 
 
 def _prompt_for(state: TurnState, deps: AgentDeps, step: AnalysisStep) -> str:
+    """Pick the repair prompt if the last attempt for this step failed, else the
+    normal drafting prompt."""
     schema = render_schema(deps)
     attempts = state.get("sql_attempts", [])
     last = attempts[-1] if attempts else None
@@ -65,7 +73,14 @@ def _prompt_for(state: TurnState, deps: AgentDeps, step: AnalysisStep) -> str:
     if last is not None and last.step_id == step.id and last.failed:
         problem = "; ".join(last.violations) if last.violations else (last.error or "")
         return REPAIR_PROMPT.format(
-            sql=last.sql, error=problem, question=step.question, schema=schema
+            # A warehouse error describes the query the guard rewrote. Showing
+            # the pre-rewrite draft alongside it asks for a fix to a query that
+            # never ran; a guard violation has no rewrite, so it falls back.
+            sql=last.executed_sql or last.sql,
+            error=problem,
+            question=step.question,
+            schema=schema,
+            dataset=deps.settings.bq_dataset,
         )
 
     return SQL_PROMPT.format(
@@ -77,6 +92,8 @@ def _prompt_for(state: TurnState, deps: AgentDeps, step: AnalysisStep) -> str:
 
 
 def _prior_results(state: TurnState) -> str:
+    """Render earlier steps' results into text, so a later step in the same
+    plan can build on them (e.g. joining against a number already fetched)."""
     frames = state.get("frames", {})
     if not frames:
         return ""
@@ -88,4 +105,5 @@ def _prior_results(state: TurnState) -> str:
 
 
 def _strip_fences(text: str) -> str:
+    """Remove a ```sql ... ``` wrapper if the model added one despite being told not to."""
     return FENCE.sub("", text).strip()

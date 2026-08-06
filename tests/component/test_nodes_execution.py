@@ -3,16 +3,21 @@ import pandas as pd
 from retail_agent.agent.nodes.execute import execute_node
 from retail_agent.agent.nodes.sql import draft_sql_node
 from retail_agent.agent.nodes.synthesize import synthesize_node
-from retail_agent.agent.state import AnalysisStep, MaskedFrame, new_turn_state
+from retail_agent.agent.state import (
+    AnalysisStep,
+    MaskedFrame,
+    SqlAttempt,
+    fresh_scratch,
+    new_turn_state,
+)
 from tests.component.conftest import FakeSource
 
 
 def analysing_state(question="top customers", sql=None):
-    state = new_turn_state(
-        user_id="dana", session_id="s1", question=question, repair_budget=2
-    )
+    # The state as `start_turn` leaves it, since these call nodes directly.
+    state = new_turn_state(user_id="dana", session_id="s1", question=question)
+    state.update(fresh_scratch(repair_budget=2))
     state["plan"] = [AnalysisStep(id="step_1", question=question, sql=sql)]
-    state["step_index"] = 0
     return state
 
 
@@ -59,6 +64,22 @@ def test_repair_prompt_includes_the_previous_error(make_deps):
     assert "email" in deps.llm.prompts[-1]
 
 
+def test_repair_prompt_shows_the_sql_that_actually_ran(make_deps):
+    """The warehouse error describes the query the guard rewrote, not the one
+    the model typed. Pairing that error with the pre-rewrite SQL asks the model
+    to fix a query it never ran."""
+    broken = FakeSource(frames={}, failing={"BROKEN"})
+    deps = make_deps(["SELECT id FROM users"], src=broken)
+    state = analysing_state()
+    state["plan"][0].sql = "SELECT BROKEN FROM `bigquery-public-data.thelook.users`"
+    state["sql_attempts"] = [SqlAttempt(step_id="step_1", sql="SELECT BROKEN FROM users")]
+
+    state.update(execute_node(state, deps))
+    draft_sql_node(state, deps)
+
+    assert "`bigquery-public-data.thelook.users`" in deps.llm.prompts[-1]
+
+
 def test_execute_masks_pii_before_storing_the_frame(make_deps, source):
     deps = make_deps([], src=source)
     state = analysing_state(sql="SELECT id, email FROM users LIMIT 2")
@@ -93,7 +114,6 @@ def test_synthesize_scans_output_for_pii(make_deps):
     state = analysing_state()
     state["frames"] = {
         "step_1": MaskedFrame.from_dataframe(
-            "step_1",
             pd.DataFrame({"id": [1], "spend": [900]}),
             row_count=1,
             redactions=0,
@@ -151,7 +171,7 @@ def test_partial_step_failure_is_reported_not_glossed_over(make_deps):
     ]
     state["frames"] = {
         "step_1": MaskedFrame.from_dataframe(
-            "step_1", pd.DataFrame({"revenue": [106915]}), row_count=1, redactions=0
+            pd.DataFrame({"revenue": [106915]}), row_count=1, redactions=0
         )
     }
     state["sql_attempts"] = [
@@ -176,7 +196,7 @@ def test_all_steps_succeeding_stays_ok(make_deps):
     state["plan"] = [AnalysisStep(id="step_1", question="revenue")]
     state["frames"] = {
         "step_1": MaskedFrame.from_dataframe(
-            "step_1", pd.DataFrame({"revenue": [1]}), row_count=1, redactions=0
+            pd.DataFrame({"revenue": [1]}), row_count=1, redactions=0
         )
     }
 

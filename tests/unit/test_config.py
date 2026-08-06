@@ -13,6 +13,13 @@ def test_defaults_do_not_require_any_env(monkeypatch):
     assert "users" in settings.allowed_tables
 
 
+def test_repair_budget_allows_two_retries():
+    """The budget is the number of failures tolerated per turn, and the turn
+    ends on the one that empties it — so N attempts, N-1 retries. Three is what
+    the README's "retried at most twice" describes."""
+    assert Settings(_env_file=None).repair_budget == 3
+
+
 def test_env_overrides_defaults(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     monkeypatch.setenv("DEFAULT_ROW_LIMIT", "25")
