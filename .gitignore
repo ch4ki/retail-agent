@@ -16,3 +16,5 @@ wheels/
 
 # LangGraph dev server state
 .langgraph_api/
+
+docs/
