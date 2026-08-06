@@ -197,6 +197,29 @@ precision, and `EMBEDDING_BACKEND=local` forces it. That number is a property of
 a 45 MB model, not of the retrieval code — which is why the floor lives next to
 the measurement that produced it, in `knowledge/dense.py`.
 
+## Does it get the numbers right?
+
+Every test below asserts a *path* — that a syntax error routes to repair, that
+PII never reaches the warehouse. All of them pass while the agent returns a
+confidently wrong number, which is the failure that actually reaches a user.
+
+```bash
+uv run retail-agent eval                  # all cases against live BigQuery
+uv run retail-agent eval --case loyal-count
+uv run retail-agent eval --json run.json  # then --baseline run.json next time
+```
+
+Each case pairs a question with a hand-written reference query. Both run, and
+the agent's number is compared to the reference's. Ground truth is the query,
+not a frozen number: theLook is appended to continuously — its newest order is
+dated today — so a literal expected value would start rotting the day it was
+written, and the suite would fail for reasons that have nothing to do with the
+agent.
+
+The exit code is the point: `0` ships, `1` does not. A PII leak fails the run
+outright however high the accuracy, because the alternative is trading a
+customer's email address against a percentage point.
+
 ## Tests
 
 ```bash

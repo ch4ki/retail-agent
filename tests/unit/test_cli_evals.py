@@ -1,0 +1,65 @@
+"""The `retail-agent eval` command.
+
+Case selection and baseline reading are pure and tested here. The part that
+needs BigQuery and an LLM key is one function call away, behind `build_seams`.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from retail_agent.cli.evals import read_baseline, select_cases
+from retail_agent.evals.types import EvalCase
+
+CASES = (
+    EvalCase(id="a", question="q", reference_sql="s"),
+    EvalCase(id="b", question="q", reference_sql="s"),
+    EvalCase(id="c", question="q", reference_sql="s"),
+)
+
+
+def test_no_selection_runs_everything():
+    assert select_cases(CASES) == list(CASES)
+
+
+def test_named_cases_are_selected_in_corpus_order():
+    """Order comes from the corpus, not from the command line, so two runs of
+    the same set are comparable."""
+    assert [c.id for c in select_cases(CASES, ids=["c", "a"])] == ["a", "c"]
+
+
+def test_an_unknown_case_id_is_an_error_not_a_silent_empty_run():
+    """A typo would otherwise run zero cases and report a clean pass."""
+    with pytest.raises(ValueError, match="nope"):
+        select_cases(CASES, ids=["nope"])
+
+
+def test_limit_takes_the_first_n():
+    assert [c.id for c in select_cases(CASES, limit=2)] == ["a", "b"]
+
+
+def test_reading_a_baseline_returns_its_accuracy(tmp_path):
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps({"accuracy": 0.92, "passed": True, "results": []}))
+
+    assert read_baseline(str(path)) == 0.92
+
+
+def test_a_missing_baseline_is_not_fatal(tmp_path):
+    """The first run has no baseline, and CI must not fail because of that."""
+    assert read_baseline(str(tmp_path / "absent.json")) is None
+
+
+def test_an_unreadable_baseline_is_not_fatal(tmp_path):
+    """A corrupt baseline should not block a release; the threshold still
+    applies, and the regression check is the part that degrades."""
+    path = tmp_path / "broken.json"
+    path.write_text("{not json")
+
+    assert read_baseline(str(path)) is None
+
+
+def test_no_baseline_path_means_no_baseline():
+    assert read_baseline(None) is None

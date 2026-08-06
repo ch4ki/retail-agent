@@ -27,9 +27,25 @@ def main() -> int:
 
     sub.add_parser("migrate", help="apply database migrations")
 
+    evals = sub.add_parser("eval", help="score the agent's answers against reference SQL")
+    evals.add_argument("--case", action="append", help="run only these case ids")
+    evals.add_argument("--limit", type=int, help="run only the first N cases")
+    evals.add_argument(
+        "--threshold", type=float, default=None, help="minimum accuracy to pass"
+    )
+    evals.add_argument(
+        "--baseline",
+        help="a previous --json report; blocks on a regression against its accuracy",
+    )
+    evals.add_argument("--json", dest="json_path", help="write the full report here")
+
     args = parser.parse_args()
     if args.command == "migrate":
         return _migrate()
+    if args.command == "eval":
+        from retail_agent.cli.evals import run_evals
+
+        return run_evals(args)
     if args.command == "chat":
         # Imported here, not at module scope: this is the line that costs a
         # second, and only this subcommand needs it.
