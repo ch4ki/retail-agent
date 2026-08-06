@@ -55,6 +55,8 @@ Try:
 › /undo           reverse the last deletion
 › /trace          explain the last turn: nodes, timings, every SQL attempt
 › /metrics        first-pass SQL validity, self-correction, latency per node
+› /persona list   change the agent's tone without a restart
+› /prefs          your answer format, depth and table size
 ```
 
 See [docs/example-run.md](docs/example-run.md) for an annotated transcript of a
@@ -160,8 +162,8 @@ every call.
 ## Tests
 
 ```bash
-uv run pytest              # 303 tests, no credentials or database needed
-uv run pytest -m db        # 27 tests, needs `docker compose up -d postgres`
+uv run pytest              # 371 tests, no credentials or database needed
+uv run pytest -m db        # 51 tests, needs `docker compose up -d postgres`
 uv run pytest -m live      # 6 tests, needs real BigQuery access and an LLM key
 ```
 
@@ -192,7 +194,11 @@ trail and `/undo`; turn traces with `/trace`, `/trace <id>` and `/metrics`; and
 the full resilience story — bounded self-correction, the `diagnose` edge for
 empty results, and a provider fallback chain with a circuit breaker.
 
-Not yet built: personas and user preferences, the Golden Bucket of analyst
-Trios, and the eval suite. Every one of those is designed in
+Also built: personas, so a non-developer can change the agent's tone without a
+deploy — versioned, attributed, and provably unable to reach the safety rules —
+and per-user answer preferences.
+
+Not yet built: inferring preferences from behaviour, the Golden Bucket of
+analyst Trios, and the eval suite. Every one of those is designed in
 [docs/design.md](docs/design.md), which marks each requirement Built, Partial or
 Designed and names the command or test that demonstrates each Built claim.
