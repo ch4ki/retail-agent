@@ -23,6 +23,9 @@ dependencies = [
     "tenacity>=9.0.0",
     "sqlalchemy>=2.0.36",
     "alembic>=1.14.0",
+    "pymilvus[milvus-lite,model]>=3.0.1",
+    "transformers<5",
+    "milvus-model>=0.2.12",
 ]
 
 [project.scripts]
@@ -44,8 +47,9 @@ packages = ["src/retail_agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not live and not db'"
+addopts = "-m 'not live and not db and not vector'"
 markers = [
     "live: requires real BigQuery credentials or a real LLM API key",
     "db: requires a running Postgres (docker compose up -d postgres)",
+    "vector: downloads a local embedding model on first run",
 ]

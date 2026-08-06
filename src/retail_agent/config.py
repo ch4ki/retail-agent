@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     langsmith_project: str = "retail-agent"
     langsmith_endpoint: str | None = None
 
+    # --- Knowledge ---
+    # Dense retrieval over the trio corpus, via embedded Milvus Lite with a
+    # local ONNX embedding model. Off by default: the first call downloads the
+    # model, and lexical retrieval already works with no provider at all.
+    dense_retrieval: bool = False
+    milvus_path: str = "./.milvus/trios.db"
+
     # --- Safety ---
     pii_salt: str = "dev-salt-change-me"
 

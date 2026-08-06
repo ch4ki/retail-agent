@@ -38,3 +38,6 @@ class AgentDeps:
     # what protects the answer when nothing is retrieved.
     # A `TrioStore`, or a plain list in tests. `live_trios` accepts either.
     trios: TrioStore | list[Trio] = field(default_factory=list)
+    # Optional second ranker for retrieval. None means lexical only, which is
+    # the default and needs no model and no provider.
+    dense: object | None = None

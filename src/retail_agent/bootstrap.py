@@ -11,6 +11,7 @@ One function, called from both, covered by `tests/unit/test_startup.py`.
 from __future__ import annotations
 
 from retail_agent.agent.deps import AgentDeps
+from retail_agent.knowledge.dense import build_dense_index
 from retail_agent.knowledge.trios import build_trio_store
 from retail_agent.obs.traces import build_trace_store
 from retail_agent.safety.pii import PiiPolicy
@@ -32,6 +33,8 @@ def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
     def warn(message: str):
         return (lambda: console.print(f"[yellow]{message}[/yellow]")) if console else None
 
+    trios = build_trio_store(settings)
+
     return AgentDeps(
         settings=settings,
         llm=llm,
@@ -39,7 +42,8 @@ def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
         policy=PiiPolicy.default(),
         # Rows, seeded from the hand-authored corpus on first run, so a
         # definition can be edited or superseded without a deploy.
-        trios=build_trio_store(settings),
+        trios=trios,
+        dense=build_dense_index(settings),
         traces=build_trace_store(settings),
         personas=build_persona_store(settings),
         preferences=build_preference_store(settings),

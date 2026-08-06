@@ -88,3 +88,27 @@ def test_planner_schema_works_against_the_real_provider():
     assert isinstance(plan.steps, list)
     assert all(isinstance(step, str) for step in plan.steps)
     assert plan.steps, "a comparison should decompose into at least one step"
+
+
+# Dense retrieval against the real embedding model. Marked live because the
+# first run downloads it; the unit tests inject a fake embedder instead.
+
+
+def test_dense_retrieval_finds_a_synonym_the_lexical_ranker_misses():
+    """The case that justifies hybrid search: the executive says "lapsed", the
+    analyst wrote "churned", and no word overlaps."""
+    from retail_agent.knowledge.dense import MilvusDenseIndex
+    from retail_agent.knowledge.retrieval import retrieve
+    from retail_agent.knowledge.seeds import SEED_TRIOS
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        index = MilvusDenseIndex(path=f"{tmp}/trios.db")
+        question = "how many shoppers have gone quiet?"
+
+        lexical_only = retrieve(question, list(SEED_TRIOS))
+        hybrid = retrieve(question, list(SEED_TRIOS), dense_rank=index.rank)
+
+    assert not lexical_only, "no shared vocabulary with any trio"
+    assert hybrid, "the embedding model should recognise the paraphrase"

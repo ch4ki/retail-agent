@@ -34,11 +34,18 @@ RELEVANCE_FLOOR = 0.15
 
 _WORD = re.compile(r"[a-z0-9']+")
 
-# Words that carry no signal about which trio is relevant.
+# Filler carries no signal about which trio is relevant. "many" was in a live
+# question — "how many shoppers have gone quiet?" — and matched a trio whose
+# question read "How many loyal customers do we have?", on that word alone.
 _STOPWORDS = frozenset(
     """a an and are as at be by did do does for from has have how in into is it
     its of on or our that the their they this to was were what when where which
-    who why with you your me my show give tell""".split()
+    who why with you your me my show give tell
+    many much more most some any all every each few lot lots number count
+    there here we us i he she them him her it's dont don't can could would
+    should will shall may might must been being am get got had having
+    please just now then than so very really quite rather also too only
+    over under about across between within during while before after""".split()
 )
 
 

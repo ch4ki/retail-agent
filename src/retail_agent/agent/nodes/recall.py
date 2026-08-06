@@ -40,7 +40,11 @@ def recall_node(state: TurnState, deps: AgentDeps) -> dict:
         return {}
 
     try:
-        found = retrieve(question, live_trios(deps.trios))
+        found = retrieve(
+            question,
+            live_trios(deps.trios),
+            dense_rank=deps.dense.rank if deps.dense is not None else None,
+        )
     except Exception as err:  # retrieval is an improvement, not a dependency
         log.warning("trio retrieval failed (%s); answering without it", err)
         found = []

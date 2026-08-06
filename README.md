@@ -159,6 +159,26 @@ every call.
   counter lives in graph state, so the bound holds regardless of what the model
   decides. When it runs out the agent explains what it tried instead of looping.
 
+## Semantic search over the analyst corpus (optional)
+
+The agent answers from a corpus of analyst "trios" — question, SQL, report, and
+the metric definitions that connect them. Matching a question to the right trio
+is lexical by default, which needs nothing installed and no API key.
+
+Set `DENSE_RETRIEVAL=true` to add a semantic ranker fused with it:
+
+```
+› how many shoppers have gone quiet?
+  lexical: nothing        hybrid: loyal-customers
+› which labels sell best?
+  lexical: nothing        hybrid: brand-performance
+```
+
+It uses [Milvus Lite](https://milvus.io/docs/milvus_lite.md) — embedded, a
+single file, no server — and a local ONNX embedding model, so no data leaves
+the machine. The first call downloads that model, which is why it is off by
+default.
+
 ## Tests
 
 ```bash
