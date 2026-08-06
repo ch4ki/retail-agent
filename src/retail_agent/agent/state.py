@@ -184,6 +184,8 @@ class TurnState(TypedDict, total=False):
     pending_action: PendingAction | None
     events: list[TurnEvent]
     confirmation: str
+    trio_ids: list[str]
+    assumed_terms: list[str]
 
 
 def fresh_scratch(*, repair_budget: int, diagnose_budget: int = 1) -> dict:
@@ -214,6 +216,8 @@ def fresh_scratch(*, repair_budget: int, diagnose_budget: int = 1) -> dict:
         "pending_action": None,
         "events": [],
         "confirmation": "",
+        "trio_ids": [],
+        "assumed_terms": [],
     }
 
 

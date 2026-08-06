@@ -71,6 +71,8 @@ Schema:
 
 {prior_results}
 
+{definitions}
+
 Rules:
 - Fully qualify tables as `{dataset}.<table>`.
 - Revenue is order_items.sale_price. Exclude order_items with status
@@ -123,8 +125,12 @@ SYNTHESIS_PROMPT = """
 The executive asked:
 {question}
 
+{definitions}
+
 Query results:
 {results}
+
+{assumptions}
 
 Write the answer.
 

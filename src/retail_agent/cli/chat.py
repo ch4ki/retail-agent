@@ -32,6 +32,7 @@ from retail_agent.cli.render import (
     render_preferences,
     render_stored_trace,
     render_trace,
+    render_trios,
 )
 from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
@@ -46,7 +47,12 @@ HELP = """
   /help    show this
   /reports list saved reports
   /undo    restore the last deletion
-  /quit    exit
+  /trace   explain the last turn; /trace <id> reads a stored one back
+  /metrics first-pass SQL validity, self-correction, latency per node
+  /trios   the analyst definitions the agent answers from
+  /prefs   answer format, depth, table size; accept|decline a suggestion
+  /persona list|show|activate <name> — change the tone, no restart
+  /quit    exit (/exit works too)
 
 Everything else is treated as a question about the data.
 """.strip()
@@ -160,6 +166,9 @@ def _repl(console, graph, deps, user, session_id) -> int:
             continue
         if question.startswith("/persona"):
             _persona(console, deps, user, question)
+            continue
+        if question == "/trios":
+            render_trios(console, deps.trios)
             continue
         if question == "/metrics":
             render_metrics(console, deps.traces.metrics(owner_id=user))

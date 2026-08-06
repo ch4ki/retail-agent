@@ -11,6 +11,7 @@ One function, called from both, covered by `tests/unit/test_startup.py`.
 from __future__ import annotations
 
 from retail_agent.agent.deps import AgentDeps
+from retail_agent.knowledge.seeds import SEED_TRIOS
 from retail_agent.obs.traces import build_trace_store
 from retail_agent.safety.pii import PiiPolicy
 from retail_agent.store.learning import InMemorySignalStore
@@ -35,6 +36,9 @@ def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
         llm=llm,
         source=source,
         policy=PiiPolicy.default(),
+        # Hand-authored for the prototype; the brief marks the bucket
+        # theoretical. Production loads these from GCS and re-embeds on merge.
+        trios=list(SEED_TRIOS),
         traces=build_trace_store(settings),
         personas=build_persona_store(settings),
         preferences=build_preference_store(settings),

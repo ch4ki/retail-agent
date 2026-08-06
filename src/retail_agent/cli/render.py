@@ -249,3 +249,28 @@ def render_preferences(console: Console, prefs) -> None:
         table.add_row(field, str(getattr(prefs, field)), description)
     console.print(table)
     console.print("[dim]Change one with: /prefs <setting> <value>[/dim]")
+
+
+def render_trios(console: Console, trios) -> None:
+    """The Golden Bucket, and what each entry settles.
+
+    Shown as definitions rather than as questions, because the definition is
+    what actually changes an answer.
+    """
+    live = [t for t in trios if t.superseded_by is None]
+    if not live:
+        console.print("The Golden Bucket is empty — every business term will be assumed.")
+        return
+
+    table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+    table.add_column("trio")
+    table.add_column("defines")
+    table.add_column("meaning", overflow="fold")
+    for trio in live:
+        for index, (term, meaning) in enumerate(sorted(trio.metric_definitions.items())):
+            table.add_row(trio.id if index == 0 else "", term, meaning)
+    console.print(table)
+    console.print(
+        f"[dim]{len(live)} trio(s). A term with no entry here is stated as an "
+        f"assumption in the answer.[/dim]"
+    )

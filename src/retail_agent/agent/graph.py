@@ -17,6 +17,7 @@ from retail_agent.agent.nodes.chat import chat_node
 from retail_agent.agent.nodes.diagnose import diagnose_node
 from retail_agent.agent.nodes.execute import execute_node
 from retail_agent.agent.nodes.plan import plan_node
+from retail_agent.agent.nodes.recall import recall_node
 from retail_agent.agent.nodes.report_ops import (
     apply_delete,
     await_confirmation,
@@ -40,6 +41,7 @@ def build_graph(deps: AgentDeps, checkpointer=None):
     node("route", partial(route_node, deps=deps))
     node("schema", partial(schema_node, deps=deps))
     node("chat", partial(chat_node, deps=deps))
+    node("recall", partial(recall_node, deps=deps))
     node("plan", partial(plan_node, deps=deps))
     node("report_ops", partial(report_ops_node, deps=deps))
     node("await_confirmation", await_confirmation)
@@ -57,7 +59,7 @@ def build_graph(deps: AgentDeps, checkpointer=None):
         {
             "schema": "schema",
             "chat": "chat",
-            "plan": "plan",
+            "recall": "recall",
             "report_ops": "report_ops",
         },
     )
@@ -73,6 +75,7 @@ def build_graph(deps: AgentDeps, checkpointer=None):
     )
     builder.add_edge("await_confirmation", "apply_delete")
     builder.add_edge("apply_delete", END)
+    builder.add_edge("recall", "plan")
     builder.add_edge("plan", "draft_sql")
 
     builder.add_conditional_edges(
@@ -138,6 +141,11 @@ def _describe(name: str, state: TurnState) -> str:
         return f"intent={state.get('intent', '')}"
     if name == "plan":
         return f"{len(state.get('plan', []))} step(s)"
+    if name == "recall":
+        ids = state.get("trio_ids", [])
+        assumed = state.get("assumed_terms", [])
+        found = f"{len(ids)} trio(s): {', '.join(ids)}" if ids else "no trio matched"
+        return f"{found}; assuming: {', '.join(assumed)}" if assumed else found
     if name == "diagnose":
         return "empty result — redrafting to match more loosely"
     if name in {"draft_sql", "execute"}:
@@ -173,7 +181,7 @@ def _after_route(state: TurnState) -> str:
         return "chat"
     if intent == "report_op":
         return "report_ops"
-    return "plan"
+    return "recall"
 
 
 def _needs_confirmation(state: TurnState) -> str:

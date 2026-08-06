@@ -164,7 +164,10 @@ def assumption_note(terms: list[str]) -> str:
         return ""
     described = "; ".join(f"**{term}** — {UNDEFINED_TERMS[term]}" for term in terms)
     return (
-        "State plainly, before the answer, that no agreed definition exists for "
-        f"the following and say which one you are using: {described}. "
-        "One short sentence. Do not apologise, and do not refuse to answer."
+        "Before the answer, state in one sentence that no agreed definition "
+        f"exists for: {described}. Then give the concrete rule your query "
+        "actually applied — a threshold, a window or a ranking the reader "
+        'could check, such as "customers with 3 or more orders". Naming the '
+        "column or the alias is not a definition and does not help anyone. "
+        "Do not apologise, and do not refuse to answer."
     )

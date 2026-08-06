@@ -432,6 +432,7 @@ def test_events_record_the_repair_loop(make_deps, source):
     assert [e.node for e in state["events"]] == [
         "start_turn",
         "route",
+        "recall",
         "plan",
         "draft_sql",
         "draft_sql",

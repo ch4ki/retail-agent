@@ -5,10 +5,12 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage, HumanMessage
 
 from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.nodes.recall import recalled
 from retail_agent.agent.nodes.route import last_user_message
 from retail_agent.agent.prompts import SAFETY_RULES, SYNTHESIS_PROMPT
 from retail_agent.agent.state import TurnState
 from retail_agent.llm.messages import message_text
+from retail_agent.knowledge.trios import assumption_note, definitions_block
 from retail_agent.safety.egress import scan_text
 from retail_agent.store.personas import active_body
 from retail_agent.store.preferences import preferred, style_instruction
@@ -51,6 +53,8 @@ def synthesize_node(state: TurnState, deps: AgentDeps) -> dict:
         safety=SAFETY_RULES,
         question=question,
         results=results,
+        definitions=definitions_block(recalled(state, deps)),
+        assumptions=assumption_note(state.get("assumed_terms", [])),
     )
     reply = deps.llm.invoke([HumanMessage(content=prompt)])
     scanned = scan_text(message_text(reply))

@@ -4,6 +4,7 @@ succeeds, the whole suite passes, and the command is broken. These exercise the
 dispatch loop itself.
 """
 
+import inspect
 import io
 
 import pytest
@@ -84,6 +85,10 @@ class FakeDeps:
 
         self.preferences = InMemoryPreferenceStore()
         self.signals = InMemorySignalStore()
+
+        from retail_agent.knowledge.seeds import SEED_TRIOS
+
+        self.trios = list(SEED_TRIOS)
         self.settings = type("S", (), {"llm_provider": "gemini"})()
 
 
@@ -115,6 +120,7 @@ def run(script):
         "/prefs depth",
         "/prefs accept",
         "/prefs decline",
+        "/trios",
     ],
 )
 def test_every_command_runs_without_raising(command):
@@ -272,6 +278,13 @@ def test_declining_changes_nothing_and_stops_asking():
     assert "/prefs accept" not in asked_again.text(), "not asked again so soon"
 
 
+def test_trios_lists_what_the_agent_can_settle():
+    console, _, _ = run(["/trios"])
+
+    assert "churn" in console.text()
+    assert "trailing 90 days" in console.text(), "the definition, not just the term"
+
+
 def test_undo_reaches_the_store():
     _, deps, _ = run(["/undo"])
 
@@ -290,3 +303,28 @@ def test_blank_input_is_ignored_not_sent_to_the_agent():
     console, _, code = run(["", "   ", "/quit"])
 
     assert code == 0
+
+
+def test_every_handled_command_is_advertised():
+    """The other direction from `test_help_lists_only_commands_the_repl_handles`.
+
+    A command that works but is not in `/help` is one nobody finds — which is
+    how `/trace`, `/metrics`, `/prefs` and `/persona` all became invisible
+    during a refactor while still working perfectly.
+    """
+    import re
+
+    from retail_agent.cli import chat
+
+    source = inspect.getsource(chat._repl)
+    handled = set(re.findall(r'question(?:\s*==\s*|\.startswith\()"(/[a-z]+)"', source))
+    handled |= {
+        cmd
+        for group in re.findall(r'question in \{([^}]+)\}', source)
+        for cmd in re.findall(r'"(/[a-z]+)"', group)
+    }
+    advertised = set(re.findall(r"(/[a-z]+)", HELP))
+
+    assert handled - advertised == set(), (
+        f"handled but not in /help: {sorted(handled - advertised)}"
+    )
