@@ -162,7 +162,7 @@ every call.
 ## Tests
 
 ```bash
-uv run pytest              # 371 tests, no credentials or database needed
+uv run pytest              # 413 tests, no credentials or database needed
 uv run pytest -m db        # 51 tests, needs `docker compose up -d postgres`
 uv run pytest -m live      # 6 tests, needs real BigQuery access and an LLM key
 ```
@@ -198,7 +198,9 @@ Also built: personas, so a non-developer can change the agent's tone without a
 deploy — versioned, attributed, and provably unable to reach the safety rules —
 and per-user answer preferences.
 
-Not yet built: inferring preferences from behaviour, the Golden Bucket of
-analyst Trios, and the eval suite. Every one of those is designed in
+The agent also learns preferences from how you phrase questions, and proposes
+them rather than applying them — it will ask before changing anything.
+
+Not yet built: the Golden Bucket of analyst Trios, and the eval suite. Every one of those is designed in
 [docs/design.md](docs/design.md), which marks each requirement Built, Partial or
 Designed and names the command or test that demonstrates each Built claim.
