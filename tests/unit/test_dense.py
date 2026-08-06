@@ -7,6 +7,7 @@ the real one.
 
 import pytest
 
+from retail_agent.config import Settings
 from retail_agent.knowledge.dense import MilvusDenseIndex, build_dense_index, embedding_text
 from retail_agent.knowledge.retrieval import retrieve
 from retail_agent.knowledge.trios import Trio
@@ -149,3 +150,96 @@ def test_switching_it_on_produces_an_index():
     settings = Settings(_env_file=None, dense_retrieval=True)
 
     assert build_dense_index(settings) is not None
+
+
+def test_also_rans_are_dropped_even_when_they_clear_the_floor(tmp_path):
+    """The absolute floor rejects nonsense; this rejects the merely-related.
+
+    For an in-domain question every retail trio clears the floor, and five
+    trios' worth of definitions in the prompt is dilution rather than context.
+    """
+    index = MilvusDenseIndex(
+        path=str(tmp_path / "trios.db"),
+        embed=lambda texts: [[1.0, 0.0], [0.99, 0.14], [0.6, 0.8]][: len(texts)],
+        query_embed=lambda _texts: [[1.0, 0.0]],
+        dim=2,
+        min_similarity=0.3,
+        dominance=0.9,
+    )
+    trios = [
+        Trio(id="best", question="a", sql="", report="", metric_definitions={}),
+        Trio(id="close", question="b", sql="", report="", metric_definitions={}),
+        Trio(id="also-ran", question="c", sql="", report="", metric_definitions={}),
+    ]
+
+    ranked = index.rank("a", trios)
+
+    # 'also-ran' scores 0.6 — above the 0.3 floor, but far below the best.
+    assert [s.trio.id for s in ranked] == ["best", "close"]
+
+
+def test_switching_embedding_model_reindexes(tmp_path):
+    """Vectors from two embedders are not comparable and usually are not even
+    the same width, so a stale collection must be rebuilt rather than searched."""
+    trios = [Trio(id="t", question="a", sql="", report="", metric_definitions={})]
+    index = MilvusDenseIndex(
+        path=str(tmp_path / "trios.db"),
+        embed=lambda texts: [[1.0, 0.0] for _ in texts],
+        dim=2,
+        model_name="model-a",
+    )
+    index.index(trios)
+    before = index._indexed
+
+    index._model_name = "model-b"
+    index.index(trios)
+
+    assert index._indexed != before, "same corpus, different model: must re-embed"
+
+
+def test_openai_is_preferred_when_a_key_is_configured(monkeypatch):
+    """Not vendor preference: the local model's scores for relevant questions
+    overlap its scores for nonsense, so it has no usable relevance floor."""
+    pytest.importorskip("openai")
+    settings = Settings(
+        _env_file=None, dense_retrieval=True, openai_api_key="sk-test-not-called"
+    )
+
+    index = build_dense_index(settings)
+
+    assert index._model_name == "text-embedding-3-small"
+    assert index._dim == 1536
+    assert index._min_similarity == 0.20
+
+
+def test_without_a_key_it_falls_back_to_the_local_model():
+    """The feature has to work with no provider and no key, at a known cost."""
+    settings = Settings(_env_file=None, dense_retrieval=True, openai_api_key=None)
+
+    index = build_dense_index(settings)
+
+    assert index._model_name == "local"
+    assert index._dim == 768
+
+
+def test_asking_for_openai_without_a_key_degrades_rather_than_crashes():
+    settings = Settings(
+        _env_file=None,
+        dense_retrieval=True,
+        embedding_backend="openai",
+        openai_api_key=None,
+    )
+
+    assert build_dense_index(settings)._model_name == "local"
+
+
+def test_local_can_be_forced_even_when_a_key_exists():
+    """Keeps every embedding on the machine, which is the reason to want it."""
+    settings = Settings(
+        _env_file=None,
+        dense_retrieval=True,
+        embedding_backend="local",
+        openai_api_key="sk-test",
+    )
+
+    assert build_dense_index(settings)._model_name == "local"

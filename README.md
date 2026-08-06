@@ -165,26 +165,45 @@ The agent answers from a corpus of analyst "trios" — question, SQL, report, an
 the metric definitions that connect them. Matching a question to the right trio
 is lexical by default, which needs nothing installed and no API key.
 
-Set `DENSE_RETRIEVAL=true` to add a semantic ranker fused with it:
+Set `DENSE_RETRIEVAL=true` to add a semantic ranker fused with it. None of
+these questions share a distinctive word with the trio they find:
 
 ```
 › how many shoppers have gone quiet?
-  lexical: nothing        hybrid: loyal-customers
+  lexical: nothing        hybrid: churn-90
 › which labels sell best?
   lexical: nothing        hybrid: brand-performance
+› what is the capital of France?
+  lexical: nothing        hybrid: nothing        ← the floor, doing its job
 ```
 
-It uses [Milvus Lite](https://milvus.io/docs/milvus_lite.md) — embedded, a
-single file, no server — and a local ONNX embedding model, so no data leaves
-the machine. The first call downloads that model, which is why it is off by
-default.
+The index is [Milvus Lite](https://milvus.io/docs/milvus_lite.md) — embedded, a
+single file, no server. Embeddings come from `text-embedding-3-small` when
+`OPENAI_API_KEY` is set, and otherwise from a local ONNX model that needs no key
+and sends nothing off the machine.
+
+Those two are not equivalent, and the choice between them was measured rather
+than assumed — run `scripts/calibrate_dense.py` to reproduce it:
+
+| backend | right trio first | weakest true match | loudest nonsense |
+|---|---|---|---|
+| `text-embedding-3-small` | 4/5 | 0.296 | 0.102 |
+| local ONNX | 2/5 | 0.138 | 0.222 |
+
+The local model's ranges **overlap**: a question it should match scores lower
+than nonsense it should reject, so no relevance floor is both sensitive and
+precise. It is kept as the no-key fallback with the floor set to favour
+precision, and `EMBEDDING_BACKEND=local` forces it. That number is a property of
+a 45 MB model, not of the retrieval code — which is why the floor lives next to
+the measurement that produced it, in `knowledge/dense.py`.
 
 ## Tests
 
 ```bash
-uv run pytest              # 570 tests, no credentials or database needed
+uv run pytest              # 576 tests, no credentials or database needed
 uv run pytest -m db        # 72 tests, needs `docker compose up -d postgres`
 uv run pytest -m live      # 7 tests, needs real BigQuery access and an LLM key
+uv run pytest -m vector    # 14 tests, needs DENSE_RETRIEVAL deps; 9 need an OpenAI key
 ```
 
 The safety modules are pure functions and are tested first, against an
@@ -221,6 +240,11 @@ and per-user answer preferences.
 The agent also learns preferences from how you phrase questions, and proposes
 them rather than applying them — it will ask before changing anything.
 
-Not yet built: the Golden Bucket of analyst Trios, and the eval suite. Every one of those is designed in
+Also built: the Golden Bucket of analyst Trios — question, SQL, report and the
+metric definitions that connect them — with hybrid lexical/dense retrieval, a
+measured relevance floor, a clarifying question when a term is undefined that is
+remembered per user, and promotion of an answered definition into the corpus.
+
+Not yet built: the eval suite. It is designed in
 [docs/design.md](docs/design.md), which marks each requirement Built, Partial or
 Designed and names the command or test that demonstrates each Built claim.
