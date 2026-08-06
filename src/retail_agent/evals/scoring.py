@@ -46,13 +46,22 @@ def compare(*, actual: Any, expected: Any, tolerance: float = DEFAULT_TOLERANCE)
 
 
 def _compare_scalar(actual: Any, expected: Any, tolerance: float) -> Result:
+    expected_number = _as_number(expected)
+
+    # Plenty of real questions answer with a name rather than a number — which
+    # brand earns most, which category, which country. Demanding a number on
+    # both sides made those unscoreable, and two cases the agent answered
+    # *correctly* were reported as ERROR because "Calvin Klein" is not a float.
+    if expected_number is None:
+        if str(actual).strip() == str(expected).strip():
+            return Result(Outcome.PASS)
+        return Result(Outcome.FAIL, f"expected {expected!r}, got {actual!r}")
+
     actual_number = _as_number(actual)
     if actual_number is None:
+        # The reference is a number and the agent produced none. That is "no
+        # answer", not "the wrong name".
         return Result(Outcome.ERROR, f"no number could be read from {actual!r}")
-
-    expected_number = _as_number(expected)
-    if expected_number is None:
-        return Result(Outcome.ERROR, f"the reference is not a number: {expected!r}")
 
     if _close(actual_number, expected_number, tolerance):
         return Result(Outcome.PASS)

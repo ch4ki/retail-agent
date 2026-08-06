@@ -220,7 +220,7 @@ The exit code is the point: `0` ships, `1` does not. A PII leak fails the run
 outright however high the accuracy, because the alternative is trading a
 customer's email address against a percentage point.
 
-The first live run scored **44.7%** — 21 correct, 15 wrong, 11 unanswered, no
+The first live run scored **48.9%** — 23 correct, 15 wrong, 9 unanswered, no
 PII leaks — and found a defect none of the 785 path-based tests could see: on
 multi-step plans the agent inlines the previous step's truncated results into
 the next query as literals, then answers from them. See §5.7 of the design doc.

@@ -79,3 +79,36 @@ def test_non_finite_values_never_pass(actual):
     """NaN == NaN is False, and `abs(nan - x) < tol` is False, so a naive
     implementation reports FAIL rather than ERROR and buries the real problem."""
     assert compare(actual=actual, expected=5746).outcome is Outcome.ERROR
+
+
+# --- answers that are not numbers ---
+
+
+def test_a_matching_text_answer_passes():
+    """"Which brand earns the most?" answers with a name. Requiring a number on
+    both sides made three such cases unscoreable, and they were reported as
+    ERROR while the agent had in fact answered correctly."""
+    assert compare(actual="Calvin Klein", expected="Calvin Klein").outcome is Outcome.PASS
+
+
+def test_a_wrong_text_answer_fails():
+    result = compare(actual="Diesel", expected="Calvin Klein")
+
+    assert result.outcome is Outcome.FAIL
+    assert "Calvin Klein" in result.detail
+
+
+def test_text_comparison_ignores_surrounding_whitespace():
+    assert compare(actual="  Calvin Klein ", expected="Calvin Klein").outcome is Outcome.PASS
+
+
+def test_a_numeric_question_answered_in_prose_is_still_an_error():
+    """The existing rule must survive: when the reference is a number and the
+    agent produced none, that is "no answer", not "the wrong name"."""
+    assert compare(actual="quite a lot", expected=5746).outcome is Outcome.ERROR
+
+
+def test_a_number_matching_a_numeric_string_reference_still_compares_numerically():
+    """Guards against the text path swallowing numeric comparison: 5746.0 and
+    "5746" are the same answer."""
+    assert compare(actual=5746.0, expected="5746").outcome is Outcome.PASS
