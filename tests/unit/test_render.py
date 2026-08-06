@@ -87,3 +87,83 @@ def test_manifest_shows_every_title_it_is_given():
 
     assert "Report 0" in output
     assert "Report 29" in output
+
+
+def _traced_state():
+    from retail_agent.agent.state import SqlAttempt, TurnEvent
+
+    return {
+        "turn_id": "abc123def456",
+        "intent": "analyze",
+        "status": "ok",
+        "redactions": 4,
+        "events": [
+            TurnEvent(node="start_turn", duration_ms=0),
+            TurnEvent(node="route", duration_ms=310, detail="intent=analyze"),
+            TurnEvent(node="plan", duration_ms=900, detail="2 step(s)"),
+            TurnEvent(
+                node="draft_sql",
+                duration_ms=1200,
+                detail="step_1: guard rejected — Column 'email' is personal data.",
+            ),
+            TurnEvent(node="execute", duration_ms=450, detail="step_1: 10 row(s)"),
+        ],
+        "sql_attempts": [
+            SqlAttempt(
+                step_id="step_1",
+                sql="SELECT email AS c FROM users",
+                violations=("Column 'email' is personal data.",),
+            ),
+            SqlAttempt(
+                step_id="step_1",
+                sql="SELECT id FROM users",
+                executed_sql="SELECT id FROM `ds.users` LIMIT 500",
+                row_count=10,
+                bytes_billed=2048,
+            ),
+        ],
+    }
+
+
+def test_trace_shows_the_turn_id_and_every_node_in_order():
+    from retail_agent.cli.render import render_trace
+
+    console = Console(record=True, width=110)
+    render_trace(console, _traced_state())
+    output = console.export_text()
+
+    assert "abc123def456" in output
+    for node in ("start_turn", "route", "plan", "draft_sql", "execute"):
+        assert node in output
+    assert output.index("route") < output.index("plan") < output.index("execute")
+
+
+def test_trace_shows_why_a_query_was_rejected():
+    """The whole point: "3 query attempts" does not say what went wrong."""
+    from retail_agent.cli.render import render_trace
+
+    console = Console(record=True, width=110)
+    render_trace(console, _traced_state())
+    output = console.export_text()
+
+    assert "guard rejected" in output
+    assert "email" in output
+
+
+def test_trace_shows_both_the_drafted_and_the_executed_sql():
+    from retail_agent.cli.render import render_trace
+
+    console = Console(record=True, width=110)
+    render_trace(console, _traced_state())
+    output = console.export_text()
+
+    assert "SELECT email AS c FROM users" in output
+    assert "`ds.users`" in output, "the query that actually ran"
+
+
+def test_trace_on_a_turn_with_no_events_says_so():
+    from retail_agent.cli.render import render_trace
+
+    console = Console(record=True, width=110)
+    render_trace(console, {})
+    assert "no turn" in console.export_text().lower()

@@ -7,6 +7,7 @@ repair budget is decremented by the graph rather than by the model.
 
 from __future__ import annotations
 
+import time
 from functools import partial
 
 from langgraph.graph import END, START, StateGraph
@@ -25,23 +26,26 @@ from retail_agent.agent.nodes.schema_qa import schema_node
 from retail_agent.agent.nodes.sql import draft_sql_node
 from retail_agent.agent.nodes.start_turn import start_turn_node
 from retail_agent.agent.nodes.synthesize import synthesize_node
-from retail_agent.agent.state import TurnState, new_turn_state
+from retail_agent.agent.state import TurnEvent, TurnState, new_turn_state
 
 
 def build_graph(deps: AgentDeps, checkpointer=None):
     builder = StateGraph(TurnState)
 
-    builder.add_node("start_turn", partial(start_turn_node, deps=deps))
-    builder.add_node("route", partial(route_node, deps=deps))
-    builder.add_node("schema", partial(schema_node, deps=deps))
-    builder.add_node("chat", partial(chat_node, deps=deps))
-    builder.add_node("plan", partial(plan_node, deps=deps))
-    builder.add_node("report_ops", partial(report_ops_node, deps=deps))
-    builder.add_node("await_confirmation", await_confirmation)
-    builder.add_node("apply_delete", partial(apply_delete, deps=deps))
-    builder.add_node("draft_sql", partial(draft_sql_node, deps=deps))
-    builder.add_node("execute", partial(execute_node, deps=deps))
-    builder.add_node("synthesize", partial(synthesize_node, deps=deps))
+    def node(name: str, fn):
+        builder.add_node(name, _traced(name, fn))
+
+    node("start_turn", partial(start_turn_node, deps=deps))
+    node("route", partial(route_node, deps=deps))
+    node("schema", partial(schema_node, deps=deps))
+    node("chat", partial(chat_node, deps=deps))
+    node("plan", partial(plan_node, deps=deps))
+    node("report_ops", partial(report_ops_node, deps=deps))
+    node("await_confirmation", await_confirmation)
+    node("apply_delete", partial(apply_delete, deps=deps))
+    node("draft_sql", partial(draft_sql_node, deps=deps))
+    node("execute", partial(execute_node, deps=deps))
+    node("synthesize", partial(synthesize_node, deps=deps))
 
     builder.add_edge(START, "start_turn")
     builder.add_edge("start_turn", "route")
@@ -88,6 +92,65 @@ def build_graph(deps: AgentDeps, checkpointer=None):
         checkpointer=checkpointer,
         interrupt_before=["await_confirmation"],
     )
+
+
+def _traced(name: str, fn):
+    """Wrap a node so it records what it did and how long it took.
+
+    Applied at registration rather than inside each node, so a node added later
+    is traced by virtue of being on the graph — it cannot forget to report
+    itself. Events accumulate by read-modify-write rather than through a
+    reducer, because the graph runs its nodes sequentially and `fresh_scratch`
+    has to be able to blank the list at the head of each turn.
+    """
+
+    def traced(state: TurnState, *args, **kwargs) -> dict:
+        started = time.perf_counter()
+        update = fn(state, *args, **kwargs) or {}
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+        merged = {**state, **update}
+        event = TurnEvent(
+            node=name, duration_ms=elapsed_ms, detail=_describe(name, merged)
+        )
+        # A node that returns `events` wins, so `start_turn` can blank the log
+        # for a new turn without its own wrapper putting the old one back.
+        prior = update.get("events", state.get("events", []))
+        return {**update, "events": [*prior, event]}
+
+    return traced
+
+
+def _describe(name: str, state: TurnState) -> str:
+    """One line of what the node decided, for `/trace`.
+
+    Only values already in state — nothing new is computed and nothing
+    unmasked is read, so tracing cannot become its own disclosure path.
+    """
+    if name == "route":
+        return f"intent={state.get('intent', '')}"
+    if name == "plan":
+        return f"{len(state.get('plan', []))} step(s)"
+    if name in {"draft_sql", "execute"}:
+        attempts = state.get("sql_attempts", [])
+        if not attempts:
+            return ""
+        last = attempts[-1]
+        if last.violations:
+            return f"{last.step_id}: guard rejected — {'; '.join(last.violations)}"
+        if last.error:
+            return f"{last.step_id}: {last.error}"
+        if last.row_count is not None:
+            return f"{last.step_id}: {last.row_count} row(s), {last.bytes_billed} bytes"
+        return f"{last.step_id}: drafted, guard passed"
+    if name == "report_ops":
+        pending = state.get("pending_action")
+        return f"staged {len(pending.report_ids)} for deletion" if pending else "answered"
+    if name == "apply_delete":
+        return f"confirmation={state.get('confirmation', '')!r}"
+    if name == "synthesize":
+        return f"status={state.get('status', '')}"
+    return ""
 
 
 # --- routing functions: plain Python, no model involved ---

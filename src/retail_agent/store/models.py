@@ -1,4 +1,4 @@
-"""SQLAlchemy models — the persistence shape of saved reports.
+"""SQLAlchemy models — the persistence shape of saved reports and traces.
 
 Deliberately separate from the `Report` and `AuditEntry` dataclasses in
 `reports.py`. Those are the domain types the whole application passes around,
@@ -10,7 +10,18 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ARRAY, DateTime, Index, String, Text, func, text
+from sqlalchemy import (
+    ARRAY,
+    BigInteger,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -72,4 +83,56 @@ class ReportAuditRow(Base):
 
     __table_args__ = (
         Index("report_audit_owner_idx", "owner_id", text("performed_at DESC")),
+    )
+
+
+class TraceRow(Base):
+    """One row per completed turn — the summary a metric is computed from."""
+
+    __tablename__ = "traces"
+
+    turn_id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String, nullable=False)
+    owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    intent: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    redactions: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    bytes_billed: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # Every draft with its guard verdict, the query that ran, and its outcome.
+    # JSONB rather than a table: `/trace` reads them whole, and the shape is
+    # owned by `SqlAttempt` rather than by the schema.
+    attempts: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("traces_recent_idx", "owner_id", "created_at"),
+        Index("traces_session_idx", "session_id", "created_at"),
+    )
+
+
+class TurnEventRow(Base):
+    """One row per node execution.
+
+    A table rather than a JSON blob because per-node latency percentiles are a
+    named metric in the design, and that is a `GROUP BY node` — not something
+    to reimplement in Python over parsed JSON.
+    """
+
+    __tablename__ = "turn_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    turn_id: Mapped[str] = mapped_column(String, nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    node: Mapped[str] = mapped_column(String, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+
+    __table_args__ = (
+        Index("turn_events_turn_idx", "turn_id", "seq"),
+        Index("turn_events_node_idx", "node"),
     )

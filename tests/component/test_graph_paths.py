@@ -71,6 +71,7 @@ def test_two_failures_still_leave_room_for_a_third_attempt(make_deps, source):
     from retail_agent.agent.deps import AgentDeps
     from retail_agent.config import Settings
     from retail_agent.safety.pii import PiiPolicy
+    from retail_agent.obs.traces import InMemoryTraceStore
     from retail_agent.store.memory_reports import InMemoryReportStore
     from tests.component.conftest import ScriptedLLM
 
@@ -92,6 +93,7 @@ def test_two_failures_still_leave_room_for_a_third_attempt(make_deps, source):
         source=broken,
         policy=PiiPolicy.default(),
         reports=InMemoryReportStore(),
+        traces=InMemoryTraceStore(),
     )
     state = turn(build_graph(deps))
 
@@ -396,3 +398,66 @@ def test_a_failed_turn_does_not_answer_from_the_previous_turns_results(make_deps
 
     assert second["frames"] == {}
     assert second["status"] == "degraded"
+
+
+# Observability: the graph records what it did, so a turn can be explained
+# after the fact rather than guessed at from the answer text.
+
+
+def test_every_node_visit_records_a_timed_event(make_deps, source):
+    deps = make_deps([{"intent": "schema"}, "We hold orders and customers."], src=source)
+
+    state = turn(build_graph(deps), "what data do you have?")
+
+    assert [e.node for e in state["events"]] == ["start_turn", "route", "schema"]
+    assert all(e.duration_ms >= 0 for e in state["events"])
+
+
+def test_events_record_the_repair_loop(make_deps, source):
+    """The count in the footnote says "3 query attempts" and nothing else. The
+    event log is what distinguishes three steps from one step failing twice."""
+    deps = make_deps(
+        [
+            {"intent": "analyze"},
+            {"steps": ["top customers"]},
+            "SELECT email AS contact FROM users",  # guard rejects
+            "SELECT id, SUM(spend) AS spend FROM users GROUP BY id",
+            "Your top customer spent $100.",
+        ],
+        src=source,
+    )
+
+    state = turn(build_graph(deps))
+
+    assert [e.node for e in state["events"]] == [
+        "start_turn",
+        "route",
+        "plan",
+        "draft_sql",
+        "draft_sql",
+        "execute",
+        "synthesize",
+    ]
+
+
+def test_events_do_not_leak_into_the_next_turn(make_deps, source):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    deps = make_deps(
+        [
+            {"intent": "chat"},
+            "Glad that helped.",
+            {"intent": "chat"},
+            "Any time.",
+        ],
+        src=source,
+    )
+    graph = build_graph(deps, checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "s1"}}
+
+    run_turn(graph, user_id="d", session_id="s1", question="thanks", config=config)
+    second = run_turn(
+        graph, user_id="d", session_id="s1", question="thanks again", config=config
+    )
+
+    assert [e.node for e in second["events"]] == ["start_turn", "route", "chat"]

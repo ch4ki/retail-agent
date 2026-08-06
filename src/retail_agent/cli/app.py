@@ -19,11 +19,16 @@ from retail_agent.cli.render import (
     render_banner,
     render_error,
     render_manifest,
+    render_metrics,
+    render_stored_trace,
+    render_trace,
 )
 from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
 from retail_agent.llm.errors import describe_llm_error
 from retail_agent.llm.provider import MissingCredentialsError, build_llm
+from retail_agent.obs.traces import build_trace_store
+from retail_agent.obs.traces import from_state as trace_from_state
 from retail_agent.obs.tracing import configure_tracing
 from retail_agent.safety.pii import PiiPolicy
 from retail_agent.store.db import run_migrations
@@ -95,6 +100,7 @@ def _chat(args) -> int:
             llm=build_llm(settings),
             source=BigQuerySource(settings),
             policy=PiiPolicy.default(),
+            traces=build_trace_store(settings),
             reports=build_report_store(
                 settings,
                 on_degraded=lambda: console.print(
@@ -154,6 +160,7 @@ def _checkpointer(console: Console, database_url: str):
 
 
 def _repl(console, graph, deps, user, session_id) -> int:
+    last_turn: dict = {}
     while True:
         try:
             question = console.input("\n[bold cyan]›[/bold cyan] ").strip()
@@ -175,8 +182,16 @@ def _repl(console, graph, deps, user, session_id) -> int:
         if question == "/undo":
             _undo(console, deps, user)
             continue
+        if question.startswith("/trace"):
+            _trace(console, deps, user, last_turn, question)
+            continue
+        if question == "/metrics":
+            render_metrics(console, deps.traces.metrics(owner_id=user))
+            continue
 
-        _answer(console, graph, deps, user, session_id, question)
+        last_turn = (
+            _answer(console, graph, deps, user, session_id, question) or last_turn
+        )
 
 
 def _show_reports(console, deps, user) -> None:
@@ -198,8 +213,10 @@ def _undo(console, deps, user) -> None:
     )
 
 
-def _answer(console, graph, deps, user, session_id, question) -> None:
+def _answer(console, graph, deps, user, session_id, question) -> dict | None:
+    """Run one turn. Returns the finished state so the REPL can `/trace` it."""
     config = {"configurable": {"thread_id": session_id}}
+    state: dict = {}
     try:
         with console.status("thinking…"):
             state = run_turn(
@@ -224,12 +241,45 @@ def _answer(console, graph, deps, user, session_id, question) -> None:
     except Exception as err:  # the REPL must survive anything
         # Full detail goes to the log; the user gets one actionable line.
         logging.getLogger(__name__).exception("turn failed")
+        # The turn id makes a complaint a single lookup instead of an
+        # investigation, so it goes on screen rather than only into the log.
         render_error(
-            console, describe_llm_error(err, provider=deps.settings.llm_provider)
+            console,
+            describe_llm_error(err, provider=deps.settings.llm_provider),
+            turn_id=state.get("turn_id", ""),
         )
+        return state or None
+
+    _persist(deps, state)
+    render_answer(console, state)
+    return state
+
+
+def _persist(deps, state) -> None:
+    """Record the finished turn. A trace is a debugging aid, so failing to write
+    one must never cost the user their answer."""
+    if not state.get("turn_id"):
+        return
+    try:
+        deps.traces.record(trace_from_state(state))
+    except Exception as err:
+        logging.getLogger(__name__).debug("trace not recorded: %s", err)
+
+
+def _trace(console, deps, user, last_turn, command) -> None:
+    """`/trace` explains the last turn; `/trace <id>` reads one back from
+    storage, which is what makes a user's complaint a single lookup."""
+    _, _, wanted = command.partition(" ")
+    wanted = wanted.strip()
+    if not wanted:
+        render_trace(console, last_turn)
         return
 
-    render_answer(console, state)
+    stored = deps.traces.get(owner_id=user, turn_id=wanted)
+    if stored is None:
+        console.print(f"No trace for turn {wanted}.")
+        return
+    render_stored_trace(console, stored)
 
 
 if __name__ == "__main__":

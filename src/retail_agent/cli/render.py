@@ -5,6 +5,7 @@ from __future__ import annotations
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 
 from retail_agent.agent.state import TurnState
 
@@ -70,3 +71,123 @@ def render_banner(
     console.print(
         Panel(body, title=f"Retail Analysis Agent · {provider}:{model} · {project}")
     )
+
+
+def render_trace(console: Console, state) -> None:
+    """The full message correspondence for a turn.
+
+    Answers the question the footnote cannot: "3 query attempts" does not say
+    whether that was a three-step plan or one step failing twice, nor what the
+    guard objected to. This does.
+    """
+    events = (state or {}).get("events") or []
+    if not events:
+        console.print("No turn to trace yet — ask a question first.")
+        return
+
+    turn_id = state.get("turn_id", "unknown")
+    total_ms = sum(event.duration_ms for event in events)
+    console.print(
+        f"[bold]turn {turn_id}[/bold]  [dim]intent={state.get('intent', '?')} · "
+        f"status={state.get('status', '?')} · {total_ms} ms · "
+        f"{state.get('redactions', 0)} masked[/dim]"
+    )
+
+    table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+    table.add_column("node")
+    table.add_column("ms", justify="right")
+    table.add_column("what happened", overflow="fold")
+    for event in events:
+        table.add_row(event.node, str(event.duration_ms), event.detail)
+    console.print(table)
+
+    attempts = state.get("sql_attempts") or []
+    if not attempts:
+        return
+
+    console.print("\n[bold]SQL attempts[/bold]")
+    for index, attempt in enumerate(attempts, 1):
+        outcome = (
+            f"[red]rejected:[/red] {'; '.join(attempt.violations)}"
+            if attempt.violations
+            else f"[red]failed:[/red] {attempt.error}"
+            if attempt.error
+            else f"[green]{attempt.row_count} row(s), "
+            f"{attempt.bytes_billed} bytes[/green]"
+        )
+        console.print(f"  [dim]{index}. {attempt.step_id}[/dim] {outcome}")
+        console.print(f"     [dim]drafted:[/dim]  {attempt.sql}")
+        if attempt.executed_sql and attempt.executed_sql != attempt.sql:
+            console.print(f"     [dim]executed:[/dim] {attempt.executed_sql}")
+
+
+def render_stored_trace(console: Console, trace) -> None:
+    """A trace read back from storage.
+
+    Same shape as the live one, but reconstructed from rows rather than from
+    graph state — so `/trace <id>` answers a complaint about a turn that
+    happened days ago in a session that has since ended.
+    """
+    console.print(
+        f"[bold]turn {trace.turn_id}[/bold]  [dim]{trace.intent} · {trace.status} · "
+        f"{trace.duration_ms} ms · {trace.redactions} masked · "
+        f"{trace.bytes_billed} bytes[/dim]"
+    )
+    console.print(f"[dim]asked:[/dim] {trace.question}")
+
+    table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+    table.add_column("node")
+    table.add_column("ms", justify="right")
+    table.add_column("what happened", overflow="fold")
+    for node, duration_ms, detail in trace.events:
+        table.add_row(node, str(duration_ms), detail)
+    console.print(table)
+
+    if not trace.attempts:
+        return
+    console.print("\n[bold]SQL attempts[/bold]")
+    for index, attempt in enumerate(trace.attempts, 1):
+        if attempt.get("violations"):
+            outcome = f"[red]rejected:[/red] {'; '.join(attempt['violations'])}"
+        elif attempt.get("error"):
+            outcome = f"[red]failed:[/red] {attempt['error']}"
+        else:
+            outcome = f"[green]{attempt.get('row_count')} row(s)[/green]"
+        console.print(f"  [dim]{index}. {attempt.get('step_id')}[/dim] {outcome}")
+        console.print(f"     [dim]drafted:[/dim]  {attempt.get('sql')}")
+        executed = attempt.get("executed_sql")
+        if executed and executed != attempt.get("sql"):
+            console.print(f"     [dim]executed:[/dim] {executed}")
+
+
+def render_metrics(console: Console, metrics: dict) -> None:
+    """Agent-level metrics over recent turns.
+
+    Rates are shown as percentages with their denominator, because "50%
+    self-correction" over two turns is not the same claim as over two hundred.
+    """
+    if not metrics.get("turns"):
+        console.print("No turns recorded yet.")
+        return
+
+    turns = metrics["turns"]
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column("metric", style="dim")
+    table.add_column("value")
+    table.add_row("turns", str(turns))
+    table.add_row("degraded", f"{metrics['degraded_rate']:.0%}")
+    table.add_row("SQL valid first pass", f"{metrics['first_pass_validity']:.0%}")
+    table.add_row("self-correction succeeded", f"{metrics['self_correction_rate']:.0%}")
+    table.add_row("personal-data values masked", str(metrics["redactions"]))
+    table.add_row("bytes billed", f"{metrics['bytes_billed']:,}")
+    console.print(f"[bold]Over the last {turns} turn(s)[/bold]")
+    console.print(table)
+
+    if metrics.get("node_p50_ms"):
+        latency = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+        latency.add_column("node")
+        latency.add_column("p50 ms", justify="right")
+        for node, p50 in metrics["node_p50_ms"].items():
+            latency.add_row(node, str(p50))
+        console.print("\n[bold]Median latency per node[/bold]")
+        console.print(latency)

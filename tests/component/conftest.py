@@ -16,6 +16,7 @@ from retail_agent.datasources.base import (
     TableSchema,
 )
 from retail_agent.safety.pii import PiiPolicy
+from retail_agent.obs.traces import InMemoryTraceStore
 from retail_agent.store.memory_reports import InMemoryReportStore
 
 
@@ -151,7 +152,12 @@ def reports():
 
 
 @pytest.fixture
-def make_deps(settings, source, reports):
+def traces():
+    return InMemoryTraceStore()
+
+
+@pytest.fixture
+def make_deps(settings, source, reports, traces):
     def _make(replies: list, src=None, blocks: bool = False, store=None):
         return AgentDeps(
             settings=settings,
@@ -159,6 +165,7 @@ def make_deps(settings, source, reports):
             source=src or source,
             policy=PiiPolicy.default(),
             reports=store or reports,
+            traces=traces,
         )
 
     return _make

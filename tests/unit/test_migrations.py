@@ -46,7 +46,40 @@ def test_upgrade_and_downgrade_round_trip():
 
         command.upgrade(config, "head")
         tables = inspect(engine).get_table_names()
-        assert "reports" in tables
-        assert "report_audit" in tables
+        for table in ("reports", "report_audit", "traces", "turn_events"):
+            assert table in tables, f"{table} missing after upgrade"
     finally:
         engine.dispose()
+
+
+@pytest.mark.db
+def test_migrations_match_the_models():
+    """Revisions are hand-written when the database is not running, so nothing
+    but this stops `models.py` and `migrations/` from drifting apart. Structural
+    differences only — server defaults and index flavours produce noise that
+    would make the test useless."""
+    from alembic import command
+    from alembic.autogenerate import compare_metadata
+    from alembic.config import Config
+    from alembic.migration import MigrationContext
+
+    from retail_agent.config import Settings
+    from retail_agent.store.db import ALEMBIC_INI, PROJECT_ROOT, create_db_engine
+    from retail_agent.store.models import Base
+
+    settings = Settings()
+    config = Config(str(ALEMBIC_INI))
+    config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+    config.set_main_option("sqlalchemy.url", to_sqlalchemy_url(settings.database_url))
+    command.upgrade(config, "head")
+
+    structural = {"add_table", "remove_table", "add_column", "remove_column"}
+    engine = create_db_engine(settings.database_url)
+    try:
+        with engine.connect() as conn:
+            diffs = compare_metadata(MigrationContext.configure(conn), Base.metadata)
+    finally:
+        engine.dispose()
+
+    drifted = [d for d in diffs if isinstance(d, tuple) and d[0] in structural]
+    assert not drifted, f"models and migrations disagree: {drifted}"

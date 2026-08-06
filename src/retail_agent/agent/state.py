@@ -46,6 +46,19 @@ class SqlAttempt:
 
 
 @dataclass
+class TurnEvent:
+    """One node execution: what ran, how long it took, and what came of it.
+
+    Recorded by the graph rather than by the nodes, so a new node is traced the
+    moment it is registered and cannot forget to report itself.
+    """
+
+    node: str
+    duration_ms: int
+    detail: str = ""
+
+
+@dataclass
 class PendingAction:
     """A destructive operation resolved against the store, awaiting a typed
     confirmation.
@@ -164,6 +177,7 @@ class TurnState(TypedDict, total=False):
     answer: str
     status: Status
     pending_action: PendingAction | None
+    events: list[TurnEvent]
     confirmation: str
 
 
@@ -192,6 +206,7 @@ def fresh_scratch(*, repair_budget: int) -> dict:
         "status": "ok",
         "repair_budget": repair_budget,
         "pending_action": None,
+        "events": [],
         "confirmation": "",
     }
 
