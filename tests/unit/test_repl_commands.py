@@ -7,6 +7,8 @@ dispatch loop itself.
 import inspect
 import io
 
+from retail_agent.knowledge.seeds import SEED_TRIOS
+
 import pytest
 from rich.console import Console
 
@@ -90,9 +92,10 @@ class FakeDeps:
 
         self.definitions = InMemoryDefinitionStore()
 
-        from retail_agent.knowledge.seeds import SEED_TRIOS
+        from retail_agent.knowledge.trios import InMemoryTrioStore
 
-        self.trios = list(SEED_TRIOS)
+        self.trios = InMemoryTrioStore(SEED_TRIOS)
+
         self.settings = type("S", (), {"llm_provider": "gemini"})()
 
 
@@ -127,6 +130,7 @@ def run(script):
         "/trios",
         "/definitions",
         "/definitions forget loyal",
+        "/definitions promote loyal",
     ],
 )
 def test_every_command_runs_without_raising(command):
@@ -300,6 +304,25 @@ def test_a_remembered_definition_can_be_forgotten():
 
     assert deps.definitions.lookup(user_id="dana", term="loyal") is None
     assert "ask next time" in console.text()
+
+
+def test_promoting_a_term_you_never_defined_explains_itself():
+    console, _, _ = run(["/definitions promote loyal"])
+
+    assert "have not defined" in console.text()
+
+
+def test_promoting_puts_a_personal_definition_in_the_shared_bucket():
+    console = FakeConsole(["/definitions promote at risk"])
+    deps = FakeDeps()
+    deps.definitions.remember(user_id="dana", term="at risk", definition="120 days silent")
+
+    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+
+    from retail_agent.knowledge.trios import unresolved
+
+    assert unresolved("which customers are at risk?", deps.trios.live()) == []
+    assert "Everyone gets this definition" in console.text()
 
 
 def test_trios_lists_what_the_agent_can_settle():

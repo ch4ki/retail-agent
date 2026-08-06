@@ -140,6 +140,8 @@ Query results:
 
 {assumptions}
 
+{examples}
+
 Write the answer.
 
 {style}

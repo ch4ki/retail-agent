@@ -141,3 +141,26 @@ def test_no_assumption_means_no_extra_instruction_in_the_sql_prompt(make_deps):
 
     sql_prompt = deps.llm.prompts[2]
     assert "no agreed definition" not in sql_prompt.lower()
+
+
+def test_the_analysts_report_style_reaches_synthesis(make_deps):
+    """§5.1 calls the `report` field "hard to specify and easy to demonstrate":
+    split by cohort, compare to a baseline, close with numbered actions. It was
+    stored, tested, and never sent to the model."""
+    deps = make_deps(analysis_replies(), src=FakeSource(frames={"ok": ROWS}))
+    deps = deps.__class__(**{**deps.__dict__, "trios": list(SEED_TRIOS)})
+
+    turn(deps, "why did our churn rate spike last month?")
+
+    synthesis = [p for p in deps.llm.prompts if "Query results" in p][-1]
+    assert "acquired through Email" in synthesis, "the example report was included"
+    assert "not this content" in synthesis, "and framed as a shape to match"
+
+
+def test_no_trio_means_no_style_block(make_deps):
+    deps = make_deps(analysis_replies(), src=FakeSource(frames={"ok": ROWS}))
+
+    turn(deps, "what was total revenue in March 2024?")
+
+    synthesis = [p for p in deps.llm.prompts if "Query results" in p][-1]
+    assert "not this content" not in synthesis

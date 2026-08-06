@@ -14,7 +14,7 @@ from retail_agent.config import Settings
 from retail_agent.datasources.base import DataSource
 from retail_agent.safety.pii import PiiPolicy
 from retail_agent.obs.traces import TraceStore
-from retail_agent.knowledge.trios import Trio
+from retail_agent.knowledge.trios import Trio, TrioStore
 from retail_agent.store.definitions import DefinitionStore
 from retail_agent.store.learning import SignalStore
 from retail_agent.store.personas import PersonaStore
@@ -36,4 +36,5 @@ class AgentDeps:
     definitions: DefinitionStore | None = None
     # The Golden Bucket. Empty is a valid state — the undefined-term rule is
     # what protects the answer when nothing is retrieved.
-    trios: list[Trio] = field(default_factory=list)
+    # A `TrioStore`, or a plain list in tests. `live_trios` accepts either.
+    trios: TrioStore | list[Trio] = field(default_factory=list)

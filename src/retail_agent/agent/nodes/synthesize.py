@@ -10,7 +10,11 @@ from retail_agent.agent.nodes.route import last_user_message
 from retail_agent.agent.prompts import SAFETY_RULES, SYNTHESIS_PROMPT
 from retail_agent.agent.state import TurnState
 from retail_agent.llm.messages import message_text
-from retail_agent.knowledge.trios import assumption_note, definitions_block
+from retail_agent.knowledge.trios import (
+    assumption_note,
+    definitions_block,
+    style_examples,
+)
 from retail_agent.store.definitions import personal_definitions_block
 from retail_agent.safety.egress import scan_text
 from retail_agent.store.personas import active_body
@@ -63,6 +67,10 @@ def synthesize_node(state: TurnState, deps: AgentDeps) -> dict:
             if b
         ),
         assumptions=assumption_note(state.get("assumed_terms", [])),
+        # How analysts here write a finding. The definitions say what to
+        # measure; this says what a good answer looks like — split by cohort,
+        # compare against a baseline, close with numbered actions.
+        examples=style_examples(recalled(state, deps)),
     )
     reply = deps.llm.invoke([HumanMessage(content=prompt)])
     scanned = scan_text(message_text(reply))

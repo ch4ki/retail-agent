@@ -205,3 +205,36 @@ class UserDefinitionRow(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class TrioRow(Base):
+    """The Golden Bucket. Rows, not a Python constant, so a definition can be
+    edited and superseded without a deploy."""
+
+    __tablename__ = "trios"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    sql: Mapped[str] = mapped_column(Text, nullable=False)
+    report: Mapped[str] = mapped_column(Text, nullable=False)
+    metric_definitions: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    tags: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    author: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'analyst'"))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    # Set rather than deleting, so a report written under the old definition
+    # can still be explained against it.
+    superseded_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("trios_live_idx", "superseded_by"),
+    )

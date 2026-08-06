@@ -20,8 +20,10 @@ analyst's judgement and lets the agent write fresh SQL.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+from typing import Protocol, runtime_checkable
 
 # Words that look like columns and are not. Each one is a business judgement
 # somebody has to have made; the agent must never quietly make it alone.
@@ -191,3 +193,189 @@ def sql_assumption_note(terms: list[str]) -> str:
         "query parameter such as @threshold, ? or :name, because nothing binds "
         "them and the query will fail. Prefer a round, explainable number."
     )
+
+
+@runtime_checkable
+class TrioStore(Protocol):
+    """The corpus, as storage rather than as a constant.
+
+    Versioning is only meaningful if something can write it: `superseded_by`
+    was read in three places and writable from none until this existed.
+    """
+
+    def add(self, trio: Trio) -> Trio: ...
+
+    def get(self, trio_id: str) -> Trio | None: ...
+
+    def live(self) -> list[Trio]: ...
+
+    def supersede(self, *, old_id: str, new_id: str) -> Trio: ...
+
+    def seed(self, trios: Sequence[Trio]) -> None: ...
+
+
+class InMemoryTrioStore:
+    """Also the fallback when Postgres is unreachable: the agent still answers
+    from the seed corpus, and edits simply do not survive the session."""
+
+    def __init__(self, trios: Sequence[Trio] = ()) -> None:
+        self._trios: dict[str, Trio] = {t.id: t for t in trios}
+
+    def add(self, trio: Trio) -> Trio:
+        self._trios[trio.id] = trio
+        return trio
+
+    def get(self, trio_id: str) -> Trio | None:
+        return self._trios.get(trio_id)
+
+    def live(self) -> list[Trio]:
+        return [t for t in self._trios.values() if t.superseded_by is None]
+
+    def supersede(self, *, old_id: str, new_id: str) -> Trio:
+        old = self._trios.get(old_id)
+        if old is None:
+            raise KeyError(f"no trio {old_id!r}")
+        replaced = replace(old, superseded_by=new_id)
+        self._trios[old_id] = replaced
+        return replaced
+
+    def seed(self, trios: Sequence[Trio]) -> None:
+        for trio in trios:
+            self._trios.setdefault(trio.id, trio)
+
+
+def live_trios(store) -> list[Trio]:
+    """The corpus for this turn, whatever shape the caller holds.
+
+    Accepts a store or a plain list so a test can pass either, and never fails
+    a turn: an unreachable corpus costs grounding, not the answer.
+    """
+    if store is None:
+        return []
+    if isinstance(store, (list, tuple)):
+        return [t for t in store if t.superseded_by is None]
+    try:
+        return store.live()
+    except Exception:
+        return []
+
+
+class PostgresTrioStore:
+    """The corpus in Postgres. Superseding sets a column; nothing is deleted."""
+
+    def __init__(self, sessions) -> None:
+        self._sessions = sessions
+
+    def add(self, trio: Trio) -> Trio:
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        from retail_agent.store.models import TrioRow
+
+        values = {
+            "id": trio.id,
+            "question": trio.question,
+            "sql": trio.sql,
+            "report": trio.report,
+            "metric_definitions": dict(trio.metric_definitions),
+            "tags": list(trio.tags),
+            "author": trio.author,
+            "version": trio.version,
+            "superseded_by": trio.superseded_by,
+            "approved_at": trio.approved_at,
+        }
+        with self._sessions.begin() as session:
+            session.execute(
+                pg_insert(TrioRow)
+                .values(**values)
+                .on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={k: v for k, v in values.items() if k != "id"},
+                )
+            )
+        return trio
+
+    def get(self, trio_id: str) -> Trio | None:
+        from sqlalchemy import select
+
+        from retail_agent.store.models import TrioRow
+
+        with self._sessions() as session:
+            row = session.scalar(select(TrioRow).where(TrioRow.id == trio_id))
+        return _to_trio(row) if row else None
+
+    def live(self) -> list[Trio]:
+        from sqlalchemy import select
+
+        from retail_agent.store.models import TrioRow
+
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(TrioRow).where(TrioRow.superseded_by.is_(None)).order_by(TrioRow.id)
+            ).all()
+        return [_to_trio(row) for row in rows]
+
+    def supersede(self, *, old_id: str, new_id: str) -> Trio:
+        from sqlalchemy import update
+
+        from retail_agent.store.models import TrioRow
+
+        if self.get(old_id) is None:
+            raise KeyError(f"no trio {old_id!r}")
+        with self._sessions.begin() as session:
+            session.execute(
+                update(TrioRow).where(TrioRow.id == old_id).values(superseded_by=new_id)
+            )
+        return self.get(old_id)
+
+    def seed(self, trios: Sequence[Trio]) -> None:
+        """Insert what is absent, leave what is there. An analyst's edit has to
+        survive a restart."""
+        existing = {t.id for t in self._all()}
+        for trio in trios:
+            if trio.id not in existing:
+                self.add(trio)
+
+    def _all(self) -> list[Trio]:
+        from sqlalchemy import select
+
+        from retail_agent.store.models import TrioRow
+
+        with self._sessions() as session:
+            return [_to_trio(r) for r in session.scalars(select(TrioRow)).all()]
+
+
+def _to_trio(row) -> Trio:
+    return Trio(
+        id=row.id,
+        question=row.question,
+        sql=row.sql,
+        report=row.report,
+        metric_definitions=dict(row.metric_definitions or {}),
+        tags=tuple(row.tags or ()),
+        author=row.author,
+        version=row.version,
+        superseded_by=row.superseded_by,
+        approved_at=row.approved_at,
+    )
+
+
+def build_trio_store(settings, on_degraded=None):
+    """Postgres when reachable, memory when not — seeded either way, so the
+    agent always has the analysts' definitions even with no database."""
+    import logging
+
+    from retail_agent.knowledge.seeds import SEED_TRIOS
+    from retail_agent.store.db import create_db_engine, session_factory
+
+    try:
+        engine = create_db_engine(settings.database_url)
+        with engine.connect():
+            pass
+        store = PostgresTrioStore(session_factory(engine))
+        store.seed(SEED_TRIOS)
+        return store
+    except Exception as err:
+        logging.getLogger(__name__).debug("trio store degraded: %s", err)
+        if on_degraded is not None:
+            on_degraded()
+        return InMemoryTrioStore(SEED_TRIOS)

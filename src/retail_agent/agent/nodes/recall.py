@@ -22,7 +22,7 @@ from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.nodes.route import last_user_message
 from retail_agent.agent.state import TurnState
 from retail_agent.knowledge.retrieval import retrieve
-from retail_agent.knowledge.trios import unresolved
+from retail_agent.knowledge.trios import live_trios, unresolved
 from retail_agent.store.definitions import remembered
 
 log = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def recall_node(state: TurnState, deps: AgentDeps) -> dict:
         return {}
 
     try:
-        found = retrieve(question, deps.trios)
+        found = retrieve(question, live_trios(deps.trios))
     except Exception as err:  # retrieval is an improvement, not a dependency
         log.warning("trio retrieval failed (%s); answering without it", err)
         found = []
@@ -115,7 +115,7 @@ def recalled(state: TurnState, deps: AgentDeps) -> list:
     query, and a checkpoint per turn should not carry copies of the corpus.
     """
     wanted = set(state.get("trio_ids", []))
-    return [trio for trio in deps.trios if trio.id in wanted]
+    return [trio for trio in live_trios(deps.trios) if trio.id in wanted]
 
 
 def personal(state: TurnState, deps: AgentDeps) -> dict[str, str]:

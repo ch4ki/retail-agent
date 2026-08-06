@@ -40,6 +40,8 @@ from retail_agent.datasources.bigquery import BigQuerySource
 from retail_agent.llm.errors import describe_llm_error
 from retail_agent.llm.provider import MissingCredentialsError, build_llm
 from retail_agent.knowledge.trios import UNDEFINED_TERMS as DEFINITION_HINTS
+from retail_agent.knowledge.promotion import PromotionError, promote_definition
+from retail_agent.knowledge.trios import live_trios
 from retail_agent.obs.traces import from_state as trace_from_state
 from retail_agent.obs.tracing import configure_tracing
 from retail_agent.store.definitions import ask_for_definition
@@ -53,7 +55,7 @@ HELP = """
   /trace   explain the last turn; /trace <id> reads a stored one back
   /metrics first-pass SQL validity, self-correction, latency per node
   /trios   the analyst definitions the agent answers from
-  /definitions what you have told it terms mean; forget <term> to reset
+  /definitions what you told it terms mean; forget|promote <term>
   /prefs   answer format, depth, table size; accept|decline a suggestion
   /persona list|show|activate <name> — change the tone, no restart
   /quit    exit (/exit works too)
@@ -175,7 +177,7 @@ def _repl(console, graph, deps, user, session_id) -> int:
             _definitions(console, deps, user, question)
             continue
         if question == "/trios":
-            render_trios(console, deps.trios)
+            render_trios(console, live_trios(deps.trios))
             continue
         if question == "/metrics":
             render_metrics(console, deps.traces.metrics(owner_id=user))
@@ -272,6 +274,24 @@ def _definitions(console, deps, user, command) -> None:
     """`/definitions` lists what you told the agent; `/definitions forget <term>`
     drops one so it asks again."""
     parts = command.split()
+    if len(parts) >= 3 and parts[1] == "promote":
+        term = " ".join(parts[2:])
+        try:
+            trio = promote_definition(
+                deps.definitions, deps.trios, user_id=user, term=term,
+                promoted_by=user,
+            )
+        except PromotionError as err:
+            console.print(f"[yellow]{err}[/yellow]")
+            return
+        except Exception as err:
+            console.print(f"[yellow]Could not promote {term!r}: {err}[/yellow]")
+            return
+        console.print(
+            f"Promoted [bold]{term}[/bold] to the shared bucket as `{trio.id}`. "
+            f"Everyone gets this definition now; /trios shows it."
+        )
+        return
     if len(parts) >= 3 and parts[1] == "forget":
         term = " ".join(parts[2:])
         dropped = deps.definitions.forget(user_id=user, term=term)
