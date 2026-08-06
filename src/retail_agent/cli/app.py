@@ -35,6 +35,9 @@ from retail_agent.obs.traces import from_state as trace_from_state
 from retail_agent.obs.tracing import configure_tracing
 from retail_agent.safety.pii import PiiPolicy
 from retail_agent.store.db import run_migrations
+from retail_agent.store.learning import InMemorySignalStore
+from retail_agent.store.personas import build_persona_store
+from retail_agent.store.preferences import build_preference_store, preferred
 from retail_agent.store.reports import build_report_store
 
 HELP = """
@@ -85,6 +88,36 @@ def _migrate() -> int:
     return 0
 
 
+def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
+    """Assemble everything the graph needs from the stores.
+
+    Split out of `_chat` so it can be exercised without credentials — a missing
+    name in here used to surface only when a user ran the app, and was reported
+    as a BigQuery problem.
+    """
+
+    def warn(message: str):
+        return (lambda: console.print(f"[yellow]{message}[/yellow]")) if console else None
+
+    return AgentDeps(
+        settings=settings,
+        llm=llm,
+        source=source,
+        policy=PiiPolicy.default(),
+        traces=build_trace_store(settings),
+        personas=build_persona_store(settings),
+        preferences=build_preference_store(settings),
+        signals=InMemorySignalStore(),
+        reports=build_report_store(
+            settings,
+            on_degraded=warn(
+                "Reports will not be saved — Postgres is unreachable. Run "
+                "`docker compose up -d postgres && uv run retail-agent migrate`."
+            ),
+        ),
+    )
+
+
 def _chat(args) -> int:
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
@@ -98,27 +131,13 @@ def _chat(args) -> int:
     tracing = configure_tracing(settings)
 
     try:
-        deps = AgentDeps(
-            settings=settings,
-            llm=build_llm(settings),
-            source=BigQuerySource(settings),
-            policy=PiiPolicy.default(),
-            traces=build_trace_store(settings),
-            personas=build_persona_store(settings),
-            preferences=build_preference_store(settings),
-            signals=InMemorySignalStore(),
-            reports=build_report_store(
-                settings,
-                on_degraded=lambda: console.print(
-                    "[yellow]Reports will not be saved — Postgres is "
-                    "unreachable. Run `docker compose up -d postgres && "
-                    "uv run retail-agent migrate`.[/yellow]"
-                ),
-            ),
-        )
+        llm = build_llm(settings)
     except MissingCredentialsError as err:
         render_error(console, str(err))
         return 1
+
+    try:
+        source = BigQuerySource(settings)
     except Exception as err:
         render_error(
             console,
@@ -127,6 +146,16 @@ def _chat(args) -> int:
             "`gcloud auth application-default login`.\n\n"
             f"{err}",
         )
+        return 1
+
+    try:
+        deps = build_deps(settings, llm=llm, source=source, console=console)
+    except Exception as err:
+        # Anything here is a wiring fault, not the user's environment. Saying
+        # "check your GCP project" would send them to fix something that is
+        # not broken.
+        logging.getLogger(__name__).exception("startup failed")
+        render_error(console, f"The agent could not start: {err}")
         return 1
 
     session_id = uuid.uuid4().hex[:8]
