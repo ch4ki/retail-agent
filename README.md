@@ -190,12 +190,13 @@ transaction so they cannot drift apart. Embeddings come from
 `text-embedding-3-small`, so this needs `OPENAI_API_KEY` as well as the
 database. Without either, retrieval falls back to lexical.
 
-The relevance floor was measured, not guessed — run
-`uv run python scripts/calibrate_dense.py` to reproduce it:
+The relevance floor was measured, not guessed. Scoring paraphrased questions
+against the trio each should find, and unrelated questions against the whole
+corpus:
 
 ```
 text-embedding-3-small   top-1 4/5   weakest true match 0.296   loudest nonsense 0.102
-SEPARABLE — 0.194 of daylight; put the floor at 0.20
+0.194 of daylight between them, so the floor sits at 0.20
 ```
 
 That gap is the whole argument for the floor: a vector index always returns its

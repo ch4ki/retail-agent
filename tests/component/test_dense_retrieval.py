@@ -7,9 +7,10 @@ Marked `db` as well as `vector` because the vectors now live in the database
 rather than in a file beside it.
 
 The embedder is faked here on purpose. What is under test is the storage, the
-distance query and the two floors — not OpenAI's model, which cannot be asserted
-on without paying per run and inheriting its variance. The tests that do measure
-the real model are in `scripts/calibrate_dense.py`.
+distance query and the two floors — mechanics that must hold whichever model is
+configured. The model itself is not asserted on: it bills per run and its scores
+drift between versions, so the floor derived from it is recorded as a constant
+in `knowledge/dense.py` rather than re-measured on every test run.
 """
 
 from __future__ import annotations

@@ -109,7 +109,7 @@ def test_nothing_in_means_nothing_out():
 def test_the_floors_are_the_calibrated_ones():
     """Measured against the seed corpus with text-embedding-3-small: relevant
     questions scored 0.296 and up, unrelated ones no higher than 0.102. The
-    floor sits in that gap. See `scripts/calibrate_dense.py`."""
+    floor sits in that gap; `MIN_SIMILARITY` records the measurement."""
     assert 0.102 < MIN_SIMILARITY < 0.296
     assert 0.5 < DOMINANCE < 1.0
 

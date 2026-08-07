@@ -34,8 +34,15 @@ log = logging.getLogger(__name__)
 #
 # Measured against the seed corpus with text-embedding-3-small, not chosen a
 # priori: relevant questions scored 0.296 and up, unrelated ones reached no
-# higher than 0.102. The floor sits in that gap. Re-derive with
-# `scripts/calibrate_dense.py` after changing the corpus or the model.
+# higher than 0.102, and the floor sits in that gap.
+#
+# It is a property of the model AND the corpus, so it goes stale when either
+# moves. To re-derive: embed each seed trio, score a handful of paraphrased
+# questions against the trio each should find, score some unrelated questions
+# against the whole corpus, and put the floor between the two ranges. If they
+# overlap, that model cannot do this job — which is why the local ONNX model
+# this project first shipped with was dropped (relevant as low as 0.138,
+# nonsense up to 0.222).
 MIN_SIMILARITY = 0.20
 
 # The absolute floor rejects nonsense. This rejects the also-rans: for an
