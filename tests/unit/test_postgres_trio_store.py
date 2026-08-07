@@ -29,12 +29,23 @@ def sessions():
 class TestPostgresTrioStore(TrioStoreContract):
     @pytest.fixture
     def store(self, sessions):
+        """Clean before *and* after.
+
+        Truncating only on setup left whichever test ran last with its rows
+        still in the database — and this is the database the CLI reads, so a
+        stray `id='a'` trio showed up in a live run as a real analyst
+        definition.
+        """
         from sqlalchemy import text
 
-        with sessions.begin() as session:
-            # CASCADE because trio_embeddings references trios.
-            session.execute(text("TRUNCATE trios CASCADE"))
-        return PostgresTrioStore(sessions)
+        def clear():
+            with sessions.begin() as session:
+                # CASCADE because trio_embeddings references trios.
+                session.execute(text("TRUNCATE trios CASCADE"))
+
+        clear()
+        yield PostgresTrioStore(sessions)
+        clear()
 
 
 def test_satisfies_the_protocol(sessions):

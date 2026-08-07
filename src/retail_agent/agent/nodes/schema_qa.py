@@ -11,6 +11,7 @@ from retail_agent.agent.nodes.route import last_user_message
 from retail_agent.agent.prompts import SAFETY_RULES, SCHEMA_PROMPT
 from retail_agent.agent.state import TurnState
 from retail_agent.datasources.column_values import enumerable_columns, with_values
+from retail_agent.knowledge.conventions import notes_for
 from retail_agent.llm.messages import message_text
 from retail_agent.safety.egress import scan_text
 from retail_agent.store.personas import active_body
@@ -39,8 +40,20 @@ def render_schema_for_sql(deps: AgentDeps) -> str:
     """
     schemas = deps.source.describe_all()
     values = _discover_values(deps, schemas)
+    restricted = {name.lower() for name in deps.policy.restricted_columns()}
     return "\n\n".join(
-        with_values(schema, values.get(schema.name, {})).to_ddl() for schema in schemas
+        with_values(
+            schema,
+            values.get(schema.name, {}),
+            # Same rule as the values: nothing is said about a PII column, so a
+            # note added carelessly cannot end up describing one.
+            notes={
+                column: note
+                for column, note in notes_for(schema.name).items()
+                if column.lower() not in restricted
+            },
+        ).to_ddl()
+        for schema in schemas
     )
 
 

@@ -106,22 +106,36 @@ def read_discovery_row(
 
 
 def with_values(
-    schema: TableSchema, values: Mapping[str, Sequence[str]]
+    schema: TableSchema,
+    values: Mapping[str, Sequence[str]],
+    notes: Mapping[str, str] | None = None,
 ) -> TableSchema:
-    """A copy of the schema with discovered values folded into the descriptions.
+    """A copy of the schema with values and conventions folded into the
+    descriptions.
 
     Discovery is best-effort — a column with nothing found is left exactly as it
     was, rather than rendered with an empty list, which would read as "this
     column is empty".
+
+    `notes` says what the values *mean*, which the values themselves cannot.
+    Seeing that 'Complete' is a valid status made the model filter to it alone,
+    where a completed order is everything except Cancelled and Returned; the
+    note sits beside the list to say so. A note applies whether or not the
+    column had values discovered.
     """
+    notes = notes or {}
     columns = []
     for column in schema.columns:
+        parts = []
         found = values.get(column.name)
-        if not found:
+        if found:
+            parts.append("one of: " + ", ".join(f"'{value}'" for value in found))
+        note = notes.get(column.name)
+        if note:
+            parts.append(note)
+        if not parts:
             columns.append(column)
             continue
-        listed = ", ".join(f"'{value}'" for value in found)
-        note = f"one of: {listed}"
-        description = f"{column.description}. {note}" if column.description else note
-        columns.append(replace(column, description=description))
+        described = ". ".join([column.description, *parts] if column.description else parts)
+        columns.append(replace(column, description=described))
     return replace(schema, columns=tuple(columns))

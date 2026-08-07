@@ -182,3 +182,63 @@ def test_a_column_missing_from_the_row_is_skipped_not_an_error():
     from retail_agent.datasources.column_values import read_discovery_row
 
     assert read_discovery_row({}, ("gender",)) == {}
+
+
+# --- business conventions, beside the values they qualify ---
+
+
+def test_a_note_is_rendered_with_the_values():
+    """Live: the agent wrote `WHERE status = 'Complete'` — one of five statuses
+    — where the convention is NOT IN ('Cancelled','Returned'), undercounting
+    93,893 orders as 31,303. Seeing the values made 'Complete' look like the
+    answer; the convention has to sit next to them."""
+    from retail_agent.datasources.column_values import with_values
+
+    schema = table(string("status"))
+
+    ddl = with_values(
+        schema, {"status": ("Cancelled", "Complete")}, notes={"status": "Completed means not Cancelled and not Returned"}
+    ).to_ddl()
+
+    assert "'Cancelled', 'Complete'" in ddl
+    assert "not Cancelled and not Returned" in ddl
+
+
+def test_a_note_is_rendered_even_without_discovered_values():
+    """A convention on a numeric or high-cardinality column still matters."""
+    from retail_agent.datasources.column_values import with_values
+
+    ddl = with_values(table(string("state")), {}, notes={"state": "two-letter code"}).to_ddl()
+
+    assert "two-letter code" in ddl
+
+
+def test_a_column_with_no_note_is_unchanged():
+    from retail_agent.datasources.column_values import with_values
+
+    ddl = with_values(table(string("gender")), {"gender": ("F", "M")}, notes={}).to_ddl()
+
+    assert "'F', 'M'" in ddl
+    assert ddl.count("--") == 1
+
+
+def test_notes_are_optional():
+    """The existing call sites pass no notes and must keep working."""
+    from retail_agent.datasources.column_values import with_values
+
+    assert "'F', 'M'" in with_values(table(string("gender")), {"gender": ("F", "M")}).to_ddl()
+
+
+def test_theLook_defines_completed_for_both_status_columns():
+    """orders and order_items each carry a status, and the same convention
+    governs both — the agent joins them freely."""
+    from retail_agent.knowledge.conventions import notes_for
+
+    assert "Cancelled" in notes_for("orders")["status"]
+    assert "Cancelled" in notes_for("order_items")["status"]
+
+
+def test_a_table_with_no_conventions_yields_none():
+    from retail_agent.knowledge.conventions import notes_for
+
+    assert notes_for("distribution_centers") == {}

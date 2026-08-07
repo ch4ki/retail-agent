@@ -22,14 +22,15 @@ class ValueSource:
         self.queries: list[str] = []
 
     def list_tables(self):
-        return ["users"]
+        return ["orders"]
 
     def describe(self, table):
         return TableSchema(
-            name="users",
+            name="orders",
             columns=(
                 ColumnSchema(name="id", type="INTEGER"),
                 ColumnSchema(name="gender", type="STRING"),
+                ColumnSchema(name="status", type="STRING"),
                 ColumnSchema(name="email", type="STRING"),
             ),
         )
@@ -83,4 +84,37 @@ def test_discovery_failure_degrades_to_a_plain_schema(make_deps):
     rendered = render_schema_for_sql(deps)
 
     assert "gender STRING" in rendered
-    assert "one of" not in rendered
+    # "one of:" with the colon is what the value renderer emits; a business
+    # note may legitimately contain the words "one of".
+    assert "one of:" not in rendered
+
+
+def test_the_business_convention_reaches_the_sql_schema(make_deps):
+    """Values alone made the agent filter to status = 'Complete'. The note
+    saying what "completed" means has to travel with them."""
+    deps = make_deps([], src=ValueSource())
+
+    rendered = render_schema_for_sql(deps)
+
+    assert "NOT IN ('Cancelled', 'Returned')" in rendered
+
+
+def test_a_restricted_column_is_never_annotated(make_deps, monkeypatch):
+    """Same rule as the values: nothing is said about a PII column, so a note
+    added carelessly cannot describe one."""
+    from retail_agent.knowledge import conventions
+
+    monkeypatch.setattr(
+        conventions, "COLUMN_NOTES", {("users", "email"): "primary contact"}
+    )
+    deps = make_deps([], src=ValueSource())
+
+    assert "primary contact" not in render_schema_for_sql(deps)
+
+
+def test_the_structural_schema_carries_no_conventions(make_deps):
+    """`schema_node` answers "what data do you have" from table shape. Business
+    conventions belong to the query writer, and that path pays nothing."""
+    from retail_agent.agent.nodes.schema_qa import render_schema
+
+    assert "NOT IN" not in render_schema(make_deps([], src=ValueSource()))
