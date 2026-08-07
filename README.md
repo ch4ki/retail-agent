@@ -177,59 +177,27 @@ these questions share a distinctive word with the trio they find:
   lexical: nothing        hybrid: nothing        ← the floor, doing its job
 ```
 
-The index is [Milvus Lite](https://milvus.io/docs/milvus_lite.md) — embedded, a
-single file, no server. Embeddings come from `text-embedding-3-small` when
-`OPENAI_API_KEY` is set, and otherwise from a local ONNX model that needs no key
-and sends nothing off the machine.
+Vectors are stored with [pgvector](https://github.com/pgvector/pgvector) in the
+same Postgres that already holds the trios — one store to run, migrate and back
+up rather than two, and a trio and its embedding are written in the same
+transaction so they cannot drift apart. Embeddings come from
+`text-embedding-3-small`, so this needs `OPENAI_API_KEY` as well as the
+database. Without either, retrieval falls back to lexical.
 
-Those two are not equivalent, and the choice between them was measured rather
-than assumed — run `scripts/calibrate_dense.py` to reproduce it:
+The relevance floor was measured, not guessed — run
+`uv run python scripts/calibrate_dense.py` to reproduce it:
 
-| backend | right trio first | weakest true match | loudest nonsense |
-|---|---|---|---|
-| `text-embedding-3-small` | 4/5 | 0.296 | 0.102 |
-| local ONNX | 2/5 | 0.138 | 0.222 |
-
-The local model's ranges **overlap**: a question it should match scores lower
-than nonsense it should reject, so no relevance floor is both sensitive and
-precise. It is kept as the no-key fallback with the floor set to favour
-precision, and `EMBEDDING_BACKEND=local` forces it. That number is a property of
-a 45 MB model, not of the retrieval code — which is why the floor lives next to
-the measurement that produced it, in `knowledge/dense.py`.
-
-## Does it get the numbers right?
-
-Every test below asserts a *path* — that a syntax error routes to repair, that
-PII never reaches the warehouse. All of them pass while the agent returns a
-confidently wrong number, which is the failure that actually reaches a user.
-
-```bash
-uv run retail-agent eval                  # all cases against live BigQuery
-uv run retail-agent eval --case loyal-count
-uv run retail-agent eval --json run.json  # then --baseline run.json next time
+```
+text-embedding-3-small   top-1 4/5   weakest true match 0.296   loudest nonsense 0.102
+SEPARABLE — 0.194 of daylight; put the floor at 0.20
 ```
 
-Each case pairs a question with a hand-written reference query. Both run, and
-the agent's number is compared to the reference's. Ground truth is the query,
-not a frozen number: theLook is appended to continuously — its newest order is
-dated today — so a literal expected value would start rotting the day it was
-written, and the suite would fail for reasons that have nothing to do with the
-agent.
-
-The exit code is the point: `0` ships, `1` does not. A PII leak fails the run
-outright however high the accuracy, because the alternative is trading a
-customer's email address against a percentage point.
-
-The first live run scored **48.9%** and found a defect none of the path-based
-tests could see: on multi-step plans the agent inlined the previous step's
-truncated results into the next query as literals and answered from them.
-Fixing that took fabricated-literal SQL from 7 cases to **0**, and accuracy to
-**53.2%** — 25 correct, 15 wrong, 7 unanswered, no PII leaks.
-
-53% is the honest current state, and the remaining failures are mostly SQL
-authoring rather than analysis. Treat single-run accuracy carefully: about a
-quarter of cases change verdict between runs on an unchanged agent. See §5.7 of
-the design doc.
+That gap is the whole argument for the floor: a vector index always returns its
+nearest neighbour however far away it is, and a wrong trio is worse than no trio
+because it supplies a confident wrong definition the agent cannot tell is wrong.
+An earlier local ONNX model was dropped for failing exactly this test — its
+scores for relevant questions ran as low as 0.138 while nonsense reached 0.222,
+so no floor could be both sensitive and precise.
 
 ## Tests
 

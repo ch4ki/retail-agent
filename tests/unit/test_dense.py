@@ -1,68 +1,45 @@
-"""Dense retrieval.
+"""Dense retrieval over the Golden Bucket, in Postgres.
 
-The unit tests inject a deterministic embedder, so they exercise the index and
-the fusion without a model download or a network call. A live-marked test uses
-the real one.
+The ranking rules are pure and tested here. The storage half needs a real
+database with the `vector` extension and lives in `test_pgvector_index.py`
+behind `-m db`.
 """
+
+from __future__ import annotations
 
 import pytest
 
 from retail_agent.config import Settings
-from retail_agent.knowledge.dense import MilvusDenseIndex, build_dense_index, embedding_text
-from retail_agent.knowledge.retrieval import retrieve
+from retail_agent.knowledge.dense import (
+    DOMINANCE,
+    MIN_SIMILARITY,
+    build_dense_index,
+    embedding_text,
+    select_hits,
+    similarity_from_distance,
+)
+from retail_agent.knowledge.retrieval import Scored
 from retail_agent.knowledge.trios import Trio
 
-
-def trio(id, question, tags=(), definitions=None):
-    return Trio(
-        id=id, question=question, sql="SELECT 1", report="A finding.",
-        metric_definitions=definitions or {}, tags=tags,
-    )
-
-
-CHURN = trio("churn", "Which customers churned?", ("churn", "retention"),
-             {"churn": "no order in 90 days"})
-BRANDS = trio("brands", "Which brands drive revenue?", ("brand", "revenue"))
-CORPUS = [CHURN, BRANDS]
-
-
-# One dimension per *concept*, not per word — otherwise the fake cannot express
-# the only thing dense retrieval is here to do: recognise that "lapsed" and
-# "churned" mean the same thing. The trailing bias dimension keeps every vector
-# non-zero, because cosine similarity is undefined for a zero vector.
-CONCEPTS = (
-    ("churn", "churned", "lapsed", "retention", "stopped"),
-    ("brand", "brands", "revenue", "sales"),
+CHURN = Trio(
+    id="churn-90",
+    question="Why did our churn rate spike last month?",
+    sql="SELECT 1",
+    report="",
+    metric_definitions={"churn": "no completed order in 90 days"},
+    tags=("retention",),
 )
 
 
-def keyword_embedder(concepts=CONCEPTS):
-    """A stand-in for a real model. Deterministic and offline, so these tests
-    assert the index and the fusion rather than the quality of an embedding."""
-
-    def embed(texts):
-        vectors = []
-        for text in texts:
-            words = set(text.lower().replace("?", " ").replace(":", " ").split())
-            vectors.append(
-                [1.0 if words & set(group) else 0.0 for group in concepts] + [0.1]
-            )
-        return vectors
-
-    return embed
+def trio(trio_id: str) -> Trio:
+    return Trio(id=trio_id, question="q", sql="", report="", metric_definitions={})
 
 
-VOCAB = CONCEPTS
+def scored(trio_id: str, score: float) -> Scored:
+    return Scored(trio=trio(trio_id), score=score)
 
 
-@pytest.fixture
-def index(tmp_path):
-    return MilvusDenseIndex(
-        path=str(tmp_path / "trios.db"),
-        embed=keyword_embedder(),
-        dim=len(CONCEPTS) + 1,
-        min_similarity=0.35,
-    )
+# --- what gets embedded ---
 
 
 def test_what_is_embedded_covers_question_tags_and_definitions():
@@ -70,176 +47,100 @@ def test_what_is_embedded_covers_question_tags_and_definitions():
     about ranking rather than about what a trio is about."""
     text = embedding_text(CHURN).lower()
 
-    assert "churned" in text and "retention" in text and "90 days" in text
+    assert "churn" in text and "retention" in text and "90 days" in text
 
 
-def test_the_nearest_trio_ranks_first(index):
-    ranked = index.rank("what happened to churn?", CORPUS)
-
-    assert ranked and ranked[0].trio.id == "churn"
+# --- turning a distance into a score ---
 
 
-def test_an_empty_corpus_ranks_nothing(index):
-    assert index.rank("anything", []) == []
+def test_cosine_distance_becomes_a_similarity():
+    """pgvector's `<=>` returns a distance in [0, 2]. A floor is only meaningful
+    against a similarity, and every number in the calibration is one."""
+    assert similarity_from_distance(0.0) == 1.0
+    assert similarity_from_distance(1.0) == 0.0
+    assert similarity_from_distance(0.75) == pytest.approx(0.25)
 
 
-def test_reindexing_an_unchanged_corpus_is_skipped(index):
-    calls = []
-    index._embed = lambda texts: (calls.append(1), keyword_embedder()(texts))[1]
-
-    index.index(CORPUS)
-    index.index(CORPUS)
-
-    assert len(calls) == 1, "an unchanged corpus must not be re-embedded"
+# --- the two floors ---
 
 
-def test_a_changed_corpus_is_reindexed(index):
-    index.index(CORPUS)
-    before = index._indexed
+def test_a_hit_below_the_absolute_floor_is_dropped():
+    """A vector index always returns its nearest neighbour however far away it
+    is. Without a floor "what is the capital of France?" retrieves whichever
+    trio is least unlike it, and a bad trio is worse than no trio."""
+    hits = select_hits(
+        [scored("far", 0.10)], min_similarity=0.20, dominance=0.9
+    )
 
-    index.index([*CORPUS, trio("new", "Which customers lapsed?", ("lapsed",))])
-
-    assert index._indexed != before, "promotion has to be picked up without a restart"
-
-
-def test_a_broken_embedder_costs_recall_not_the_answer(index):
-    def explode(_texts):
-        raise RuntimeError("model download failed")
-
-    index._embed = explode
-
-    assert index.rank("what happened to churn?", CORPUS) == []
+    assert hits == []
 
 
-# --- what it adds to retrieval ---
+def test_a_hit_above_the_floor_is_kept():
+    assert [h.trio.id for h in select_hits([scored("near", 0.45)], min_similarity=0.20, dominance=0.9)] == ["near"]
 
 
-def test_dense_finds_what_lexical_cannot(index):
-    """The case that justifies hybrid at all: the executive says "lapsed", the
-    analyst wrote "churned", and no word overlaps."""
-    # No word here appears in any trio, so lexical finds nothing at all.
-    lexical_only = retrieve("lapsed accounts?", CORPUS)
-
-    hybrid = retrieve("lapsed accounts?", CORPUS, dense_rank=index.rank)
-
-    assert lexical_only == [], "no shared vocabulary"
-    assert [t.id for t in hybrid] == ["churn"]
-
-
-def test_dense_does_not_drag_in_something_irrelevant(index):
-    """The relevance floor still applies. A vector index always returns its
-    nearest neighbour, however far away it is."""
-    found = retrieve("what is the capital of France?", CORPUS, dense_rank=index.rank)
-
-    assert found == []
-
-
-# --- configuration ---
-
-
-def test_it_is_off_unless_switched_on():
-    """The first call downloads a model. A grader should choose that."""
-    from retail_agent.config import Settings
-
-    assert build_dense_index(Settings(_env_file=None)) is None
-
-
-def test_switching_it_on_produces_an_index():
-    from retail_agent.config import Settings
-
-    settings = Settings(_env_file=None, dense_retrieval=True)
-
-    assert build_dense_index(settings) is not None
-
-
-def test_also_rans_are_dropped_even_when_they_clear_the_floor(tmp_path):
-    """The absolute floor rejects nonsense; this rejects the merely-related.
-
-    For an in-domain question every retail trio clears the floor, and five
-    trios' worth of definitions in the prompt is dilution rather than context.
-    """
-    index = MilvusDenseIndex(
-        path=str(tmp_path / "trios.db"),
-        embed=lambda texts: [[1.0, 0.0], [0.99, 0.14], [0.6, 0.8]][: len(texts)],
-        query_embed=lambda _texts: [[1.0, 0.0]],
-        dim=2,
-        min_similarity=0.3,
+def test_also_rans_are_dropped_even_when_they_clear_the_floor():
+    """For an in-domain question every retail trio clears the absolute floor,
+    and five trios' worth of definitions in a prompt is dilution rather than
+    context."""
+    hits = select_hits(
+        [scored("best", 0.48), scored("close", 0.45), scored("also-ran", 0.25)],
+        min_similarity=0.20,
         dominance=0.9,
     )
-    trios = [
-        Trio(id="best", question="a", sql="", report="", metric_definitions={}),
-        Trio(id="close", question="b", sql="", report="", metric_definitions={}),
-        Trio(id="also-ran", question="c", sql="", report="", metric_definitions={}),
-    ]
 
-    ranked = index.rank("a", trios)
-
-    # 'also-ran' scores 0.6 — above the 0.3 floor, but far below the best.
-    assert [s.trio.id for s in ranked] == ["best", "close"]
+    assert [h.trio.id for h in hits] == ["best", "close"]
 
 
-def test_switching_embedding_model_reindexes(tmp_path):
-    """Vectors from two embedders are not comparable and usually are not even
-    the same width, so a stale collection must be rebuilt rather than searched."""
-    trios = [Trio(id="t", question="a", sql="", report="", metric_definitions={})]
-    index = MilvusDenseIndex(
-        path=str(tmp_path / "trios.db"),
-        embed=lambda texts: [[1.0, 0.0] for _ in texts],
-        dim=2,
-        model_name="model-a",
-    )
-    index.index(trios)
-    before = index._indexed
-
-    index._model_name = "model-b"
-    index.index(trios)
-
-    assert index._indexed != before, "same corpus, different model: must re-embed"
-
-
-def test_openai_is_preferred_when_a_key_is_configured(monkeypatch):
-    """Not vendor preference: the local model's scores for relevant questions
-    overlap its scores for nonsense, so it has no usable relevance floor."""
-    pytest.importorskip("openai")
-    settings = Settings(
-        _env_file=None, dense_retrieval=True, openai_api_key="sk-test-not-called"
+def test_the_dominance_gate_is_relative_to_the_best_hit():
+    """So it tightens on a confident match and stays permissive on a weak one,
+    which an absolute second threshold could not do."""
+    hits = select_hits(
+        [scored("best", 0.30), scored("close", 0.28)], min_similarity=0.20, dominance=0.9
     )
 
-    index = build_dense_index(settings)
-
-    assert index._model_name == "text-embedding-3-small"
-    assert index._dim == 1536
-    assert index._min_similarity == 0.20
+    assert len(hits) == 2
 
 
-def test_without_a_key_it_falls_back_to_the_local_model():
-    """The feature has to work with no provider and no key, at a known cost."""
+def test_nothing_in_means_nothing_out():
+    assert select_hits([], min_similarity=0.20, dominance=0.9) == []
+
+
+def test_the_floors_are_the_calibrated_ones():
+    """Measured against the seed corpus with text-embedding-3-small: relevant
+    questions scored 0.296 and up, unrelated ones no higher than 0.102. The
+    floor sits in that gap. See `scripts/calibrate_dense.py`."""
+    assert 0.102 < MIN_SIMILARITY < 0.296
+    assert 0.5 < DOMINANCE < 1.0
+
+
+# --- construction ---
+
+
+def test_dense_retrieval_is_off_unless_asked_for():
+    assert build_dense_index(Settings(_env_file=None), sessions=object()) is None
+
+
+def test_it_needs_an_embedding_key():
+    """Without one there is nothing to embed with, and dense retrieval degrades
+    to lexical rather than failing the turn."""
     settings = Settings(_env_file=None, dense_retrieval=True, openai_api_key=None)
 
-    index = build_dense_index(settings)
-
-    assert index._model_name == "local"
-    assert index._dim == 768
+    assert build_dense_index(settings, sessions=object()) is None
 
 
-def test_asking_for_openai_without_a_key_degrades_rather_than_crashes():
-    settings = Settings(
-        _env_file=None,
-        dense_retrieval=True,
-        embedding_backend="openai",
-        openai_api_key=None,
-    )
+def test_it_needs_a_database():
+    """The vectors live in Postgres now. Without a session factory there is
+    nowhere to put them."""
+    settings = Settings(_env_file=None, dense_retrieval=True, openai_api_key="sk-test")
 
-    assert build_dense_index(settings)._model_name == "local"
+    assert build_dense_index(settings, sessions=None) is None
 
 
-def test_local_can_be_forced_even_when_a_key_exists():
-    """Keeps every embedding on the machine, which is the reason to want it."""
-    settings = Settings(
-        _env_file=None,
-        dense_retrieval=True,
-        embedding_backend="local",
-        openai_api_key="sk-test",
-    )
+def test_it_is_built_when_both_are_present():
+    settings = Settings(_env_file=None, dense_retrieval=True, openai_api_key="sk-test")
 
-    assert build_dense_index(settings)._model_name == "local"
+    index = build_dense_index(settings, sessions=object())
+
+    assert index is not None
+    assert index.dim == 1536

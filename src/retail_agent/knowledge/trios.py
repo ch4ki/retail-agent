@@ -266,6 +266,12 @@ class PostgresTrioStore:
     def __init__(self, sessions) -> None:
         self._sessions = sessions
 
+    @property
+    def sessions(self):
+        """Shared with the dense index, which keeps its vectors in the same
+        database — one engine and one pool rather than two."""
+        return self._sessions
+
     def add(self, trio: Trio) -> Trio:
         from sqlalchemy.dialects.postgresql import insert as pg_insert
 

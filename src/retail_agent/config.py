@@ -82,19 +82,13 @@ class Settings(BaseSettings):
     langsmith_endpoint: str | None = None
 
     # --- Knowledge ---
-    # Dense retrieval over the trio corpus, via embedded Milvus Lite with a
-    # local ONNX embedding model. Off by default: the first call downloads the
-    # model, and lexical retrieval already works with no provider at all.
+    # Dense retrieval over the trio corpus, stored as pgvector columns in the
+    # database that already holds the trios. Off by default: lexical retrieval
+    # works with no key and no database at all.
     dense_retrieval: bool = False
-    milvus_path: str = "./.milvus/trios.db"
-    # Which embedder ranks the corpus. `openai` when a key is configured,
-    # because the bundled local model measurably cannot do this job: on the seed
-    # corpus its scores for relevant questions (0.138-0.517) overlap its scores
-    # for nonsense (up to 0.222), so no relevance floor separates them.
-    # `text-embedding-3-small` scores relevant 0.296+ and nonsense below 0.102.
-    # Set `local` to keep everything on the machine and accept the weaker
-    # ranking; see `docs/design.md` §5.1.
-    embedding_backend: Literal["auto", "openai", "local"] = "auto"
+    # Vectors live in Postgres via pgvector, so dense retrieval needs the
+    # database as well as an embedding key. Without either it degrades to
+    # lexical rather than failing.
     openai_embedding_model: str = "text-embedding-3-small"
 
     # --- Safety ---

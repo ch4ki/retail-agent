@@ -32,7 +32,8 @@ class TestPostgresTrioStore(TrioStoreContract):
         from sqlalchemy import text
 
         with sessions.begin() as session:
-            session.execute(text("TRUNCATE trios"))
+            # CASCADE because trio_embeddings references trios.
+            session.execute(text("TRUNCATE trios CASCADE"))
         return PostgresTrioStore(sessions)
 
 

@@ -90,25 +90,44 @@ def test_planner_schema_works_against_the_real_provider():
     assert plan.steps, "a comparison should decompose into at least one step"
 
 
-# Dense retrieval against the real embedding model. Marked live because the
-# first run downloads it; the unit tests inject a fake embedder instead.
+# Dense retrieval against the real embedding model and a real database. Marked
+# live because it bills OpenAI per run; the component tests inject a fake
+# embedder and assert the storage instead.
 
 
 def test_dense_retrieval_finds_a_synonym_the_lexical_ranker_misses():
-    """The case that justifies hybrid search: the executive says "lapsed", the
-    analyst wrote "churned", and no word overlaps."""
-    from retail_agent.knowledge.dense import MilvusDenseIndex
+    """The case that justifies hybrid search: the executive says "gone quiet",
+    the analyst wrote "churned", and no word overlaps."""
+    import pytest
+
+    from retail_agent.config import Settings
+    from retail_agent.knowledge.dense import build_dense_index
     from retail_agent.knowledge.retrieval import retrieve
     from retail_agent.knowledge.seeds import SEED_TRIOS
+    from retail_agent.knowledge.trios import PostgresTrioStore
+    from retail_agent.store.db import create_db_engine, run_migrations, session_factory
 
-    import tempfile
+    settings = Settings(dense_retrieval=True)
+    if not settings.openai_api_key:
+        pytest.skip("no OPENAI_API_KEY configured")
 
-    with tempfile.TemporaryDirectory() as tmp:
-        index = MilvusDenseIndex(path=f"{tmp}/trios.db")
+    try:
+        run_migrations(settings.database_url)
+        engine = create_db_engine(settings.database_url)
+    except Exception as err:
+        pytest.skip(f"Postgres unavailable: {err}")
+
+    try:
+        sessions = session_factory(engine)
+        PostgresTrioStore(sessions).seed(SEED_TRIOS)
+        index = build_dense_index(settings, sessions=sessions)
+        assert index is not None
+
         question = "how many shoppers have gone quiet?"
-
         lexical_only = retrieve(question, list(SEED_TRIOS))
         hybrid = retrieve(question, list(SEED_TRIOS), dense_rank=index.rank)
+    finally:
+        engine.dispose()
 
     assert not lexical_only, "no shared vocabulary with any trio"
     assert hybrid, "the embedding model should recognise the paraphrase"

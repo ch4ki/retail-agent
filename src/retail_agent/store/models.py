@@ -15,6 +15,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -23,6 +24,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -238,3 +240,37 @@ class TrioRow(Base):
     __table_args__ = (
         Index("trios_live_idx", "superseded_by"),
     )
+
+
+class TrioEmbeddingRow(Base):
+    """A trio's vector, kept beside the trio it belongs to.
+
+    Separate from `trios` rather than a column on it, because the two have
+    different lifetimes: editing a definition changes the trio immediately,
+    while its embedding is only valid until re-embedded. A missing row here
+    means "not embedded yet", which a nullable column could not say as clearly.
+
+    `model` is part of the key. Vectors from two embedders are not comparable
+    and usually are not the same width, so switching models must not silently
+    search a stale collection.
+    """
+
+    __tablename__ = "trio_embeddings"
+
+    trio_id: Mapped[str] = mapped_column(
+        String, ForeignKey("trios.id", ondelete="CASCADE"), primary_key=True
+    )
+    model: Mapped[str] = mapped_column(String, primary_key=True)
+    # Deliberately unsized. A fixed width is only needed for an ANN index, and
+    # there is none here — the corpus is a handful of trios, where an exact scan
+    # is both faster and exactly right. Leaving it open means switching
+    # embedding model is a config change rather than a migration, which is the
+    # point of `model` being part of the key.
+    embedding: Mapped[list[float]] = mapped_column(Vector(), nullable=False)
+    # Hash of the text that produced the vector, so a trio whose question or
+    # definitions changed is re-embedded and one that did not is left alone.
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+

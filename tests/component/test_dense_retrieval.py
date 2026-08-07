@@ -1,170 +1,208 @@
-"""Dense retrieval against the real embedding model.
+"""Dense retrieval end to end, against a real Postgres with pgvector.
 
-Marked, because the model is fetched on first use:
+    docker compose up -d postgres && uv run retail-agent migrate
+    uv run pytest -m "db and vector"
 
-    uv run pytest -m vector
+Marked `db` as well as `vector` because the vectors now live in the database
+rather than in a file beside it.
 
-These assert what the bundled model actually does, measured, rather than what
-semantic search is supposed to do. It is a small ONNX model chosen so the
-feature needs no API key and no torch, and the trade is real: on this corpus it
-ranks the right trio first for roughly half of paraphrased questions. The tests
-below are written around that, and the ones that would fail are recorded as
-limitations rather than deleted.
+The embedder is faked here on purpose. What is under test is the storage, the
+distance query and the two floors — not OpenAI's model, which cannot be asserted
+on without paying per run and inheriting its variance. The tests that do measure
+the real model are in `scripts/calibrate_dense.py`.
 """
+
+from __future__ import annotations
 
 import pytest
 
 from retail_agent.config import Settings
-from retail_agent.knowledge.dense import build_dense_index
+from retail_agent.knowledge.dense import PgVectorIndex, embedding_text
 from retail_agent.knowledge.retrieval import lexical_rank, retrieve
 from retail_agent.knowledge.seeds import SEED_TRIOS
+from retail_agent.knowledge.trios import PostgresTrioStore, Trio
+from retail_agent.store.db import create_db_engine, run_migrations, session_factory
 
-pytestmark = pytest.mark.vector
+pytestmark = [pytest.mark.db, pytest.mark.vector]
+
+DIM = 8
+
+# Each concept owns one dimension, so "which trio is nearest" is decidable by
+# reading the corpus rather than by trusting an opaque model.
+CONCEPTS = (
+    ("churn", "churned", "lapsed", "quiet", "stopped"),
+    ("loyal", "repeat", "again"),
+    ("top", "best", "biggest", "most"),
+    ("brand", "brands", "label", "labels"),
+    ("spend", "spent", "revenue", "sales"),
+    ("customer", "customers", "shopper", "shoppers"),
+    ("state", "region"),
+)
+
+
+def keyword_embedder():
+    """A deterministic stand-in: one dimension per concept group."""
+
+    def embed(texts):
+        vectors = []
+        for text in texts:
+            words = set(text.lower().replace("?", " ").replace(":", " ").split())
+            vector = [1.0 if words & set(group) else 0.0 for group in CONCEPTS]
+            vector.append(0.1)  # keeps a zero vector from being undefined
+            vectors.append(vector)
+        return vectors
+
+    return embed
 
 
 @pytest.fixture(scope="module")
-def dense(tmp_path_factory):
-    settings = Settings(
-        _env_file=None,
-        dense_retrieval=True,
-        milvus_path=str(tmp_path_factory.mktemp("milvus") / "trios.db"),
-    )
-    index = build_dense_index(settings)
-    if index is None:
-        pytest.skip("dense retrieval unavailable")
-    return index
+def sessions():
+    settings = Settings()
+    try:
+        run_migrations(settings.database_url)
+        engine = create_db_engine(settings.database_url)
+    except Exception as err:
+        pytest.skip(f"Postgres unavailable: {err}")
+    yield session_factory(engine)
+    engine.dispose()
 
 
-def test_a_paraphrase_with_no_shared_words_is_found(dense):
-    """The reason dense retrieval exists. "repeat purchasers" shares nothing
-    with "How many loyal customers do we have?" — it scores 0.517, the
-    strongest match in the corpus."""
-    question = "how many repeat purchasers?"
+@pytest.fixture
+def corpus(sessions):
+    """The seed trios, in the database, since the embeddings reference them."""
+    from sqlalchemy import text
 
-    assert lexical_rank(question, list(SEED_TRIOS)) == [], "no lexical overlap"
-    found = retrieve(question, list(SEED_TRIOS), dense_rank=dense.rank)
-
-    assert "loyal-customers" in [t.id for t in found]
-
-
-def test_nonsense_is_rejected_by_the_floor(dense):
-    """A vector index always returns its nearest neighbour. Without the floor
-    this retrieves whichever trio is least unlike a question about France."""
-    found = retrieve(
-        "what is the capital of France?", list(SEED_TRIOS), dense_rank=dense.rank
-    )
-
-    assert found == []
+    with sessions.begin() as session:
+        session.execute(text("TRUNCATE trios CASCADE"))
+    store = PostgresTrioStore(sessions)
+    store.seed(SEED_TRIOS)
+    return list(SEED_TRIOS)
 
 
-def test_the_index_follows_the_corpus_without_a_restart(dense):
-    """Promotion adds a trio mid-session; a signature check re-embeds only when
-    the corpus actually changed."""
-    from retail_agent.knowledge.trios import Trio
-
-    extra = Trio(
-        id="returns",
-        question="What share of orders are sent back?",
-        sql="SELECT 1",
-        report="",
-        metric_definitions={"return rate": "returned items over all items"},
-        tags=("returns", "refunds"),
-    )
-    corpus = [*SEED_TRIOS, extra]
-
-    ranked = dense.rank("how many items get sent back?", corpus)
-
-    assert "returns" in [s.trio.id for s in ranked]
-
-
-def test_the_ranking_is_a_similarity_not_a_distance(dense):
-    """COSINE, so a score is comparable to the floor. With L2 the number is a
-    distance whose scale depends on the model and the floor means nothing."""
-    ranked = dense.rank("how many repeat purchasers?", list(SEED_TRIOS))
-
-    assert ranked, "expected a hit"
-    assert all(-1.0 <= s.score <= 1.0 for s in ranked)
-    assert ranked == sorted(ranked, key=lambda s: -s.score), "best first"
-
-
-@pytest.mark.xfail(
-    reason="measured limitation of the bundled model: 'stopped buying' scores "
-    "0.138 against churn-90 but 0.302 against underspending, so the wrong trio "
-    "ranks first. A production embedding endpoint fixes this; a 45MB ONNX "
-    "model that needs no key does not.",
-    strict=False,
-)
-def test_stopped_buying_should_find_churn(dense):
-    found = retrieve(
-        "who stopped buying from us?", list(SEED_TRIOS), dense_rank=dense.rank
+@pytest.fixture
+def index(sessions):
+    return PgVectorIndex(
+        sessions,
+        embed=keyword_embedder(),
+        model="test-keyword",
+        dim=DIM,
+        min_similarity=0.35,
     )
 
-    assert "churn-90" in [t.id for t in found]
+
+def test_a_paraphrase_finds_the_trio_lexical_search_misses(index, corpus):
+    """The reason dense retrieval exists: no distinctive word is shared with
+    the trio, so lexical ranking returns nothing at all."""
+    question = "which shoppers have gone quiet?"
+
+    assert lexical_rank(question, corpus) == []
+
+    assert "churn-90" in [hit.trio.id for hit in index.rank(question, corpus)]
 
 
-# --- the OpenAI backend, which is the default when a key is configured ---
+def test_hybrid_retrieval_uses_the_dense_ranker(index, corpus):
+    """Through `retrieve`, which is what the graph actually calls."""
+    found = retrieve("which shoppers have gone quiet?", corpus, dense_rank=index.rank)
 
-_KEY = Settings().openai_api_key
-needs_openai = pytest.mark.skipif(not _KEY, reason="no OPENAI_API_KEY configured")
-
-
-@pytest.fixture(scope="module")
-def openai_dense(tmp_path_factory):
-    settings = Settings(
-        dense_retrieval=True,
-        embedding_backend="openai",
-        milvus_path=str(tmp_path_factory.mktemp("milvus-openai") / "trios.db"),
-    )
-    index = build_dense_index(settings)
-    if index is None or index._model_name == "local":
-        pytest.skip("OpenAI embedding backend unavailable")
-    return index
+    assert "churn-90" in [trio.id for trio in found]
 
 
-@needs_openai
-@pytest.mark.parametrize(
-    "question,expected",
-    [
-        ("who stopped buying from us?", "churn-90"),
-        ("which shoppers have gone quiet?", "churn-90"),
-        ("who spends the most with us?", "top-customers"),
-        ("which labels sell best?", "brand-performance"),
-        ("how many repeat purchasers?", "loyal-customers"),
-    ],
-)
-def test_paraphrases_reach_the_right_trio(openai_dense, question, expected):
-    """None of these share distinctive vocabulary with the trio they should
-    find — lexical search returns nothing for every one of them."""
-    assert lexical_rank(question, list(SEED_TRIOS)) == []
-
-    found = retrieve(question, list(SEED_TRIOS), dense_rank=openai_dense.rank)
-
-    assert expected in [t.id for t in found]
-
-
-@needs_openai
-@pytest.mark.parametrize(
-    "question",
-    [
-        "what is the capital of France?",
-        "how do I reset my password?",
-        "write me a poem about the sea",
-    ],
-)
-def test_nonsense_retrieves_nothing(openai_dense, question):
+def test_nonsense_retrieves_nothing(index, corpus):
     """What the floor buys. A wrong trio supplies a confident wrong definition
     and the agent has no way to tell that it is wrong."""
-    assert retrieve(question, list(SEED_TRIOS), dense_rank=openai_dense.rank) == []
+    assert retrieve("what is the capital of France?", corpus, dense_rank=index.rank) == []
 
 
-@needs_openai
-def test_only_the_contenders_come_back(openai_dense):
-    """Every retail trio clears the floor for an in-domain question. Without the
-    dominance gate this returns five of six trios, and their definitions all go
-    into the prompt."""
-    found = retrieve(
-        "how many repeat purchasers?", list(SEED_TRIOS), dense_rank=openai_dense.rank
+def test_an_unchanged_corpus_is_not_re_embedded(sessions, corpus):
+    """Re-embedding on every turn would bill an API call per question."""
+    calls = []
+
+    def counting_embedder(texts):
+        calls.append(len(texts))
+        return keyword_embedder()(texts)
+
+    index = PgVectorIndex(
+        sessions, embed=counting_embedder, model="test-count", dim=DIM
     )
 
-    assert found[0].id == "loyal-customers"
-    assert len(found) < len(SEED_TRIOS) - 1, [t.id for t in found]
+    index.index(corpus)
+    index.index(corpus)
+
+    assert len(calls) == 1, f"embedded {calls} times for an unchanged corpus"
+
+
+def test_an_edited_trio_is_re_embedded(sessions, corpus):
+    """A definition can be edited without a deploy, so the vector has to follow
+    it — otherwise retrieval keeps matching against the old meaning."""
+    calls = []
+
+    def counting_embedder(texts):
+        calls.append(list(texts))
+        return keyword_embedder()(texts)
+
+    index = PgVectorIndex(
+        sessions, embed=counting_embedder, model="test-edit", dim=DIM
+    )
+    index.index(corpus)
+
+    edited = [
+        Trio(
+            id=corpus[0].id,
+            question="a completely different question about brands",
+            sql=corpus[0].sql,
+            report=corpus[0].report,
+            metric_definitions=corpus[0].metric_definitions,
+            tags=corpus[0].tags,
+        ),
+        *corpus[1:],
+    ]
+    index.index(edited)
+
+    assert len(calls) == 2
+    assert len(calls[1]) == 1, "only the edited trio should be re-embedded"
+
+
+def test_a_different_model_does_not_read_another_models_vectors(sessions, corpus):
+    """Vectors from two embedders are not comparable and are usually not even
+    the same width, so the model is part of the key."""
+    first = PgVectorIndex(sessions, embed=keyword_embedder(), model="model-a", dim=DIM)
+    first.index(corpus)
+
+    calls = []
+
+    def counting_embedder(texts):
+        calls.append(len(texts))
+        return keyword_embedder()(texts)
+
+    second = PgVectorIndex(sessions, embed=counting_embedder, model="model-b", dim=DIM)
+    second.index(corpus)
+
+    assert calls == [len(corpus)], "model-b must embed for itself, not reuse model-a"
+
+
+def test_a_superseded_trio_is_not_returned(index, corpus):
+    """Its row still exists — nothing is deleted — so it has to be excluded by
+    the query rather than by having been removed."""
+    live = [t for t in corpus if t.id != "churn-90"]
+
+    found = index.rank("which shoppers have gone quiet?", live)
+
+    assert "churn-90" not in [hit.trio.id for hit in found]
+
+
+def test_an_unreachable_database_costs_recall_not_the_turn():
+    """Dense retrieval is an improvement over lexical, never a dependency."""
+
+    class Broken:
+        def begin(self):
+            raise RuntimeError("connection refused")
+
+    index = PgVectorIndex(Broken(), embed=keyword_embedder(), dim=DIM)
+
+    assert index.rank("anything", list(SEED_TRIOS)) == []
+
+
+def test_what_is_embedded_matches_what_lexical_search_reads():
+    text = embedding_text(SEED_TRIOS[0]).lower()
+
+    assert SEED_TRIOS[0].question.lower()[:20] in text

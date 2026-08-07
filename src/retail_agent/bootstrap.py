@@ -34,6 +34,10 @@ def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
         return (lambda: console.print(f"[yellow]{message}[/yellow]")) if console else None
 
     trios = build_trio_store(settings)
+    # Dense retrieval keeps its vectors beside the trios, so it needs the same
+    # database. `None` when Postgres is unreachable, which degrades retrieval to
+    # lexical rather than failing the turn.
+    sessions = getattr(trios, "sessions", None)
 
     return AgentDeps(
         settings=settings,
@@ -43,7 +47,7 @@ def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
         # Rows, seeded from the hand-authored corpus on first run, so a
         # definition can be edited or superseded without a deploy.
         trios=trios,
-        dense=build_dense_index(settings),
+        dense=build_dense_index(settings, sessions=sessions),
         traces=build_trace_store(settings),
         personas=build_persona_store(settings),
         preferences=build_preference_store(settings),

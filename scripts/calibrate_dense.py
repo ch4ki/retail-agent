@@ -13,8 +13,11 @@ piece of nonsense. If those ranges overlap, no floor is both sensitive and
 precise, and the honest move is to say so rather than to pick the number that
 makes the tests pass.
 
-That is not hypothetical — it is what happened here. The bundled ONNX model
-overlaps and was demoted to the no-key fallback because of this script.
+That is not hypothetical — it is what happened here. The local ONNX model this
+project first shipped with overlapped, and was dropped: relevant questions
+scored as low as 0.138 while unrelated ones reached 0.222, so no floor could be
+both sensitive and precise. `text-embedding-3-small` separates cleanly and is
+what the floor in `knowledge/dense.py` is derived from.
 """
 
 from __future__ import annotations
@@ -89,20 +92,26 @@ def calibrate(name: str, encode_documents, encode_queries) -> None:
 def main() -> None:
     settings = Settings()
 
-    from pymilvus import model as milvus_model
-
-    local = milvus_model.DefaultEmbeddingFunction()
-    calibrate("local (bundled ONNX)", local.encode_documents, local.encode_queries)
-
     if not settings.openai_api_key:
-        print("\nOPENAI_API_KEY not set — skipping the OpenAI backends.")
+        print("OPENAI_API_KEY not set — nothing to calibrate.")
         return
 
-    from pymilvus.model.dense import OpenAIEmbeddingFunction
+    from openai import OpenAI
+
+    client = OpenAI(api_key=settings.openai_api_key)
+
+    def embedder(model_name):
+        def embed(texts):
+            response = client.embeddings.create(model=model_name, input=list(texts))
+            return [item.embedding for item in response.data]
+
+        return embed
 
     for model_name in ("text-embedding-3-small", "text-embedding-3-large"):
-        fn = OpenAIEmbeddingFunction(model_name=model_name, api_key=settings.openai_api_key)
-        calibrate(model_name, fn.encode_documents, fn.encode_queries)
+        embed = embedder(model_name)
+        # One embedder for both sides: OpenAI does not distinguish documents
+        # from queries, unlike some local models.
+        calibrate(model_name, embed, embed)
 
 
 if __name__ == "__main__":
