@@ -38,6 +38,18 @@ def main() -> int:
         help="a previous --json report; blocks on a regression against its accuracy",
     )
     evals.add_argument("--json", dest="json_path", help="write the full report here")
+    evals.add_argument(
+        "--agent",
+        choices=("graph", "react"),
+        default="graph",
+        help="which agent answers: the LangGraph state machine or the ReAct baseline",
+    )
+
+    compare = sub.add_parser("compare", help="put two --json eval reports side by side")
+    compare.add_argument("left", help="a --json report, conventionally the graph's")
+    compare.add_argument("right", help="a --json report, conventionally the ReAct arm's")
+    compare.add_argument("--left-name", dest="left_name", default="graph")
+    compare.add_argument("--right-name", dest="right_name", default="react")
 
     args = parser.parse_args()
     if args.command == "migrate":
@@ -46,6 +58,10 @@ def main() -> int:
         from retail_agent.cli.evals import run_evals
 
         return run_evals(args)
+    if args.command == "compare":
+        from retail_agent.cli.evals import run_compare
+
+        return run_compare(args)
     if args.command == "chat":
         # Imported here, not at module scope: this is the line that costs a
         # second, and only this subcommand needs it.

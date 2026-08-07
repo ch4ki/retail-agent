@@ -57,6 +57,12 @@ class CaseResult:
     intent: str = ""
     used_trios: tuple[str, ...] = ()
     seconds: float = 0.0
+    # Carried from `AgentAnswer` so the report can say what an answer cost as
+    # well as whether it was right. Defaulted, so anything already building a
+    # `CaseResult` without them is unaffected.
+    tokens_in: int = 0
+    tokens_out: int = 0
+    calls: int = 0
 
 
 @dataclass(frozen=True)

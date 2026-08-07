@@ -63,3 +63,81 @@ def test_an_unreadable_baseline_is_not_fatal(tmp_path):
 
 def test_no_baseline_path_means_no_baseline():
     assert read_baseline(None) is None
+
+
+# --- choosing which agent answers ---
+
+
+def test_the_graph_is_the_arm_that_runs_by_default():
+    """Adding a second arm must not quietly change what `retail-agent eval`
+    has always meant."""
+    from retail_agent.cli.evals import seams_builder
+    from retail_agent.evals.harness import build_seams
+
+    assert seams_builder(None) is build_seams
+    assert seams_builder("graph") is build_seams
+
+
+def test_the_react_arm_is_selectable():
+    from retail_agent.baseline.seams import build_react_seams
+    from retail_agent.cli.evals import seams_builder
+
+    assert seams_builder("react") is build_react_seams
+
+
+def test_an_unknown_arm_is_refused_rather_than_silently_defaulting():
+    """A typo that fell through to the graph would produce a report labelled
+    react containing the graph's numbers."""
+    import pytest
+
+    from retail_agent.cli.evals import seams_builder
+
+    with pytest.raises(ValueError, match="grpah"):
+        seams_builder("grpah")
+
+
+# --- the comparison command ---
+
+
+def test_comparing_two_reports_prints_both_arms(tmp_path, capsys):
+    from retail_agent.cli.evals import run_compare
+    from retail_agent.evals.report import to_json
+    from retail_agent.evals.scoring import Outcome
+    from retail_agent.evals.types import CaseResult, Gate
+
+    def report(outcome):
+        return to_json(
+            Gate(
+                passed=True,
+                accuracy=1.0 if outcome is Outcome.PASS else 0.0,
+                reason="",
+                results=(CaseResult(case_id="loyal-count", outcome=outcome),),
+            )
+        )
+
+    left = tmp_path / "graph.json"
+    right = tmp_path / "react.json"
+    left.write_text(report(Outcome.PASS))
+    right.write_text(report(Outcome.FAIL))
+
+    code = run_compare(_Args(left=str(left), right=str(right)))
+
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert "graph" in printed
+    assert "react" in printed
+    assert "loyal-count" in printed
+
+
+def test_comparing_against_a_missing_report_fails_cleanly(tmp_path, capsys):
+    from retail_agent.cli.evals import run_compare
+
+    code = run_compare(_Args(left=str(tmp_path / "nope.json"), right=str(tmp_path)))
+
+    assert code == 1
+    assert "nope.json" in capsys.readouterr().out
+
+
+class _Args:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)

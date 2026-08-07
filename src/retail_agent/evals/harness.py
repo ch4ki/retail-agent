@@ -15,17 +15,28 @@ from typing import Any
 from retail_agent.evals.runner import AgentAnswer
 
 
-def answer_from_state(state: dict) -> AgentAnswer:
+def answer_from_state(
+    state: dict, *, tokens_in: int = 0, tokens_out: int = 0
+) -> AgentAnswer:
     """Reduce a finished turn to what an eval can score.
 
     The number comes from the result frame, never from the narrative: parsing
     prose would measure how the model phrased itself, which legitimately varies
     between model versions, rather than what the query returned.
+
+    Tokens arrive from the seam's collector rather than being counted here, so
+    both arms are measured by one implementation. `calls` comes from `events`,
+    which the graph already records for `/trace` — node executions here against
+    tool calls on the ReAct arm, which is why the report labels the column
+    rather than treating the two as interchangeable.
     """
     frames = state.get("frames") or {}
     frame = _final_frame(state, frames)
 
     return AgentAnswer(
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        calls=len(state.get("events") or ()),
         text=state.get("answer") or "",
         rows=[list(row) for row in frame.rows] if frame else [],
         columns=tuple(frame.columns) if frame else (),
@@ -71,6 +82,9 @@ def build_seams(settings, *, user: str = "eval"):
 
     from langgraph.checkpoint.memory import MemorySaver
 
+    from retail_agent.evals.usage import UsageCollector
+
+    usage = UsageCollector()
     source = BigQuerySource(settings)
     deps = build_deps(settings, llm=build_llm(settings), source=source)
     # Required, not optional: the graph has static breakpoints, and LangGraph
@@ -84,7 +98,15 @@ def build_seams(settings, *, user: str = "eval"):
         # sit in the history of case 4, and the suite would be measuring
         # conversation memory rather than analysis.
         session = f"eval-{uuid.uuid4().hex[:8]}"
-        config = {"configurable": {"thread_id": session}}
+        usage.reset()
+        config = {
+            "configurable": {"thread_id": session},
+            # The same handler class the ReAct arm attaches, attached the same
+            # way. Walking this arm's `events` for tokens and the other arm's
+            # messages would be two implementations of one measurement, and the
+            # cost column would be comparing them rather than the agents.
+            "callbacks": [usage],
+        }
         state = run_turn(
             graph, user_id=user, session_id=session, question=question, config=config
         )
@@ -92,9 +114,17 @@ def build_seams(settings, *, user: str = "eval"):
         # A case that pauses for confirmation or a definition never produces a
         # number. Recorded as an unanswered turn rather than hanging the run.
         if getattr(graph.get_state(config), "next", ()):
-            return AgentAnswer(text="[paused awaiting input]", rows=[], columns=())
+            return AgentAnswer(
+                text="[paused awaiting input]",
+                rows=[],
+                columns=(),
+                tokens_in=usage.tokens_in,
+                tokens_out=usage.tokens_out,
+            )
 
-        return answer_from_state(state)
+        return answer_from_state(
+            state, tokens_in=usage.tokens_in, tokens_out=usage.tokens_out
+        )
 
     def execute(sql: str) -> Sequence[Sequence[Any]]:
         # The reference query bypasses the guard and the agent entirely: it is

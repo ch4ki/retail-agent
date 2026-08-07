@@ -37,6 +37,16 @@ class AgentAnswer:
     truncated: bool = False
     # How many rows matched in total — exact, even when only some were fetched.
     row_count: int = 0
+    # What the turn cost. Filled in by the seam, which owns the callback
+    # handler; the runner only carries it through. Counting inside the runner
+    # would mean one implementation per arm, and two implementations of the
+    # same measurement eventually disagree.
+    tokens_in: int = 0
+    tokens_out: int = 0
+    # Round trips: node executions on the graph arm, tool calls on the ReAct
+    # arm. Not the same unit, and the report says so — it is here to catch an
+    # arm that wins on accuracy by doing far more work.
+    calls: int = 0
 
 
 Ask = Callable[[str], AgentAnswer]
@@ -69,6 +79,7 @@ def run_case(case: EvalCase, *, ask: Ask, execute: Execute) -> CaseResult:
             answer=answer.text,
             sql=answer.sql,
             seconds=time.monotonic() - started,
+            **_cost(answer),
         )
 
     if not reference:
@@ -79,6 +90,7 @@ def run_case(case: EvalCase, *, ask: Ask, execute: Execute) -> CaseResult:
             answer=answer.text,
             sql=answer.sql,
             seconds=time.monotonic() - started,
+            **_cost(answer),
         )
 
     expected = _extract(reference, ranked=case.ranked)
@@ -140,7 +152,21 @@ def run_case(case: EvalCase, *, ask: Ask, execute: Execute) -> CaseResult:
         intent=answer.intent,
         used_trios=tuple(answer.trios),
         seconds=time.monotonic() - started,
+        **_cost(answer),
     )
+
+
+def _cost(answer: AgentAnswer) -> dict:
+    """What the turn spent, for whichever `CaseResult` is being built.
+
+    A helper rather than three copies: a return path that forgot it would report
+    a free answer, and the cheapest arm would be whichever one had the bug.
+    """
+    return {
+        "tokens_in": answer.tokens_in,
+        "tokens_out": answer.tokens_out,
+        "calls": answer.calls,
+    }
 
 
 def run_suite(

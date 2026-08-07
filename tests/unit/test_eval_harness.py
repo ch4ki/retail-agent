@@ -81,3 +81,43 @@ def test_frames_are_used_even_when_the_plan_is_missing():
     state = {"answer": "", "frames": {"only": frame([[42]])}, "plan": []}
 
     assert answer_from_state(state).rows == [[42]]
+
+
+# --- cost, so the two arms are measured the same way ---
+
+
+def test_node_executions_are_the_graphs_call_count():
+    """`calls` is round trips. On this arm that is nodes run, which `events`
+    already records for `/trace`; on the ReAct arm it is tool calls. Different
+    units, and the report says so — it exists to catch an arm that wins by
+    doing far more work."""
+    from retail_agent.agent.state import TurnEvent
+    from retail_agent.evals.harness import answer_from_state
+
+    state = {
+        "answer": "5,823.",
+        "events": [
+            TurnEvent(node="route", duration_ms=1),
+            TurnEvent(node="recall", duration_ms=2),
+            TurnEvent(node="plan", duration_ms=3),
+        ],
+    }
+
+    assert answer_from_state(state).calls == 3
+
+
+def test_tokens_are_carried_in_from_the_collector():
+    """The handler belongs to the seam, not to the reducer: it is the same
+    handler class the ReAct arm uses, attached the same way."""
+    from retail_agent.evals.harness import answer_from_state
+
+    answer = answer_from_state({"answer": "x"}, tokens_in=4200, tokens_out=310)
+
+    assert answer.tokens_in == 4200
+    assert answer.tokens_out == 310
+
+
+def test_a_turn_with_no_events_reports_no_calls():
+    from retail_agent.evals.harness import answer_from_state
+
+    assert answer_from_state({"answer": "x"}).calls == 0

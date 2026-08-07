@@ -429,3 +429,45 @@ def test_an_untruncated_answer_still_scores_its_cell_not_its_row_count():
     )
 
     assert result.outcome is Outcome.PASS
+
+
+# --- cost, for the graph-versus-ReAct comparison ---
+
+
+def test_what_an_answer_cost_is_carried_through_to_the_result():
+    """`run_case` stays agent-agnostic: the seam knows the tokens because it
+    owns the callback handler, and the runner only passes them along. Counting
+    them inside the runner would mean two implementations, one per arm."""
+    result = run_case(
+        CASE,
+        ask=lambda _q: answer(5746, tokens_in=1200, tokens_out=340, calls=4),
+        execute=lambda _sql: [[5746]],
+    )
+
+    assert result.tokens_in == 1200
+    assert result.tokens_out == 340
+    assert result.calls == 4
+
+
+def test_cost_is_recorded_even_when_the_answer_was_wrong():
+    """A wrong answer that burned 40k tokens is the most interesting row in the
+    report, so cost must not be dropped on the failure path."""
+    result = run_case(
+        CASE,
+        ask=lambda _q: answer(1254, tokens_in=40_000, tokens_out=900, calls=14),
+        execute=lambda _sql: [[5746]],
+    )
+
+    assert result.outcome is Outcome.FAIL
+    assert result.tokens_in == 40_000
+    assert result.calls == 14
+
+
+def test_an_agent_that_raised_still_reports_no_cost_rather_than_crashing():
+    def boom(_q):
+        raise RuntimeError("provider down")
+
+    result = run_case(CASE, ask=boom, execute=lambda _sql: [[5746]])
+
+    assert result.outcome is Outcome.ERROR
+    assert result.tokens_in == 0
