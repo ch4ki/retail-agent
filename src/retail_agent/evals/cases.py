@@ -48,7 +48,10 @@ EVAL_CASES: tuple[EvalCase, ...] = (
     ),
     EvalCase(
         id="loyal-share",
-        question="What share of our customers are loyal?",
+        question=(
+            "What percentage of our customers are loyal? "
+            "Answer as a percentage between 0 and 100."
+        ),
         reference_sql=f"""
             WITH per_customer AS (
               SELECT user_id, COUNT(DISTINCT order_id) AS orders
@@ -61,6 +64,11 @@ EVAL_CASES: tuple[EvalCase, ...] = (
         """,
         required_definitions=("loyal",),
         tolerance=0.02,
+        notes=(
+            "Asked as 'what share' the agent answered 0.088 — the correct "
+            "ratio, as a fraction, against a reference in percent. The question "
+            "was ambiguous, not the answer."
+        ),
     ),
     EvalCase(
         id="engaged-count",
