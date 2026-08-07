@@ -38,7 +38,7 @@ class ValueSource:
         return [self.describe("users")]
 
     def column_values(self, table, columns):
-        from retail_agent.knowledge.column_values import (
+        from retail_agent.datasources.column_values import (
             build_discovery_query,
             read_discovery_row,
         )
@@ -84,15 +84,3 @@ def test_discovery_failure_degrades_to_a_plain_schema(make_deps):
 
     assert "gender STRING" in rendered
     assert "one of" not in rendered
-
-
-def test_the_warehouse_is_asked_only_once(make_deps):
-    """render_schema runs on every SQL turn. Paying for a scan each time would
-    be a per-turn cost for a fact that does not change."""
-    source = ValueSource()
-    deps = make_deps([], src=source)
-
-    render_schema_for_sql(deps)
-    render_schema_for_sql(deps)
-
-    assert len(source.queries) == 1

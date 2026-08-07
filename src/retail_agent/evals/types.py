@@ -31,7 +31,6 @@ class EvalCase:
     # Business terms the answer depends on. If the corpus does not define them
     # the agent is guessing, and the case is measuring the guess.
     required_definitions: tuple[str, ...] = ()
-    expected_intent: str = ""
     tolerance: float = 1e-6
     # Ranked answers compare row by row; scalars take the single cell.
     ranked: bool = False

@@ -52,8 +52,6 @@ MIN_SIMILARITY = 0.20
 # across every calibration question without dropping the right one.
 DOMINANCE = 0.90
 
-# text-embedding-3-small. Fixed, because the column is declared with it.
-OPENAI_DIM = 1536
 TOP_K = 5
 
 
@@ -106,18 +104,14 @@ class PgVectorIndex:
         sessions,
         *,
         embed: Callable[[Sequence[str]], Sequence[Sequence[float]]],
-        query_embed: Callable[[Sequence[str]], Sequence[Sequence[float]]] | None = None,
         model: str = "text-embedding-3-small",
-        dim: int = OPENAI_DIM,
         top_k: int = TOP_K,
         min_similarity: float = MIN_SIMILARITY,
         dominance: float = DOMINANCE,
     ) -> None:
         self._sessions = sessions
         self._embed = embed
-        self._query_embed = query_embed or embed
         self.model = model
-        self.dim = dim
         self._top_k = top_k
         self._min_similarity = min_similarity
         self._dominance = dominance
@@ -191,7 +185,7 @@ class PgVectorIndex:
 
         try:
             self.index(trios)
-            vector = list(self._query_embed([question])[0])
+            vector = list(self._embed([question])[0])
 
             distance = TrioEmbeddingRow.embedding.cosine_distance(vector)
             with self._sessions.begin() as session:

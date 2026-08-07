@@ -11,6 +11,7 @@ from retail_agent.agent.state import (
     new_turn_state,
 )
 from tests.component.conftest import FakeSource
+from tests.support.frames import value
 
 
 def analysing_state(question="top customers", sql=None):
@@ -87,7 +88,7 @@ def test_execute_masks_pii_before_storing_the_frame(make_deps, source):
     result = execute_node(state, deps)
 
     frame = result["frames"]["step_1"]
-    assert "@" not in str(frame.column("email")[0])
+    assert "@" not in str(value(frame, "email"))
     assert result["redactions"] > 0
 
 

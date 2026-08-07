@@ -121,10 +121,6 @@ class MaskedFrame:
             truncated=truncated,
         )
 
-    def column(self, name: str) -> list[Any]:
-        index = self.columns.index(name)
-        return [row[index] for row in self.rows]
-
     def to_markdown(self, max_rows: int = 20) -> str:
         if not self.columns:
             return "_(no rows)_"

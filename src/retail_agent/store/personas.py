@@ -324,20 +324,14 @@ def _to_persona(row) -> Persona:
 def build_persona_store(settings, on_degraded=None) -> PersonaStore:
     """Postgres when reachable, memory when not — behind the TTL cache either
     way, so callers see one shape."""
-    import logging
+    from retail_agent.store.db import sessions_or_none
 
-    from retail_agent.store.db import create_db_engine, session_factory
-
-    try:
-        engine = create_db_engine(settings.database_url)
-        with engine.connect():
-            pass
-        store: PersonaStore = PostgresPersonaStore(session_factory(engine))
-    except Exception as err:
-        logging.getLogger(__name__).debug("persona store degraded: %s", err)
-        if on_degraded is not None:
-            on_degraded()
-        store = InMemoryPersonaStore()
+    sessions = sessions_or_none(
+        settings.database_url, name="persona store", on_degraded=on_degraded
+    )
+    store: PersonaStore = (
+        PostgresPersonaStore(sessions) if sessions else InMemoryPersonaStore()
+    )
 
     cached = CachedPersonaStore(store)
     try:

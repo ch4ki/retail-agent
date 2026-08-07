@@ -10,12 +10,7 @@ from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.nodes.route import last_user_message
 from retail_agent.agent.prompts import SAFETY_RULES, SCHEMA_PROMPT
 from retail_agent.agent.state import TurnState
-from retail_agent.knowledge.column_values import (
-    build_discovery_query,
-    enumerable_columns,
-    read_discovery_row,
-    with_values,
-)
+from retail_agent.datasources.column_values import enumerable_columns, with_values
 from retail_agent.llm.messages import message_text
 from retail_agent.safety.egress import scan_text
 from retail_agent.store.personas import active_body
@@ -50,21 +45,16 @@ def render_schema_for_sql(deps: AgentDeps) -> str:
 
 
 def _discover_values(deps: AgentDeps, schemas) -> dict[str, dict[str, tuple[str, ...]]]:
-    """Read each table's enumerable values once per process.
+    """Each table's enumerable values, from the source.
 
-    Cached on the source: the SQL prompt is built on every analysis turn, and
-    paying for a warehouse scan each time would be a recurring cost for a fact
-    that does not change within a session.
+    Asks for a dedicated `column_values` method rather than going through
+    `execute`: that path is for the user's guarded, dry-run, cost-capped
+    queries, and an internal metadata scan should not consume that budget or
+    appear in the turn's SQL attempts. A source without the method — every test
+    double — simply yields no values.
 
-    Asks the source for a dedicated `column_values` method rather than going
-    through `execute`. That path is for the user's guarded, dry-run, budgeted
-    queries; borrowing it for internal metadata would make every double serve
-    both, and would put an internal scan inside the user's cost ceiling.
+    Caching belongs to the source, which already caches schemas.
     """
-    cached = getattr(deps.source, "_column_values_cache", None)
-    if cached is not None:
-        return cached
-
     lookup = getattr(deps.source, "column_values", None)
     if lookup is None:
         return {}
@@ -83,10 +73,6 @@ def _discover_values(deps: AgentDeps, schemas) -> dict[str, dict[str, tuple[str,
             # not the turn.
             log.warning("could not read column values for %s (%s)", schema.name, err)
 
-    try:
-        deps.source._column_values_cache = discovered
-    except AttributeError:
-        pass  # a frozen or slotted double; recompute next time rather than fail
     return discovered
 
 

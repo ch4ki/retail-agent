@@ -292,17 +292,9 @@ def build_trace_store(settings, on_degraded=None) -> TraceStore:
     Same bargain as the report store and the checkpointer: losing the database
     costs history across restarts, never the ability to use the agent.
     """
-    import logging
+    from retail_agent.store.db import sessions_or_none
 
-    from retail_agent.store.db import create_db_engine, session_factory
-
-    try:
-        engine = create_db_engine(settings.database_url)
-        with engine.connect():
-            pass
-        return PostgresTraceStore(session_factory(engine))
-    except Exception as err:
-        logging.getLogger(__name__).debug("trace store degraded: %s", err)
-        if on_degraded is not None:
-            on_degraded()
-        return InMemoryTraceStore()
+    sessions = sessions_or_none(
+        settings.database_url, name="trace store", on_degraded=on_degraded
+    )
+    return PostgresTraceStore(sessions) if sessions else InMemoryTraceStore()

@@ -196,17 +196,11 @@ def build_definition_store(settings, on_degraded=None) -> DefinitionStore:
     only lasts the session. That is worse than persistence and much better than
     silently assuming.
     """
-    import logging
+    from retail_agent.store.db import sessions_or_none
 
-    from retail_agent.store.db import create_db_engine, session_factory
-
-    try:
-        engine = create_db_engine(settings.database_url)
-        with engine.connect():
-            pass
-        return PostgresDefinitionStore(session_factory(engine))
-    except Exception as err:
-        logging.getLogger(__name__).debug("definition store degraded: %s", err)
-        if on_degraded is not None:
-            on_degraded()
-        return InMemoryDefinitionStore()
+    sessions = sessions_or_none(
+        settings.database_url, name="definition store", on_degraded=on_degraded
+    )
+    return (
+        PostgresDefinitionStore(sessions) if sessions else InMemoryDefinitionStore()
+    )

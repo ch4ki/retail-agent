@@ -94,46 +94,21 @@ def render_trace(console: Console, state) -> None:
         console.print("No turn to trace yet — ask a question first.")
         return
 
-    turn_id = state.get("turn_id", "unknown")
     total_ms = sum(event.duration_ms for event in events)
     console.print(
-        f"[bold]turn {turn_id}[/bold]  [dim]intent={state.get('intent', '?')} · "
+        f"[bold]turn {state.get('turn_id', 'unknown')}[/bold]  "
+        f"[dim]intent={state.get('intent', '?')} · "
         f"status={state.get('status', '?')} · {total_ms} ms · "
         f"{state.get('redactions', 0)} masked[/dim]"
     )
-
-    table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
-    table.add_column("node")
-    table.add_column("ms", justify="right")
-    table.add_column("what happened", overflow="fold")
-    for event in events:
-        table.add_row(event.node, str(event.duration_ms), event.detail)
-    console.print(table)
-
-    attempts = state.get("sql_attempts") or []
-    if not attempts:
-        return
-
-    console.print("\n[bold]SQL attempts[/bold]")
-    for index, attempt in enumerate(attempts, 1):
-        outcome = (
-            f"[red]rejected:[/red] {'; '.join(attempt.violations)}"
-            if attempt.violations
-            else f"[red]failed:[/red] {attempt.error}"
-            if attempt.error
-            else f"[green]{attempt.row_count} row(s), "
-            f"{attempt.bytes_billed} bytes[/green]"
-        )
-        console.print(f"  [dim]{index}. {attempt.step_id}[/dim] {outcome}")
-        console.print(f"     [dim]drafted:[/dim]  {attempt.sql}")
-        if attempt.executed_sql and attempt.executed_sql != attempt.sql:
-            console.print(f"     [dim]executed:[/dim] {attempt.executed_sql}")
+    _render_events(console, [(e.node, e.duration_ms, e.detail) for e in events])
+    _render_attempts(console, state.get("sql_attempts") or [])
 
 
 def render_stored_trace(console: Console, trace) -> None:
     """A trace read back from storage.
 
-    Same shape as the live one, but reconstructed from rows rather than from
+    Same rendering as the live one — reconstructed from rows rather than from
     graph state — so `/trace <id>` answers a complaint about a turn that
     happened days ago in a session that has since ended.
     """
@@ -143,29 +118,50 @@ def render_stored_trace(console: Console, trace) -> None:
         f"{trace.bytes_billed} bytes[/dim]"
     )
     console.print(f"[dim]asked:[/dim] {trace.question}")
+    _render_events(console, trace.events)
+    _render_attempts(console, trace.attempts)
 
+
+def _render_events(console: Console, events) -> None:
+    """One row per node visit, from `(node, duration_ms, detail)` triples."""
     table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
     table.add_column("node")
     table.add_column("ms", justify="right")
     table.add_column("what happened", overflow="fold")
-    for node, duration_ms, detail in trace.events:
-        table.add_row(node, str(duration_ms), detail)
+    for node, duration_ms, detail in events:
+        table.add_row(node, str(duration_ms), detail or "")
     console.print(table)
 
-    if not trace.attempts:
+
+def _render_attempts(console: Console, attempts) -> None:
+    """Every draft, what became of it, and the query the warehouse actually saw.
+
+    Takes `SqlAttempt` objects from live state or plain dicts read back from
+    storage. The two used to have their own near-identical renderer, which is
+    how they drifted: only one of them showed bytes billed.
+    """
+    if not attempts:
         return
+
     console.print("\n[bold]SQL attempts[/bold]")
-    for index, attempt in enumerate(trace.attempts, 1):
-        if attempt.get("violations"):
-            outcome = f"[red]rejected:[/red] {'; '.join(attempt['violations'])}"
-        elif attempt.get("error"):
-            outcome = f"[red]failed:[/red] {attempt['error']}"
+    for index, attempt in enumerate(attempts, 1):
+        field = (
+            attempt.get if isinstance(attempt, dict) else lambda k: getattr(attempt, k, None)
+        )
+        violations, error = field("violations"), field("error")
+        if violations:
+            outcome = f"[red]rejected:[/red] {'; '.join(violations)}"
+        elif error:
+            outcome = f"[red]failed:[/red] {error}"
         else:
-            outcome = f"[green]{attempt.get('row_count')} row(s)[/green]"
-        console.print(f"  [dim]{index}. {attempt.get('step_id')}[/dim] {outcome}")
-        console.print(f"     [dim]drafted:[/dim]  {attempt.get('sql')}")
-        executed = attempt.get("executed_sql")
-        if executed and executed != attempt.get("sql"):
+            billed = field("bytes_billed")
+            billed_text = f", {billed} bytes" if billed else ""
+            outcome = f"[green]{field('row_count')} row(s){billed_text}[/green]"
+
+        console.print(f"  [dim]{index}. {field('step_id')}[/dim] {outcome}")
+        console.print(f"     [dim]drafted:[/dim]  {field('sql')}")
+        executed = field("executed_sql")
+        if executed and executed != field("sql"):
             console.print(f"     [dim]executed:[/dim] {executed}")
 
 

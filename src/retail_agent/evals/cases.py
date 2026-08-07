@@ -44,7 +44,6 @@ EVAL_CASES: tuple[EvalCase, ...] = (
             )
         """,
         required_definitions=("loyal",),
-        expected_intent="analysis",
         notes="Four live runs returned 0, 1254 and 66133 for this question.",
     ),
     EvalCase(

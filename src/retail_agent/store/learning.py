@@ -208,20 +208,12 @@ def build_signal_store(settings, on_degraded=None):
     counts simply never reach the threshold, which is what happened everywhere
     before this existed.
     """
-    import logging
+    from retail_agent.store.db import sessions_or_none
 
-    from retail_agent.store.db import create_db_engine, session_factory
-
-    try:
-        engine = create_db_engine(settings.database_url)
-        with engine.connect():
-            pass
-        return PostgresSignalStore(session_factory(engine))
-    except Exception as err:
-        logging.getLogger(__name__).debug("signal store degraded: %s", err)
-        if on_degraded is not None:
-            on_degraded()
-        return InMemorySignalStore()
+    sessions = sessions_or_none(
+        settings.database_url, name="signal store", on_degraded=on_degraded
+    )
+    return PostgresSignalStore(sessions) if sessions else InMemorySignalStore()
 
 
 def next_proposal(

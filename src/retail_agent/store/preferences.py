@@ -199,17 +199,11 @@ class PostgresPreferenceStore:
 
 def build_preference_store(settings, on_degraded=None) -> PreferenceStore:
     """Postgres when reachable, memory when not."""
-    import logging
+    from retail_agent.store.db import sessions_or_none
 
-    from retail_agent.store.db import create_db_engine, session_factory
-
-    try:
-        engine = create_db_engine(settings.database_url)
-        with engine.connect():
-            pass
-        return PostgresPreferenceStore(session_factory(engine))
-    except Exception as err:
-        logging.getLogger(__name__).debug("preference store degraded: %s", err)
-        if on_degraded is not None:
-            on_degraded()
-        return InMemoryPreferenceStore()
+    sessions = sessions_or_none(
+        settings.database_url, name="preference store", on_degraded=on_degraded
+    )
+    return (
+        PostgresPreferenceStore(sessions) if sessions else InMemoryPreferenceStore()
+    )

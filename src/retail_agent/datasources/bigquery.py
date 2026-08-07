@@ -9,7 +9,7 @@ from google.api_core import exceptions as gexc
 from google.cloud import bigquery
 
 from retail_agent.config import Settings
-from retail_agent.knowledge.column_values import (
+from retail_agent.datasources.column_values import (
     build_discovery_query,
     read_discovery_row,
 )
@@ -41,6 +41,7 @@ class BigQuerySource:
         self._settings = settings
         self._client = client or bigquery.Client(project=settings.google_cloud_project)
         self._schema_cache: dict[str, TableSchema] = {}
+        self._values_cache: dict[str, dict[str, tuple[str, ...]]] = {}
 
     # --- introspection ---
 
@@ -86,15 +87,21 @@ class BigQuerySource:
         The caller decides which columns are safe to ask about — a PII column
         must never reach this method, because its values would land in a prompt.
         """
+        cached = self._values_cache.get(table)
+        if cached is not None:
+            return cached
+
         sql = build_discovery_query(table, columns, dataset=self._settings.bq_dataset)
         if not sql:
             return {}
 
         job = self._client.query(sql)
         rows = list(job.result(timeout=self._settings.bq_timeout_seconds))
-        if not rows:
-            return {}
-        return read_discovery_row(dict(rows[0].items()), columns)
+        found = read_discovery_row(dict(rows[0].items()), columns) if rows else {}
+        # Cached here rather than by the caller: the SQL prompt is rebuilt on
+        # every analysis turn, and these values do not change within a session.
+        self._values_cache[table] = found
+        return found
 
     # --- execution ---
 

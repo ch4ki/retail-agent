@@ -289,16 +289,15 @@ def build_report_store(settings, on_degraded=None) -> ReportStore:
     durability, not the ability to use the agent. The probe also catches the
     case where Postgres is up but migrations have never been run.
     """
-    from retail_agent.store.db import create_db_engine, session_factory
+    from retail_agent.store.db import sessions_or_none
     from retail_agent.store.memory_reports import InMemoryReportStore
 
-    try:
-        engine = create_db_engine(settings.database_url)
-        with engine.connect() as conn:
-            conn.execute(select(ReportRow.id).limit(1))
-        return PostgresReportStore(session_factory(engine))
-    except Exception as err:
-        logging.getLogger(__name__).debug("report store degraded: %s", err)
-        if on_degraded is not None:
-            on_degraded()
-        return InMemoryReportStore()
+    sessions = sessions_or_none(
+        settings.database_url,
+        name="report store",
+        on_degraded=on_degraded,
+        # A stronger probe than a bare connect: this also catches Postgres being
+        # up but never migrated, which otherwise fails on the first save.
+        probe=lambda conn: conn.execute(select(ReportRow.id).limit(1)),
+    )
+    return PostgresReportStore(sessions) if sessions else InMemoryReportStore()

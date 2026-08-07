@@ -11,6 +11,7 @@ LangGraph's `PostgresSaver` manages its own `checkpoint_*` tables through its ow
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine
@@ -92,3 +93,74 @@ def current_revision(database_url: str) -> str:
             return MigrationContext.configure(conn).get_current_revision() or "base"
     finally:
         engine.dispose()
+
+
+@lru_cache(maxsize=None)
+def shared_engine(database_url: str) -> Engine:
+    """One engine per database URL per process.
+
+    Seven stores talk to the same Postgres. Each building its own engine meant
+    seven pools — up to seventy connections from a single CLI process — for a
+    resource SQLAlchemy explicitly intends to be shared. `create_db_engine`
+    stays uncached so tests can still make and dispose their own.
+    """
+    return create_db_engine(database_url)
+
+
+def sessions_or_none(
+    database_url: str, *, name: str, on_degraded=None, probe=None
+) -> sessionmaker[Session] | None:
+    """A session factory, or None when the database cannot be reached.
+
+    Every store made this same decision in its own fifteen lines: connect,
+    probe, log, call back, fall back to memory. The fallback itself differs per
+    store — some seed, one wraps a cache — but the decision does not, and having
+    it in one place is what stops the seven copies drifting.
+
+    The probe is deliberate rather than lazy: a database that is up but never
+    migrated should degrade at startup, not on the first write. `probe` takes a
+    connection and runs a stronger check where a bare connect is not enough.
+    """
+    try:
+        engine = shared_engine(database_url)
+        with engine.connect() as conn:
+            if probe is not None:
+                probe(conn)
+        return session_factory(engine)
+    except Exception as err:
+        logging.getLogger(__name__).debug("%s degraded: %s", name, err)
+        if on_degraded is not None:
+            on_degraded()
+        return None
+
+
+@lru_cache(maxsize=None)
+def shared_engine(database_url: str) -> Engine:
+    """One engine per URL per process.
+
+    Seven stores each built their own, so a single CLI process could hold seven
+    pools against the same database — and probed the connection seven times at
+    startup. They want one pool between them.
+    """
+    return create_db_engine(database_url)
+
+
+def sessions_or_none(
+    database_url: str, *, name: str, on_degraded=None, probe=None
+) -> sessionmaker[Session] | None:
+    """A session factory, or None when the database is unreachable.
+
+    Every store degrades the same way and each had its own copy of the same
+    fifteen lines. The decision belongs in one place; what to do about it — seed
+    from memory, warn the user, drop the feature — stays with the caller.
+    """
+    try:
+        engine = shared_engine(database_url)
+        with engine.connect():
+            pass
+        return session_factory(engine)
+    except Exception as err:
+        log.debug("%s degraded: %s", name, err)
+        if on_degraded is not None:
+            on_degraded()
+        return None

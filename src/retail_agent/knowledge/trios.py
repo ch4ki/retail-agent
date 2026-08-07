@@ -368,20 +368,15 @@ def _to_trio(row) -> Trio:
 def build_trio_store(settings, on_degraded=None):
     """Postgres when reachable, memory when not — seeded either way, so the
     agent always has the analysts' definitions even with no database."""
-    import logging
-
     from retail_agent.knowledge.seeds import SEED_TRIOS
-    from retail_agent.store.db import create_db_engine, session_factory
+    from retail_agent.store.db import sessions_or_none
 
-    try:
-        engine = create_db_engine(settings.database_url)
-        with engine.connect():
-            pass
-        store = PostgresTrioStore(session_factory(engine))
-        store.seed(SEED_TRIOS)
-        return store
-    except Exception as err:
-        logging.getLogger(__name__).debug("trio store degraded: %s", err)
-        if on_degraded is not None:
-            on_degraded()
+    sessions = sessions_or_none(
+        settings.database_url, name="trio store", on_degraded=on_degraded
+    )
+    if sessions is None:
         return InMemoryTrioStore(SEED_TRIOS)
+
+    store = PostgresTrioStore(sessions)
+    store.seed(SEED_TRIOS)
+    return store

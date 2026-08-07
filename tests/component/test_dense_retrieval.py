@@ -26,8 +26,6 @@ from retail_agent.store.db import create_db_engine, run_migrations, session_fact
 
 pytestmark = [pytest.mark.db, pytest.mark.vector]
 
-DIM = 8
-
 # Each concept owns one dimension, so "which trio is nearest" is decidable by
 # reading the corpus rather than by trusting an opaque model.
 CONCEPTS = (
@@ -86,7 +84,6 @@ def index(sessions):
         sessions,
         embed=keyword_embedder(),
         model="test-keyword",
-        dim=DIM,
         min_similarity=0.35,
     )
 
@@ -123,7 +120,7 @@ def test_an_unchanged_corpus_is_not_re_embedded(sessions, corpus):
         return keyword_embedder()(texts)
 
     index = PgVectorIndex(
-        sessions, embed=counting_embedder, model="test-count", dim=DIM
+        sessions, embed=counting_embedder, model="test-count"
     )
 
     index.index(corpus)
@@ -142,7 +139,7 @@ def test_an_edited_trio_is_re_embedded(sessions, corpus):
         return keyword_embedder()(texts)
 
     index = PgVectorIndex(
-        sessions, embed=counting_embedder, model="test-edit", dim=DIM
+        sessions, embed=counting_embedder, model="test-edit"
     )
     index.index(corpus)
 
@@ -166,7 +163,7 @@ def test_an_edited_trio_is_re_embedded(sessions, corpus):
 def test_a_different_model_does_not_read_another_models_vectors(sessions, corpus):
     """Vectors from two embedders are not comparable and are usually not even
     the same width, so the model is part of the key."""
-    first = PgVectorIndex(sessions, embed=keyword_embedder(), model="model-a", dim=DIM)
+    first = PgVectorIndex(sessions, embed=keyword_embedder(), model="model-a")
     first.index(corpus)
 
     calls = []
@@ -175,7 +172,7 @@ def test_a_different_model_does_not_read_another_models_vectors(sessions, corpus
         calls.append(len(texts))
         return keyword_embedder()(texts)
 
-    second = PgVectorIndex(sessions, embed=counting_embedder, model="model-b", dim=DIM)
+    second = PgVectorIndex(sessions, embed=counting_embedder, model="model-b")
     second.index(corpus)
 
     assert calls == [len(corpus)], "model-b must embed for itself, not reuse model-a"
@@ -198,7 +195,7 @@ def test_an_unreachable_database_costs_recall_not_the_turn():
         def begin(self):
             raise RuntimeError("connection refused")
 
-    index = PgVectorIndex(Broken(), embed=keyword_embedder(), dim=DIM)
+    index = PgVectorIndex(Broken(), embed=keyword_embedder())
 
     assert index.rank("anything", list(SEED_TRIOS)) == []
 

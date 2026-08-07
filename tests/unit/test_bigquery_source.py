@@ -38,6 +38,11 @@ class FakeJob:
     def to_dataframe(self):
         return self._df
 
+    def __iter__(self):
+        # Real row objects expose .items(); dicts do too, which is all the
+        # value-discovery path reads.
+        return iter(self._df.to_dict("records"))
+
 
 class FakeClient:
     def __init__(self, job=None, table=None):
@@ -179,3 +184,27 @@ def test_the_row_count_is_the_true_total_not_the_number_fetched():
 
     assert result.row_count == 5823
     assert len(result.rows) == 500
+
+
+def test_column_values_are_read_once_per_table():
+    """The SQL prompt is rebuilt on every analysis turn. Paying for a warehouse
+    scan each time would be a recurring cost for a fact that does not change
+    within a session. Cached beside the schema cache, which already works this
+    way — the caller used to do it by writing a private attribute onto here."""
+    calls = []
+
+    class CountingClient(FakeClient):
+        def query(self, sql, job_config=None):
+            calls.append(sql)
+            return super().query(sql, job_config)
+
+    job = FakeJob(df=pd.DataFrame([{"gender__n": 2, "gender__v": [{"value": "F"}]}]))
+    source = BigQuerySource(
+        Settings(_env_file=None, google_cloud_project="p"), client=CountingClient(job)
+    )
+
+    first = source.column_values("users", ("gender",))
+    second = source.column_values("users", ("gender",))
+
+    assert first == second == {"gender": ("F",)}
+    assert len(calls) == 1, f"queried {len(calls)} times for one table"

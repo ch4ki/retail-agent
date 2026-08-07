@@ -2,6 +2,7 @@ import pandas as pd
 
 from retail_agent.agent.graph import build_graph, run_turn
 from tests.component.conftest import FakeSource
+from tests.support.frames import value
 
 
 def turn(graph, question="top customers by spend"):
@@ -209,7 +210,7 @@ def test_masked_frames_are_stored_not_raw_ones(make_deps, source):
     state = turn(build_graph(deps))
 
     stored = state["frames"]["step_1"]
-    assert "@" not in str(stored.column("email")[0])
+    assert "@" not in str(value(stored, "email"))
     assert state["redactions"] == 2
 
 
@@ -245,7 +246,7 @@ def test_bare_pii_column_runs_and_is_masked_end_to_end(make_deps, source):
 
     assert len(source.executed) == 1, "a maskable query is allowed to run"
     assert state["redactions"] == 2
-    assert "@" not in str(state["frames"]["step_1"].column("email")[0])
+    assert "@" not in str(value(state["frames"]["step_1"], "email"))
 
 
 def test_state_survives_checkpointing(make_deps, source):

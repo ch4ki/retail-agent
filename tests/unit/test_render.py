@@ -218,3 +218,76 @@ def test_row_caps_are_enforced_on_stored_frames():
     assert frame.to_markdown(max_rows=Preferences(max_table_rows=5).max_table_rows).count(
         "\n|"
     ) == 6, "header separator plus five rows"
+
+
+# --- a trace read back from storage ---
+
+
+def _stored_trace():
+    """The shape `/trace <id>` gets: rows, not graph state."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        turn_id="abc123def456",
+        question="how many loyal customers?",
+        intent="analyze",
+        status="ok",
+        duration_ms=2860,
+        redactions=1,
+        bytes_billed=2048,
+        events=[
+            ("route", 310, "intent=analyze"),
+            ("draft_sql", 1200, "step_1: guard rejected — Column 'email' is personal data."),
+        ],
+        attempts=[
+            {
+                "step_id": "step_1",
+                "sql": "SELECT email AS c FROM users",
+                "violations": ["Column 'email' is personal data."],
+            },
+            {
+                "step_id": "step_1",
+                "sql": "SELECT id FROM users",
+                "executed_sql": "SELECT id FROM `ds.users` LIMIT 500",
+                "row_count": 10,
+                "bytes_billed": 2048,
+            },
+        ],
+    )
+
+
+def test_a_stored_trace_shows_the_turn_and_its_nodes():
+    """`/trace <id>` answers a complaint about a turn whose session has ended,
+    so it has to carry the same detail as the live one."""
+    from retail_agent.cli.render import render_stored_trace
+
+    console = Console(record=True, width=110)
+    render_stored_trace(console, _stored_trace())
+    output = console.export_text()
+
+    assert "abc123def456" in output
+    assert "route" in output and "draft_sql" in output
+    assert "how many loyal customers?" in output
+
+
+def test_a_stored_trace_shows_why_the_guard_rejected_a_query():
+    from retail_agent.cli.render import render_stored_trace
+
+    console = Console(record=True, width=110)
+    render_stored_trace(console, _stored_trace())
+    output = console.export_text()
+
+    assert "rejected" in output
+    assert "personal data" in output
+
+
+def test_a_stored_trace_shows_the_rewritten_query_that_ran():
+    """The guard rewrites before executing, so the drafted SQL is not what the
+    warehouse saw — and a bug report about the wrong one wastes an hour."""
+    from retail_agent.cli.render import render_stored_trace
+
+    console = Console(record=True, width=110)
+    render_stored_trace(console, _stored_trace())
+    output = console.export_text()
+
+    assert "LIMIT 500" in output

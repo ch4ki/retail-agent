@@ -143,4 +143,4 @@ def test_it_is_built_when_both_are_present():
     index = build_dense_index(settings, sessions=object())
 
     assert index is not None
-    assert index.dim == 1536
+    assert index.model == "text-embedding-3-small"
