@@ -42,7 +42,6 @@ from retail_agent.llm.provider import MissingCredentialsError, build_llm
 from retail_agent.knowledge.trios import UNDEFINED_TERMS as DEFINITION_HINTS
 from retail_agent.knowledge.promotion import PromotionError, promote_definition
 from retail_agent.knowledge.trios import live_trios
-from retail_agent.obs.traces import from_state as trace_from_state
 from retail_agent.obs.tracing import configure_tracing
 from retail_agent.store.definitions import ask_for_definition
 from retail_agent.store.preferences import preferred
@@ -393,20 +392,10 @@ def _answer(console, graph, deps, user, session_id, question) -> dict | None:
         )
         return state or None
 
-    _persist(deps, state)
+    # The trace was recorded by the graph's finish_turn node, so every caller
+    # gets one — not just this REPL.
     render_answer(console, state, prefs=preferred(deps.preferences, user))
     return state
-
-
-def _persist(deps, state) -> None:
-    """Record the finished turn. A trace is a debugging aid, so failing to write
-    one must never cost the user their answer."""
-    if not state.get("turn_id"):
-        return
-    try:
-        deps.traces.record(trace_from_state(state))
-    except Exception as err:
-        logging.getLogger(__name__).debug("trace not recorded: %s", err)
 
 
 def _trace(console, deps, user, last_turn, command) -> None:

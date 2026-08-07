@@ -27,6 +27,7 @@ from retail_agent.agent.nodes.report_ops import (
     await_confirmation,
     report_ops_node,
 )
+from retail_agent.agent.nodes.finish_turn import finish_turn_node
 from retail_agent.agent.nodes.route import route_node
 from retail_agent.agent.nodes.schema_qa import schema_node
 from retail_agent.agent.nodes.sql import draft_sql_node
@@ -56,6 +57,7 @@ def build_graph(deps: AgentDeps, checkpointer=None):
     node("execute", partial(execute_node, deps=deps))
     node("diagnose", partial(diagnose_node, deps=deps))
     node("synthesize", partial(synthesize_node, deps=deps))
+    node("finish_turn", partial(finish_turn_node, deps=deps))
 
     builder.add_edge(START, "start_turn")
     builder.add_edge("start_turn", "route")
@@ -69,18 +71,18 @@ def build_graph(deps: AgentDeps, checkpointer=None):
             "report_ops": "report_ops",
         },
     )
-    builder.add_edge("schema", END)
-    builder.add_edge("chat", END)
+    builder.add_edge("schema", "finish_turn")
+    builder.add_edge("chat", "finish_turn")
     # The destructive path: report_ops reads and stages, the breakpoint pauses,
     # apply_delete writes. Nothing can write before the user answers, because
     # the write is a different node on the far side of the gate.
     builder.add_conditional_edges(
         "report_ops",
         _needs_confirmation,
-        {"await_confirmation": "await_confirmation", "end": END},
+        {"await_confirmation": "await_confirmation", "end": "finish_turn"},
     )
     builder.add_edge("await_confirmation", "apply_delete")
-    builder.add_edge("apply_delete", END)
+    builder.add_edge("apply_delete", "finish_turn")
     # Asking what a term means is a breakpoint, like the delete confirmation:
     # declared here rather than inside a node, and the node that acts on the
     # reply sits on the far side of it. The loop back through `recall` is what
@@ -110,7 +112,10 @@ def build_graph(deps: AgentDeps, checkpointer=None):
         },
     )
     builder.add_edge("diagnose", "draft_sql")
-    builder.add_edge("synthesize", END)
+    builder.add_edge("synthesize", "finish_turn")
+    # Every path leaves through here, which is what makes "the graph records its
+    # own turns" true for any caller rather than only for the CLI.
+    builder.add_edge("finish_turn", END)
 
     # The confirmation gate. It lives here, in the file that owns control flow,
     # rather than inside a node — so it is visible in the graph and in Studio's

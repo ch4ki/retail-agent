@@ -182,7 +182,10 @@ def test_a_failing_turn_renders_an_error_rather_than_raising():
     assert "quota" in console.text().lower() or "429" in console.text()
 
 
-def test_the_turn_is_recorded_for_trace():
+def test_the_repl_does_not_record_the_turn_itself():
+    """Recording moved into the graph's finish_turn node, so every caller gets a
+    trace rather than only this one. A second write here would double-count
+    every turn in `/metrics`."""
     recorded = []
 
     class Deps(FakeDeps):
@@ -195,4 +198,4 @@ def test_the_turn_is_recorded_for_trace():
     console = RecordingConsole()
     _answer(console, FakeGraph(), Deps(), "dana", "s1", "how many at risk?")
 
-    assert len(recorded) == 1
+    assert recorded == []

@@ -409,7 +409,12 @@ def test_every_node_visit_records_a_timed_event(make_deps, source):
 
     state = turn(build_graph(deps), "what data do you have?")
 
-    assert [e.node for e in state["events"]] == ["start_turn", "route", "schema"]
+    assert [e.node for e in state["events"]] == [
+        "start_turn",
+        "route",
+        "schema",
+        "finish_turn",
+    ]
     assert all(e.duration_ms >= 0 for e in state["events"])
 
 
@@ -438,6 +443,7 @@ def test_events_record_the_repair_loop(make_deps, source):
         "draft_sql",
         "execute",
         "synthesize",
+        "finish_turn",
     ]
 
 
@@ -461,4 +467,9 @@ def test_events_do_not_leak_into_the_next_turn(make_deps, source):
         graph, user_id="d", session_id="s1", question="thanks again", config=config
     )
 
-    assert [e.node for e in second["events"]] == ["start_turn", "route", "chat"]
+    assert [e.node for e in second["events"]] == [
+        "start_turn",
+        "route",
+        "chat",
+        "finish_turn",
+    ]
