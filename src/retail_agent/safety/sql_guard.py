@@ -281,6 +281,19 @@ def _dedupe(items: list[str]) -> list[str]:
     return out
 
 
+def _parse(sql: str) -> exp.Expression | None:
+    """Parse, or None. Never raises.
+
+    Both readers below run on queries the guard has already ruled on, so a
+    parse failure here is not a safety decision — it must cost the enrichment,
+    never the turn.
+    """
+    try:
+        return sqlglot.parse_one(sql, read="bigquery")
+    except Exception:
+        return None
+
+
 def applied_limit(sql: str) -> int | None:
     """The row cap on the query as it will run, or None.
 
@@ -293,13 +306,7 @@ def applied_limit(sql: str) -> int | None:
     Only the outermost LIMIT counts — an inner one bounds a subquery, not the
     rows the caller receives.
     """
-    try:
-        tree = sqlglot.parse_one(sql, read="bigquery")
-    except Exception:
-        # Never the thing that breaks a turn; the guard already ruled on this
-        # query's validity.
-        return None
-
+    tree = _parse(sql)
     limit = tree.args.get("limit") if tree is not None else None
     if limit is None:
         return None
@@ -307,3 +314,23 @@ def applied_limit(sql: str) -> int | None:
         return int(limit.expression.this)
     except (AttributeError, TypeError, ValueError):
         return None
+
+
+def without_limit(sql: str) -> str:
+    """The same query with its outermost LIMIT removed.
+
+    Used when handing an earlier step's query to a later one. The guard appends
+    a LIMIT so results stay printable; that bound is about display, not meaning,
+    and passing it along made the model reproduce it faithfully —
+    `SELECT AVG(age) FROM (SELECT age FROM users LIMIT 100)` averages a hundred
+    rows and calls it the average age, moving the truncation out of the prompt
+    and into the SQL.
+
+    Only the outer one goes. A LIMIT the question asked for ("top 10
+    customers") lives in a subquery and is part of what that step computed.
+    """
+    tree = _parse(sql) if sql else None
+    if tree is None:
+        return sql
+    tree.set("limit", None)
+    return tree.sql(dialect="bigquery")
