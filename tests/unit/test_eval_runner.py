@@ -344,3 +344,38 @@ def test_a_ranked_case_ignores_the_answer_column():
     )
 
     assert result.outcome is Outcome.PASS
+
+
+def test_a_truncated_result_cannot_supply_a_scalar_answer():
+    """The agent declined to derive a total from a capped result — correctly —
+    so there is no number to be wrong about. Scoring the first row as its answer
+    reports "expected 5823, got 1" and reads as a confidently wrong agent, which
+    is the opposite of what happened."""
+    result = run_case(
+        CASE,
+        ask=lambda _q: AgentAnswer(
+            text="The data is truncated; a counting query is required.",
+            rows=[[1]] * 500,
+            columns=("n",),
+            truncated=True,
+        ),
+        execute=lambda _sql: [[5746]],
+    )
+
+    assert result.outcome is Outcome.ERROR
+    assert "truncat" in result.detail.lower()
+
+
+def test_a_truncated_result_still_scores_a_ranked_case():
+    """"Top 10 customers" caps at ten by design, and the cap is the answer."""
+    case = EvalCase(id="top", question="q", reference_sql="s", ranked=True)
+
+    result = run_case(
+        case,
+        ask=lambda _q: AgentAnswer(
+            text="", rows=[[7], [4]], columns=("id",), truncated=True
+        ),
+        execute=lambda _sql: [[7], [4]],
+    )
+
+    assert result.outcome is Outcome.PASS

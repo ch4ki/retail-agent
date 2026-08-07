@@ -279,3 +279,31 @@ def _dedupe(items: list[str]) -> list[str]:
             seen.add(item)
             out.append(item)
     return out
+
+
+def applied_limit(sql: str) -> int | None:
+    """The row cap on the query as it will run, or None.
+
+    `execute` needs this to tell a result of 500 rows from a result of 500 rows
+    that had more behind it. Those were indistinguishable, and the consequence
+    was not cosmetic: asked how many customers were loyal, the agent wrote a
+    query returning one row per customer, got the first 500 of 5,823, and
+    narrated the truncated sample as the answer.
+
+    Only the outermost LIMIT counts — an inner one bounds a subquery, not the
+    rows the caller receives.
+    """
+    try:
+        tree = sqlglot.parse_one(sql, read="bigquery")
+    except Exception:
+        # Never the thing that breaks a turn; the guard already ruled on this
+        # query's validity.
+        return None
+
+    limit = tree.args.get("limit") if tree is not None else None
+    if limit is None:
+        return None
+    try:
+        return int(limit.expression.this)
+    except (AttributeError, TypeError, ValueError):
+        return None

@@ -91,6 +91,12 @@ class MaskedFrame:
     row_count: int
     redactions: int
     dropped_columns: tuple[str, ...] = ()
+    # The guard caps every query so a result stays printable and affordable,
+    # and that cap is invisible in the result: 500 rows returned looks the same
+    # whether there were 500 or 5,823. Measured on the real warehouse, the query
+    # written for "how many loyal customers" matched 5,823 and the agent saw
+    # 500. This is what stops a sample being read as the whole answer.
+    truncated: bool = False
 
     @classmethod
     def from_dataframe(
@@ -100,6 +106,7 @@ class MaskedFrame:
         row_count: int,
         redactions: int,
         dropped_columns: tuple[str, ...] = (),
+        truncated: bool = False,
     ) -> "MaskedFrame":
         head = frame.head(MAX_STORED_ROWS)
         return cls(
@@ -111,6 +118,7 @@ class MaskedFrame:
             row_count=row_count,
             redactions=redactions,
             dropped_columns=tuple(dropped_columns),
+            truncated=truncated,
         )
 
     def column(self, name: str) -> list[Any]:

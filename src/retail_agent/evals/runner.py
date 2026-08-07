@@ -33,6 +33,8 @@ class AgentAnswer:
     sql: str = ""
     intent: str = ""
     trios: tuple[str, ...] = field(default_factory=tuple)
+    # The result hit the guard's row cap, so these rows are a sample.
+    truncated: bool = False
 
 
 Ask = Callable[[str], AgentAnswer]
@@ -87,6 +89,16 @@ def run_case(case: EvalCase, *, ask: Ask, execute: Execute) -> CaseResult:
 
     if actual is None:
         result = Outcome.ERROR, "the agent returned no rows to score"
+    elif answer.truncated and not case.ranked:
+        # A capped result cannot supply a total, and the agent says so rather
+        # than deriving one. Scoring its first row as the answer would report
+        # "expected 5823, got 1" — a confidently wrong agent, which is the
+        # opposite of what happened. Ranked cases are exempt: "top 10" caps at
+        # ten by design and the cap is the answer.
+        result = (
+            Outcome.ERROR,
+            f"result truncated at {len(answer.rows)} rows; no total available",
+        )
     else:
         scored = compare(actual=actual, expected=expected, tolerance=case.tolerance)
         detail = scored.detail

@@ -137,15 +137,23 @@ def _prior_results(state: TurnState) -> str:
         # Multi-row: describe the shape and hand over the query, not the data.
         columns = ", ".join(frame.columns)
         query = _without_display_limit(sql_by_step.get(step_id))
+        # "returned 500 rows" is false when 5,823 matched and the guard capped
+        # it. A later step sizing its work against that number is sizing it
+        # against a cap.
+        how_many = (
+            f"at least {frame.row_count} rows (truncated)"
+            if frame.truncated
+            else f"{frame.row_count} rows"
+        )
         if query:
             blocks.append(
-                f"{step_id} returned {frame.row_count} rows of ({columns}). "
+                f"{step_id} returned {how_many} of ({columns}). "
                 f"Its query was:\n{query}"
             )
         else:
             # No recorded query, so there is nothing to compose against.
             # Naming it anyway would invite an invented table reference.
-            blocks.append(f"{step_id} returned {frame.row_count} rows of ({columns}).")
+            blocks.append(f"{step_id} returned {how_many} of ({columns}).")
 
     return (
         "Results already gathered in this analysis:\n"

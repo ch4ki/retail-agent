@@ -97,6 +97,13 @@ Rules:
   longitude directly. Use id to identify a customer. Aggregates over those
   columns (for example COUNT(DISTINCT email)) are fine.
 - Add a LIMIT unless the query is a single aggregate row.
+- If the question asks how many, how much, the total or the average, compute it
+  IN THE QUERY — COUNT(), SUM(), AVG() — and return that one row. Never return
+  the rows to be counted afterwards. Every query is capped, so a result meant to
+  be counted comes back truncated and the count is silently wrong. Asked "how
+  many loyal customers", `SELECT user_id ... GROUP BY user_id` matched 5,823
+  rows, was cut to 500, and produced a confidently wrong answer; the same
+  question as `SELECT COUNT(*) FROM (...)` cannot be truncated at all.
 
 Return only the SQL. No markdown fences, no explanation.
 """.strip()

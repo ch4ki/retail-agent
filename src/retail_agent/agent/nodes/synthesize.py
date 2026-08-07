@@ -37,6 +37,22 @@ def synthesize_node(state: TurnState, deps: AgentDeps) -> dict:
         f"### {key}\n{frame.to_markdown()}" for key, frame in frames.items()
     )
 
+    # A capped result read as a complete one is how "20 customers are classified
+    # as loyal" was produced against a true 5,823: the query returned one row
+    # per customer, the guard cut it to 500, and the model counted what it could
+    # see. Saying so is what stops the arithmetic being attempted at all.
+    capped = [(key, frame) for key, frame in frames.items() if frame.truncated]
+    if capped:
+        listed = ", ".join(f"{key} (first {frame.row_count})" for key, frame in capped)
+        results += (
+            f"\n\nThese results are TRUNCATED — {listed}. They are a partial "
+            "sample, not the whole result: more rows matched than are shown, and "
+            "how many more is unknown. Do not count, total or average these rows, "
+            "and do not describe them as all of them. Report them as examples, "
+            "say the list is partial, and if the question needs a total say that "
+            "it needs a counting query rather than guessing one from these rows."
+        )
+
     # A step with no frame did not return "no data" — its query never
     # succeeded. Letting the model infer emptiness from a missing table is how
     # you get "there were no sales" when the truth is "the query failed".
