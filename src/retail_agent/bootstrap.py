@@ -16,7 +16,7 @@ from retail_agent.knowledge.trios import build_trio_store
 from retail_agent.obs.traces import build_trace_store
 from retail_agent.safety.pii import PiiPolicy
 from retail_agent.store.definitions import build_definition_store
-from retail_agent.store.learning import InMemorySignalStore
+from retail_agent.store.learning import build_signal_store
 from retail_agent.store.personas import build_persona_store
 from retail_agent.store.preferences import build_preference_store
 from retail_agent.store.reports import build_report_store
@@ -51,7 +51,9 @@ def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
         traces=build_trace_store(settings),
         personas=build_persona_store(settings),
         preferences=build_preference_store(settings),
-        signals=InMemorySignalStore(),
+        # Postgres-backed: the proposal threshold is three, and evidence that
+        # died with the process could only ever be met inside one session.
+        signals=build_signal_store(settings),
         definitions=build_definition_store(settings),
         reports=build_report_store(
             settings,

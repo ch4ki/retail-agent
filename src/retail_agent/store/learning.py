@@ -7,15 +7,21 @@ analysis, whether they want tables or prose. Two rules shape this:
 without saying why is worse than none, because the reader cannot tell whether
 the agent changed or the data did. Evidence accumulates; the agent asks.
 
-**The evidence is quotable.** Detection is deterministic phrase matching rather
-than a model judgement, so the proposal can say *you asked for this three times,
-most recently "just give me the numbers"*. "The model inferred you prefer
-brevity" is not something a user can check or argue with.
+**The evidence is quotable.** The proposal says *you asked for this three times,
+most recently "cut to the chase"* — a span the user actually typed. "The model
+inferred you prefer brevity" is not something anyone can check or argue with.
+
+Detection itself lives in the router (`agent/nodes/route.py`), folded into the
+model call that already reads the question. It used to be regex here, and the
+regex was wrong in a way that mattered: it caught about a quarter of realistic
+phrasings, and it fired backwards on negation — "don't just give me the number,
+tell me why" recorded `depth=summary`, then quoted the user out of context. What
+survived the move is the guarantee that the quote is real: the router discards
+any signal whose evidence is not verbatim in the question.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -48,53 +54,6 @@ class Proposal:
             f'"{self.evidence}". Set {self.field} to {self.value}? '
             f"[bold]/prefs accept[/bold] or [bold]/prefs decline[/bold]"
         )
-
-
-# Phrases that ask for less. Deliberately explicit: each one is something a
-# person types when they want a shorter answer, not merely a short question.
-_PATTERNS: tuple[tuple[str, str, str], ...] = (
-    ("depth", "summary", r"\bjust (?:give me )?(?:the )?(?:numbers?|figures?|totals?)\b"),
-    ("depth", "summary", r"\b(?:keep it |be )?(?:brief|short|concise)\b"),
-    ("depth", "summary", r"\b(?:one|single) (?:line|sentence)\b"),
-    ("depth", "summary", r"\bno (?:detail|explanation|preamble)\b"),
-    ("depth", "summary", r"\btl;?dr\b"),
-    # Asking to go further, which is not the same as asking a causal question.
-    ("depth", "deep", r"\b(?:more|further) detail\b"),
-    ("depth", "deep", r"\bgo deeper\b"),
-    ("depth", "deep", r"\b(?:tell me more|elaborate|expand on)\b"),
-    ("depth", "deep", r"\bin depth\b"),
-    ("depth", "deep", r"\bbreak (?:it|that) down\b"),
-    ("answer_format", "table", r"\b(?:as|in) a table\b"),
-    ("answer_format", "table", r"\btabulate\b"),
-    ("answer_format", "bullets", r"\bbullets?\b"),
-    ("answer_format", "bullets", r"\b(?:as|in) a list\b"),
-    ("answer_format", "prose", r"\b(?:as|in) (?:prose|a paragraph)\b"),
-    ("answer_format", "prose", r"\bwrite it out\b"),
-)
-
-_COMPILED = tuple(
-    (field, value, re.compile(pattern, re.IGNORECASE))
-    for field, value, pattern in _PATTERNS
-)
-
-
-def detect(message: str) -> list[Signal]:
-    """Preference signals in one user message.
-
-    Note what is *not* here: "why", "explain", "how come". Those are the most
-    common analysis questions in the brief — "why are users in state X
-    underspending?" is a request about the data, not a request for a longer
-    answer. Treating them as depth signals would mean the agent slowly decided
-    every analyst wanted essays.
-    """
-    found: list[Signal] = []
-    seen: set[tuple[str, str]] = set()
-    for field, value, pattern in _COMPILED:
-        match = pattern.search(message)
-        if match and (field, value) not in seen:
-            seen.add((field, value))
-            found.append(Signal(field=field, value=value, evidence=match.group(0)))
-    return found
 
 
 @runtime_checkable
@@ -138,6 +97,131 @@ class InMemorySignalStore:
         mine = self._counts.get(user_id, {})
         for key in [k for k in mine if k[0] == field]:
             del mine[key]
+
+
+class PostgresSignalStore:
+    """Evidence that survives the process.
+
+    Upserts rather than read-modify-write: two terminals for the same user are
+    ordinary, and losing a sighting to a lost update would silently move the
+    threshold.
+    """
+
+    def __init__(self, sessions) -> None:
+        self._sessions = sessions
+
+    def record(self, *, user_id: str, signal: Signal) -> int:
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        from retail_agent.store.models import PreferenceSignalRow
+
+        statement = (
+            pg_insert(PreferenceSignalRow)
+            .values(
+                user_id=user_id,
+                field=signal.field,
+                value=signal.value,
+                count=1,
+                evidence=signal.evidence,
+            )
+            .on_conflict_do_update(
+                index_elements=["user_id", "field", "value"],
+                set_={
+                    "count": PreferenceSignalRow.count + 1,
+                    # The newest wording wins: the proposal says "most
+                    # recently", and quoting something from three sessions ago
+                    # reads as stale.
+                    "evidence": signal.evidence,
+                },
+            )
+            .returning(PreferenceSignalRow.count)
+        )
+        with self._sessions.begin() as session:
+            return int(session.execute(statement).scalar_one())
+
+    def counts(self, *, user_id: str) -> dict[tuple[str, str], tuple[int, str]]:
+        from sqlalchemy import select
+
+        from retail_agent.store.models import PreferenceSignalRow
+
+        with self._sessions.begin() as session:
+            rows = session.execute(
+                select(
+                    PreferenceSignalRow.field,
+                    PreferenceSignalRow.value,
+                    PreferenceSignalRow.count,
+                    PreferenceSignalRow.evidence,
+                ).where(PreferenceSignalRow.user_id == user_id)
+            ).all()
+        return {(f, v): (count, evidence) for f, v, count, evidence in rows}
+
+    def decline(self, *, user_id: str, field: str, value: str) -> None:
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        from retail_agent.store.models import PreferenceDeclineRow
+
+        with self._sessions.begin() as session:
+            session.execute(
+                pg_insert(PreferenceDeclineRow)
+                .values(user_id=user_id, field=field, value=value, count=1)
+                .on_conflict_do_update(
+                    index_elements=["user_id", "field", "value"],
+                    set_={"count": PreferenceDeclineRow.count + 1},
+                )
+            )
+
+    def declines(self, *, user_id: str) -> dict[tuple[str, str], int]:
+        from sqlalchemy import select
+
+        from retail_agent.store.models import PreferenceDeclineRow
+
+        with self._sessions.begin() as session:
+            rows = session.execute(
+                select(
+                    PreferenceDeclineRow.field,
+                    PreferenceDeclineRow.value,
+                    PreferenceDeclineRow.count,
+                ).where(PreferenceDeclineRow.user_id == user_id)
+            ).all()
+        return {(f, v): count for f, v, count in rows}
+
+    def clear(self, *, user_id: str, field: str) -> None:
+        """Evidence only. A decline outlives the setting it argued against —
+        forgetting it would let the next proposal arrive at full strength."""
+        from sqlalchemy import delete
+
+        from retail_agent.store.models import PreferenceSignalRow
+
+        with self._sessions.begin() as session:
+            session.execute(
+                delete(PreferenceSignalRow).where(
+                    PreferenceSignalRow.user_id == user_id,
+                    PreferenceSignalRow.field == field,
+                )
+            )
+
+
+def build_signal_store(settings, on_degraded=None):
+    """Postgres when reachable, memory when not.
+
+    Degrading costs the learning loop, not the agent: without a database the
+    counts simply never reach the threshold, which is what happened everywhere
+    before this existed.
+    """
+    import logging
+
+    from retail_agent.store.db import create_db_engine, session_factory
+
+    try:
+        engine = create_db_engine(settings.database_url)
+        with engine.connect():
+            pass
+        return PostgresSignalStore(session_factory(engine))
+    except Exception as err:
+        logging.getLogger(__name__).debug("signal store degraded: %s", err)
+        if on_degraded is not None:
+            on_degraded()
+        return InMemorySignalStore()
 
 
 def next_proposal(

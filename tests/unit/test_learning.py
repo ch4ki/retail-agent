@@ -1,3 +1,11 @@
+"""The signal store and the proposal rules.
+
+Detection itself moved to the router — see `tests/unit/test_style_signal.py` for
+the validation that keeps a proposal quotable, and `-m live` for whether the
+real model actually declines to read "why are sales down?" as a style
+preference.
+"""
+
 import pytest
 
 from retail_agent.store.learning import (
@@ -6,108 +14,10 @@ from retail_agent.store.learning import (
     InMemorySignalStore,
     Signal,
     SignalStore,
-    detect,
     next_proposal,
 )
 from retail_agent.store.preferences import Preferences
-
-
-# --- what must NOT be treated as a preference signal ---
-
-
-@pytest.mark.parametrize(
-    "question",
-    [
-        "why are users in state X underspending?",
-        "why did our churn rate spike last month?",
-        "why does brand Calvin Klein outperform brand Levis?",
-        "explain the drop in March",
-        "how come revenue fell?",
-        "what is driving the increase?",
-    ],
-)
-def test_causal_questions_are_not_depth_signals(question):
-    """These are the brief's own example questions. Reading them as "this user
-    likes long answers" would have the agent quietly deciding every analyst
-    wants essays."""
-    assert detect(question) == []
-
-
-@pytest.mark.parametrize(
-    "question",
-    [
-        "what was revenue in March?",
-        "who are our top 10 customers by spend?",
-        "compare brand X and brand Y",
-    ],
-)
-def test_ordinary_questions_produce_no_signal(question):
-    assert detect(question) == []
-
-
-# --- what should be ---
-
-
-@pytest.mark.parametrize(
-    ("message", "value"),
-    [
-        ("just give me the numbers", "summary"),
-        ("just the totals please", "summary"),
-        ("keep it brief", "summary"),
-        ("one line answer please", "summary"),
-        ("tldr?", "summary"),
-        ("no detail needed", "summary"),
-        ("go deeper on that", "deep"),
-        ("tell me more", "deep"),
-        ("break that down", "deep"),
-        ("I want more detail", "deep"),
-    ],
-)
-def test_depth_phrases_are_detected(message, value):
-    signals = detect(message)
-
-    assert [s.value for s in signals] == [value]
-    assert signals[0].field == "depth"
-
-
-@pytest.mark.parametrize(
-    ("message", "value"),
-    [
-        ("show that as a table", "table"),
-        ("can you tabulate it", "table"),
-        ("use bullets", "bullets"),
-        ("give me that as a list", "bullets"),
-        ("write it out as prose", "prose"),
-    ],
-)
-def test_format_phrases_are_detected(message, value):
-    signals = detect(message)
-
-    assert [s.value for s in signals] == [value]
-    assert signals[0].field == "answer_format"
-
-
-def test_the_matched_phrase_is_kept_as_evidence():
-    """The proposal quotes this back, so it has to be what the user typed."""
-    signal = detect("just give me the numbers for Q1")[0]
-
-    assert "just give me the numbers" in signal.evidence.lower()
-
-
-def test_one_message_can_carry_two_signals():
-    signals = detect("keep it brief and use bullets")
-
-    assert {(s.field, s.value) for s in signals} == {
-        ("depth", "summary"),
-        ("answer_format", "bullets"),
-    }
-
-
-def test_a_repeated_phrase_counts_once_per_message():
-    """Saying "brief, and I mean brief" is one instance of wanting brevity."""
-    signals = detect("keep it brief — and be brief about it")
-
-    assert len(signals) == 1
+from tests.support.signal_store_contract import SignalStoreContract
 
 
 # --- the store ---
@@ -211,3 +121,12 @@ def test_accepting_clears_the_evidence_that_produced_it():
     store.clear(user_id="dana", field="depth")
 
     assert next_proposal(store, user_id="dana", current=Preferences()) is None
+
+
+# --- the same contract, in memory ---
+
+
+class TestInMemorySignalStore(SignalStoreContract):
+    @pytest.fixture
+    def store(self):
+        return InMemorySignalStore()

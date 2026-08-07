@@ -202,9 +202,9 @@ so no floor could be both sensitive and precise.
 ## Tests
 
 ```bash
-uv run pytest              # 785 tests, no credentials or database needed
-uv run pytest -m db        # 72 tests, needs `docker compose up -d postgres`
-uv run pytest -m live      # 7 tests, needs real BigQuery access and an LLM key
+uv run pytest              # 836 tests, no credentials or database needed
+uv run pytest -m db        # 94 tests, needs `docker compose up -d postgres`
+uv run pytest -m live      # 9 tests, needs real BigQuery access and an LLM key
 uv run pytest -m vector    # 14 tests, needs DENSE_RETRIEVAL deps; 9 need an OpenAI key
 ```
 
@@ -240,7 +240,9 @@ deploy — versioned, attributed, and provably unable to reach the safety rules 
 and per-user answer preferences.
 
 The agent also learns preferences from how you phrase questions, and proposes
-them rather than applying them — it will ask before changing anything.
+them rather than applying them — it will ask before changing anything. It reads
+the phrasing with the model, in the router call it already makes, and refuses to
+quote you on anything you did not literally type.
 
 Also built: the Golden Bucket of analyst Trios — question, SQL, report and the
 metric definitions that connect them — with hybrid lexical/dense retrieval, a

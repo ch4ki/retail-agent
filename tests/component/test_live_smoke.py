@@ -131,3 +131,69 @@ def test_dense_retrieval_finds_a_synonym_the_lexical_ranker_misses():
 
     assert not lexical_only, "no shared vocabulary with any trio"
     assert hybrid, "the embedding model should recognise the paraphrase"
+
+
+# The non-regression that the regex detector was written conservatively to
+# protect, now that a model makes the call instead. These are the brief's own
+# example questions: reading them as "this user likes long answers" would have
+# the agent quietly deciding every analyst wants essays.
+
+
+def test_causal_questions_are_not_read_as_style_preferences():
+    from retail_agent.agent.nodes.route import RouteDecision, style_signal
+    from retail_agent.agent.prompts import ROUTER_PROMPT
+    from retail_agent.config import get_settings
+    from retail_agent.llm.provider import build_llm
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    llm = build_llm(get_settings()).with_structured_output(RouteDecision)
+    prompt = ROUTER_PROMPT.format(history="(first question)")
+
+    misread = []
+    for question in [
+        "why are users in state X underspending?",
+        "why did our churn rate spike last month?",
+        "why does brand Calvin Klein outperform brand Levis?",
+        "explain the drop in March",
+        "how come revenue fell?",
+        "what was revenue in March?",
+        "who are our top 10 customers by spend?",
+    ]:
+        decision = llm.invoke(
+            [SystemMessage(content=prompt), HumanMessage(content=question)]
+        )
+        if style_signal(decision, question=question) is not None:
+            misread.append((question, decision.style_field, decision.style_value))
+
+    assert not misread, f"read as style preferences: {misread}"
+
+
+def test_a_real_preference_is_detected_with_a_quotable_span():
+    """The half the regex could not do: no pattern in the old list matches any
+    of these, and the negation case recorded the opposite."""
+    from retail_agent.agent.nodes.route import RouteDecision, style_signal
+    from retail_agent.agent.prompts import ROUTER_PROMPT
+    from retail_agent.config import get_settings
+    from retail_agent.llm.provider import build_llm
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    llm = build_llm(get_settings()).with_structured_output(RouteDecision)
+    prompt = ROUTER_PROMPT.format(history="(first question)")
+
+    missed = []
+    for question, expected in [
+        ("cut to the chase, how many brands?", "summary"),
+        ("spare me the details — what was Q1 revenue?", "summary"),
+        ("walk me through it: why did churn spike?", "deep"),
+        ("don't just give me the number, tell me why", "deep"),
+    ]:
+        decision = llm.invoke(
+            [SystemMessage(content=prompt), HumanMessage(content=question)]
+        )
+        signal = style_signal(decision, question=question)
+        if signal is None or signal.value != expected:
+            missed.append((question, expected, signal))
+
+    assert not missed, f"not detected as expected: {missed}"

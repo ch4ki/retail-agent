@@ -230,12 +230,24 @@ def test_prefs_are_per_user():
 
 
 def _ask(deps, times, phrase="keep it brief"):
-    """Drive real turns through the REPL so the signal path is the real one."""
-    from retail_agent.store.learning import PROPOSAL_THRESHOLD  # noqa: F401
+    """Seed the evidence, then open the REPL to see what it does with it.
 
-    console = FakeConsole([phrase] * times + ["/quit"])
-    # graph=None would raise inside _answer, which the REPL catches and renders
-    # as an error — the signal is recorded before that, which is the point.
+    Detection lives in the router node now, not here — see
+    `tests/component/test_style_learning.py`. What these tests own is the half
+    the user sees: that accumulated evidence produces a *proposal* quoting them,
+    and that nothing changes until they accept.
+    """
+    from retail_agent.store.learning import Signal
+
+    for _ in range(times):
+        deps.signals.record(
+            user_id="dana", signal=Signal(field="depth", value="summary", evidence=phrase)
+        )
+
+    # One ordinary question, because the proposal is offered after a turn.
+    # graph=None makes that turn fail, which the REPL catches and renders — the
+    # proposal is offered either way, which is what is under test.
+    console = FakeConsole(["how many brands?", "/quit"])
     _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
     return console
 

@@ -274,3 +274,44 @@ class TrioEmbeddingRow(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
+
+class PreferenceSignalRow(Base):
+    """Evidence that a user prefers answers a certain way.
+
+    Rows rather than process memory, because the proposal threshold is three: an
+    in-memory counter can only ever be met by someone expressing the same
+    preference three times in a single sitting, which is why this feature almost
+    never fired.
+
+    `evidence` is overwritten on each sighting rather than appended. The
+    proposal quotes "most recently ...", so only the newest wording is ever
+    read, and keeping every phrasing would grow a row per turn for no reader.
+    """
+
+    __tablename__ = "preference_signals"
+
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    field: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(String, primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    evidence: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PreferenceDeclineRow(Base):
+    """How often a user has refused a suggestion.
+
+    Separate from the counts because the two have different lifetimes: accepting
+    a setting clears its evidence, and forgetting the refusals at the same time
+    would let the next proposal arrive at full strength.
+    """
+
+    __tablename__ = "preference_declines"
+
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    field: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(String, primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+

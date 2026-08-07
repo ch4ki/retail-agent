@@ -183,7 +183,8 @@ def _repl(console, graph, deps, user, session_id) -> int:
             render_metrics(console, deps.traces.metrics(owner_id=user))
             continue
 
-        _learn(deps, user, question)
+        # Evidence about how this user likes answers is recorded by the router
+        # node, inside the turn, so every caller learns — not just this one.
         last_turn = (
             _answer(console, graph, deps, user, session_id, question) or last_turn
         )
@@ -256,18 +257,6 @@ def _offer_proposal(console, deps, user) -> None:
     )
     if proposal is not None:
         console.print(f"\n[dim]{proposal.question()}[/dim]")
-
-
-def _learn(deps, user, question) -> None:
-    """Accumulate evidence from how the question was phrased. Deterministic, so
-    the proposal can quote what the user actually typed."""
-    from retail_agent.store.learning import detect
-
-    try:
-        for signal in detect(question):
-            deps.signals.record(user_id=user, signal=signal)
-    except Exception as err:  # learning is never worth a failed turn
-        logging.getLogger(__name__).debug("signal not recorded: %s", err)
 
 
 def _definitions(console, deps, user, command) -> None:
