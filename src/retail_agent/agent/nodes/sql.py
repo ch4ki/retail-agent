@@ -8,7 +8,7 @@ from langchain_core.messages import HumanMessage
 
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.nodes.recall import personal, recalled
-from retail_agent.agent.nodes.schema_qa import render_schema
+from retail_agent.agent.nodes.schema_qa import render_schema_for_sql
 from retail_agent.agent.prompts import REPAIR_PROMPT, SQL_PROMPT
 from retail_agent.agent.state import AnalysisStep, SqlAttempt, TurnState
 from retail_agent.llm.messages import message_text
@@ -69,7 +69,7 @@ def draft_sql_node(state: TurnState, deps: AgentDeps) -> dict:
 def _prompt_for(state: TurnState, deps: AgentDeps, step: AnalysisStep) -> str:
     """Pick the repair prompt if the last attempt for this step failed, else the
     normal drafting prompt."""
-    schema = render_schema(deps)
+    schema = render_schema_for_sql(deps)
     attempts = state.get("sql_attempts", [])
     last = attempts[-1] if attempts else None
 

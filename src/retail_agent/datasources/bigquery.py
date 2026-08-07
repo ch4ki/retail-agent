@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from google.api_core import exceptions as gexc
 from google.cloud import bigquery
 
 from retail_agent.config import Settings
+from retail_agent.knowledge.column_values import (
+    build_discovery_query,
+    read_discovery_row,
+)
 from retail_agent.datasources.base import (
     ColumnSchema,
     DataSourceError,
@@ -68,6 +73,28 @@ class BigQuerySource:
 
     def describe_all(self) -> list[TableSchema]:
         return [self.describe(name) for name in self.list_tables()]
+
+    def column_values(
+        self, table: str, columns: Sequence[str]
+    ) -> dict[str, tuple[str, ...]]:
+        """The values each low-cardinality column actually holds.
+
+        Deliberately not routed through `execute`: that path is for the user's
+        guarded, dry-run, cost-capped queries, and an internal metadata scan
+        should not consume that budget or appear in the turn's SQL attempts.
+
+        The caller decides which columns are safe to ask about — a PII column
+        must never reach this method, because its values would land in a prompt.
+        """
+        sql = build_discovery_query(table, columns, dataset=self._settings.bq_dataset)
+        if not sql:
+            return {}
+
+        job = self._client.query(sql)
+        rows = list(job.result(timeout=self._settings.bq_timeout_seconds))
+        if not rows:
+            return {}
+        return read_discovery_row(dict(rows[0].items()), columns)
 
     # --- execution ---
 
