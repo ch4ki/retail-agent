@@ -105,3 +105,63 @@ def test_both_entry_points_use_the_same_wiring():
             f"build_deps so a new dependency cannot be added to one path only"
         )
         assert "build_deps" in source
+
+
+# --- the ReAct arm's entry point ---
+
+
+def test_the_react_studio_graph_builds():
+    """Same lesson as `test_the_studio_graph_builds`: Studio imports this at
+    load time, so a name that does not resolve fails `langgraph dev` and no
+    other test would notice.
+
+    Unlike the graph's, this needs a source carrying a schema: the ReAct arm
+    renders the schema into its system prompt when the agent is *built*, where
+    the graph's nodes read it per invocation. So `langgraph dev` describes the
+    tables once at load rather than on the first question.
+    """
+    from langchain_core.language_models.fake_chat_models import (
+        FakeMessagesListChatModel,
+    )
+
+    from retail_agent.datasources.base import ColumnSchema, TableSchema
+
+    class Bindable(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    class SchemaOnly:
+        def describe_all(self):
+            return [
+                TableSchema(
+                    name="order_items",
+                    columns=(ColumnSchema("sale_price", "FLOAT"),),
+                )
+            ]
+
+    from retail_agent.baseline.studio import build_react_studio_graph
+
+    assert build_react_studio_graph(llm=Bindable(responses=[]), source=SchemaOnly())
+
+
+def test_the_react_entry_point_shares_the_same_wiring():
+    """One `build_deps`, three callers now. A second construction site is what
+    broke Studio the first time."""
+    import inspect
+
+    from retail_agent.baseline import studio as react_studio
+
+    source = inspect.getsource(react_studio)
+    assert "AgentDeps(" not in source
+    assert "build_deps" in source
+
+
+def test_studio_serves_both_arms():
+    """The point of registering it: seeing the two graphs side by side is the
+    clearest statement of what the comparison is about."""
+    import json
+    from pathlib import Path
+
+    config = json.loads(Path("langgraph.json").read_text())
+
+    assert set(config["graphs"]) == {"retail_agent", "react_baseline"}

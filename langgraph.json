@@ -1,7 +1,8 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "retail_agent": "./src/retail_agent/agent/studio.py:graph"
+    "retail_agent": "./src/retail_agent/agent/studio.py:graph",
+    "react_baseline": "./src/retail_agent/baseline/studio.py:graph"
   },
   "env": ".env"
 }
