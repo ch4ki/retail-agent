@@ -10,7 +10,6 @@ from retail_agent.agent.nodes.sql import current_step
 from retail_agent.agent.state import AnalysisStep, MaskedFrame, SqlAttempt, TurnState
 from retail_agent.datasources.base import DataSourceError
 from retail_agent.safety.pii import mask_dataframe
-from retail_agent.safety.sql_guard import applied_limit
 
 log = logging.getLogger(__name__)
 
@@ -35,17 +34,16 @@ def execute_node(state: TurnState, deps: AgentDeps) -> dict:
     masked, report = mask_dataframe(result.rows, deps.policy, salt=deps.settings.pii_salt)
 
     frames = dict(state.get("frames", {}))
-    # A result that exactly fills its cap almost certainly had more behind it.
-    # There is no way to tell from the rows themselves, and the cost of the
-    # false positive — saying "at least 500" when there were exactly 500 — is
-    # nothing next to reporting a truncated sample as a total.
-    cap = applied_limit(step.sql)
+    # Exact, not inferred: `row_count` is the true size of the result and the
+    # frame holds however many rows were fetched. Previously this compared the
+    # row count to the SQL's LIMIT and could only guess, which is why the
+    # warning had to hedge with "at least".
     frames[step.id] = MaskedFrame.from_dataframe(
         masked,
         row_count=result.row_count,
         redactions=report.redactions,
         dropped_columns=report.dropped_columns,
-        truncated=cap is not None and result.row_count >= cap,
+        truncated=result.row_count > len(masked),
     )
 
     return {

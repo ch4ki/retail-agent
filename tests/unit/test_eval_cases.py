@@ -39,7 +39,7 @@ def test_every_reference_query_passes_the_same_guard_the_agent_faces(case):
         case.reference_sql,
         allowed_tables=settings.allowed_tables,
         restricted_columns=PiiPolicy.default().restricted_columns(),
-        default_limit=settings.default_row_limit,
+        default_limit=settings.max_row_limit,
         max_limit=settings.max_row_limit,
         qualify_with=settings.bq_dataset,
     )

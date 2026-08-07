@@ -1,13 +1,13 @@
 """A truncated result must never be reported as a complete one.
 
-The guard caps every query so a result set stays printable and affordable. That
-cap is invisible in the result: 500 rows returned looks identical whether there
-were 500 or 5,823. Measured on the real warehouse, the query the agent wrote for
-"how many loyal customers do we have?" matched 5,823 rows and the agent saw 500
-— then narrated a number derived from what it could see.
+Results are capped when they are read, not by a LIMIT in the SQL, so
+`row_count` is the true size of the result even when only some rows were
+fetched. That makes "was this truncated" an exact comparison rather than a guess
+from the query text — and it means the count is available and correct even when
+the agent returned rows instead of an aggregate.
 
-So the cap has to announce itself. Nothing here stops the truncation; it makes
-it impossible to mistake for the whole answer.
+Nothing here stops the truncation. It makes it impossible to mistake a sample
+for the whole answer.
 """
 
 from __future__ import annotations
@@ -36,22 +36,34 @@ def rows(n: int) -> pd.DataFrame:
     return pd.DataFrame({"user_id": list(range(n))})
 
 
-def test_a_result_that_fills_the_limit_is_marked_truncated(make_deps):
-    sql = "SELECT user_id FROM orders LIMIT 500"
-    source = FakeSource(frames={"orders": rows(500)})
+def test_more_rows_matched_than_were_fetched_is_marked_truncated(make_deps):
+    """Exact: the warehouse reports 5,823 matched while 500 were fetched."""
+    source = FakeSource(frames={"orders": rows(500)}, total_rows=5823)
     deps = make_deps([], src=source)
 
-    result = execute_node(state_for(sql), deps)
+    result = execute_node(state_for("SELECT user_id FROM orders"), deps)
 
-    assert result["frames"]["step_1"].truncated
+    frame = result["frames"]["step_1"]
+    assert frame.truncated
+    assert frame.row_count == 5823, "the true total, not the number fetched"
 
 
-def test_a_result_below_the_limit_is_not_marked(make_deps):
+def test_a_complete_result_is_not_marked(make_deps):
     """The common case. Marking everything would make the warning noise."""
-    sql = "SELECT user_id FROM orders LIMIT 500"
     deps = make_deps([], src=FakeSource(frames={"orders": rows(12)}))
 
-    result = execute_node(state_for(sql), deps)
+    result = execute_node(state_for("SELECT user_id FROM orders"), deps)
+
+    assert not result["frames"]["step_1"].truncated
+
+
+def test_a_result_exactly_the_size_of_the_fetch_is_not_marked(make_deps):
+    """The old rule guessed from the SQL's LIMIT and had to call this truncated
+    just in case. The warehouse now says 500 matched and 500 were fetched, so
+    the hedge is gone."""
+    deps = make_deps([], src=FakeSource(frames={"orders": rows(500)}, total_rows=500))
+
+    result = execute_node(state_for("SELECT user_id FROM orders"), deps)
 
     assert not result["frames"]["step_1"].truncated
 
@@ -59,10 +71,9 @@ def test_a_result_below_the_limit_is_not_marked(make_deps):
 def test_an_aggregate_with_no_limit_is_never_marked(make_deps):
     """One row from `SELECT COUNT(*)` is the whole answer, and warning about it
     would teach the reader to ignore the warning."""
-    sql = "SELECT COUNT(*) AS n FROM orders"
     deps = make_deps([], src=FakeSource(frames={"orders": pd.DataFrame({"n": [5823]})}))
 
-    result = execute_node(state_for(sql), deps)
+    result = execute_node(state_for("SELECT COUNT(*) AS n FROM orders"), deps)
 
     assert not result["frames"]["step_1"].truncated
 
@@ -76,7 +87,7 @@ def test_the_synthesizer_is_told_the_rows_are_partial(make_deps):
         "step_1": MaskedFrame(
             columns=("user_id",),
             rows=((1,), (2,)),
-            row_count=500,
+            row_count=5823,
             redactions=0,
             truncated=True,
         )
@@ -85,8 +96,10 @@ def test_the_synthesizer_is_told_the_rows_are_partial(make_deps):
     synthesize_node(state, deps)
 
     prompt = "\n".join(deps.llm.prompts).lower()
-    assert "truncated" in prompt or "partial" in prompt
-    assert "500" in prompt
+    assert "sample" in prompt or "partial" in prompt
+    # The exact total, which is the number the question actually wants. The old
+    # message could only say "first 500" — the cap, not the answer.
+    assert "5823" in prompt
 
 
 def test_a_complete_result_carries_no_warning(make_deps):
@@ -98,7 +111,7 @@ def test_a_complete_result_carries_no_warning(make_deps):
 
     synthesize_node(state, deps)
 
-    assert "truncated" not in "\n".join(deps.llm.prompts).lower()
+    assert "sample" not in "\n".join(deps.llm.prompts).lower()
 
 
 def test_the_sql_writer_is_told_to_aggregate_in_the_query(make_deps):
@@ -110,5 +123,4 @@ def test_the_sql_writer_is_told_to_aggregate_in_the_query(make_deps):
 
     draft_sql_node(state_for(sql=None, question="how many loyal customers?"), deps)
 
-    prompt = "\n".join(deps.llm.prompts).lower()
-    assert "count(" in prompt and "truncat" in prompt
+    assert "count(" in "\n".join(deps.llm.prompts).lower()

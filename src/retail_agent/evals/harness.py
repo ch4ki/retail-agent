@@ -33,6 +33,7 @@ def answer_from_state(state: dict) -> AgentAnswer:
         intent=str(state.get("intent") or ""),
         trios=tuple(state.get("trio_ids") or ()),
         truncated=bool(getattr(frame, "truncated", False)) if frame else False,
+        row_count=int(getattr(frame, "row_count", 0)) if frame else 0,
     )
 
 

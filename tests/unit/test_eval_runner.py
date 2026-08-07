@@ -346,24 +346,25 @@ def test_a_ranked_case_ignores_the_answer_column():
     assert result.outcome is Outcome.PASS
 
 
-def test_a_truncated_result_cannot_supply_a_scalar_answer():
-    """The agent declined to derive a total from a capped result — correctly —
-    so there is no number to be wrong about. Scoring the first row as its answer
-    reports "expected 5823, got 1" and reads as a confidently wrong agent, which
-    is the opposite of what happened."""
+def test_a_sample_whose_count_does_not_answer_the_question_is_an_error():
+    """A capped result where neither the first row nor the row count is the
+    answer — "what is the average age" returning 500 ages. Scoring the first row
+    would report "expected 5746, got 1" and read as a confidently wrong agent,
+    which is the opposite of what happened."""
     result = run_case(
         CASE,
         ask=lambda _q: AgentAnswer(
-            text="The data is truncated; a counting query is required.",
+            text="The data is a sample; a counting query is required.",
             rows=[[1]] * 500,
             columns=("n",),
             truncated=True,
+            row_count=91_000,
         ),
         execute=lambda _sql: [[5746]],
     )
 
     assert result.outcome is Outcome.ERROR
-    assert "truncat" in result.detail.lower()
+    assert "sample" in result.detail.lower()
 
 
 def test_a_truncated_result_still_scores_a_ranked_case():
@@ -376,6 +377,55 @@ def test_a_truncated_result_still_scores_a_ranked_case():
             text="", rows=[[7], [4]], columns=("id",), truncated=True
         ),
         execute=lambda _sql: [[7], [4]],
+    )
+
+    assert result.outcome is Outcome.PASS
+
+
+def test_a_counting_question_is_answered_by_the_row_count():
+    """Asked how many loyal customers, the agent returned one row per customer
+    rather than a COUNT. The number of rows that matched IS the answer, and it
+    is exact — so the eval should score it rather than report "no total".
+
+    Not prose-scoring: the reference number is compared against a count the
+    warehouse reported, and a query whose row count happens to be wrong still
+    fails."""
+    result = run_case(
+        CASE,
+        ask=lambda _q: AgentAnswer(
+            text="5,823 customers are loyal.",
+            rows=[[1]] * 100,
+            columns=("user_id",),
+            truncated=True,
+            row_count=5746,
+        ),
+        execute=lambda _sql: [[5746]],
+    )
+
+    assert result.outcome is Outcome.PASS
+
+
+def test_a_wrong_row_count_does_not_pass():
+    result = run_case(
+        CASE,
+        ask=lambda _q: AgentAnswer(
+            text="", rows=[[1]] * 100, columns=("user_id",), truncated=True, row_count=999
+        ),
+        execute=lambda _sql: [[5746]],
+    )
+
+    assert result.outcome is Outcome.ERROR
+
+
+def test_an_untruncated_answer_still_scores_its_cell_not_its_row_count():
+    """`SELECT COUNT(*)` returns one row holding 5746. Scoring the row count
+    there would compare 1 against 5746 and fail every aggregate."""
+    result = run_case(
+        CASE,
+        ask=lambda _q: AgentAnswer(
+            text="", rows=[[5746]], columns=("n",), row_count=1
+        ),
+        execute=lambda _sql: [[5746]],
     )
 
     assert result.outcome is Outcome.PASS

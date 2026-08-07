@@ -180,15 +180,14 @@ def test_a_limit_the_question_asked_for_is_kept(make_deps):
     assert "LIMIT 10" in prompt_sent_to(deps)
 
 
-def test_a_truncated_earlier_result_is_described_as_partial(make_deps):
-    """`step_1 returned 500 rows` is false when 5,823 matched. A later step
-    told that count would size its own work against a number that is really a
-    cap."""
+def test_a_sampled_earlier_result_reports_its_true_size(make_deps):
+    """The count is exact even when only some rows were fetched, so a later
+    step sizes its work against the real number rather than against a cap."""
     deps = make_deps(["SELECT 1 AS n"])
     frame = MaskedFrame(
         columns=("user_id",),
         rows=((1,), (2,)),
-        row_count=500,
+        row_count=5823,
         redactions=0,
         truncated=True,
     )
@@ -197,4 +196,5 @@ def test_a_truncated_earlier_result_is_described_as_partial(make_deps):
     draft_sql_node(state, deps)
 
     prompt = prompt_sent_to(deps)
-    assert "at least 500" in prompt or "truncated" in prompt.lower()
+    assert "5823 rows" in prompt
+    assert "only the first 2 shown" in prompt

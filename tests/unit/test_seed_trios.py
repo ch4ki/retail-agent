@@ -71,7 +71,7 @@ def test_the_sql_in_each_trio_passes_the_safety_guard():
             trio.sql,
             allowed_tables=settings.allowed_tables,
             restricted_columns=policy.restricted_columns(),
-            default_limit=settings.default_row_limit,
+            default_limit=settings.max_row_limit,
             max_limit=settings.max_row_limit,
         )
         assert verdict.ok, f"{trio.id}: {verdict.violations}"

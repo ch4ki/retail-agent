@@ -68,8 +68,16 @@ class Settings(BaseSettings):
     )
 
     # --- Query shaping ---
-    default_row_limit: int = 500
-    max_row_limit: int = 5_000
+    # How many rows are fetched and shown. Applied when reading the result, not
+    # as a LIMIT in the SQL: a LIMIT truncates server-side, so the true size of
+    # the result is lost and an aggregate meant to be counted comes back capped.
+    # BigQuery bills on bytes scanned and a LIMIT saves none of them — measured
+    # at 0% on the query that exposed this — so it was never buying cost.
+    display_row_limit: int = 500
+    # The SQL-level bound the guard still injects: a safety ceiling against an
+    # unbounded result, not a display cap. High enough that any realistic
+    # analytical result is complete, so `total_rows` is the real count.
+    max_row_limit: int = 100_000
 
     # --- Storage ---
     database_url: str = "postgresql://retail:retail@localhost:5433/retail_agent"

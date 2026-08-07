@@ -294,28 +294,6 @@ def _parse(sql: str) -> exp.Expression | None:
         return None
 
 
-def applied_limit(sql: str) -> int | None:
-    """The row cap on the query as it will run, or None.
-
-    `execute` needs this to tell a result of 500 rows from a result of 500 rows
-    that had more behind it. Those were indistinguishable, and the consequence
-    was not cosmetic: asked how many customers were loyal, the agent wrote a
-    query returning one row per customer, got the first 500 of 5,823, and
-    narrated the truncated sample as the answer.
-
-    Only the outermost LIMIT counts — an inner one bounds a subquery, not the
-    rows the caller receives.
-    """
-    tree = _parse(sql)
-    limit = tree.args.get("limit") if tree is not None else None
-    if limit is None:
-        return None
-    try:
-        return int(limit.expression.this)
-    except (AttributeError, TypeError, ValueError):
-        return None
-
-
 def without_limit(sql: str) -> str:
     """The same query with its outermost LIMIT removed.
 

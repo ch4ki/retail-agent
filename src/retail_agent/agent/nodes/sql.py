@@ -54,7 +54,10 @@ def draft_sql_node(state: TurnState, deps: AgentDeps) -> dict:
         sql,
         allowed_tables=deps.settings.allowed_tables,
         restricted_columns=deps.policy.restricted_columns(),
-        default_limit=deps.settings.default_row_limit,
+        # Both are the safety ceiling. The SQL-level bound exists only to stop
+        # an unbounded result; how many rows are shown is decided when the
+        # result is read, so that `total_rows` reports the true size.
+        default_limit=deps.settings.max_row_limit,
         max_limit=deps.settings.max_row_limit,
         qualify_with=deps.settings.bq_dataset,
     )
@@ -153,10 +156,10 @@ def _describe(step_id: str, frame: MaskedFrame, query: str | None) -> str:
         )
         return f"{step_id} returned exactly one row: {values}"
 
-    # "returned 500 rows" is false when 5,823 matched and the guard capped it. A
-    # later step sizing its work against that number is sizing it against a cap.
+    # `row_count` is the true size of the result even when only some rows were
+    # fetched, so this is exact rather than the hedge it used to be.
     how_many = (
-        f"at least {frame.row_count} rows (truncated)"
+        f"{frame.row_count} rows (only the first {len(frame.rows)} shown)"
         if frame.truncated
         else f"{frame.row_count} rows"
     )

@@ -33,8 +33,10 @@ class AgentAnswer:
     sql: str = ""
     intent: str = ""
     trios: tuple[str, ...] = field(default_factory=tuple)
-    # The result hit the guard's row cap, so these rows are a sample.
+    # The result hit the display cap, so these rows are a sample.
     truncated: bool = False
+    # How many rows matched in total — exact, even when only some were fetched.
+    row_count: int = 0
 
 
 Ask = Callable[[str], AgentAnswer]
@@ -90,14 +92,26 @@ def run_case(case: EvalCase, *, ask: Ask, execute: Execute) -> CaseResult:
     if actual is None:
         result = Outcome.ERROR, "the agent returned no rows to score"
     elif answer.truncated and not case.ranked:
-        # A capped result cannot supply a total, and the agent says so rather
-        # than deriving one. Scoring its first row as the answer would report
-        # "expected 5823, got 1" — a confidently wrong agent, which is the
-        # opposite of what happened. Ranked cases are exempt: "top 10" caps at
-        # ten by design and the cap is the answer.
+        # The rows are a sample, so the first one is not the answer — scoring it
+        # would report "expected 5823, got 1", reading as a confidently wrong
+        # agent when the truth is the opposite.
+        #
+        # But the count of matching rows is exact, and for a counting question
+        # it IS the answer: asked how many customers are loyal, the agent
+        # returned one row per loyal customer. Comparing that count to the
+        # reference is not prose-scoring — it is a number the warehouse
+        # reported, and a query whose row count is wrong still fails.
+        counted = compare(
+            actual=answer.row_count, expected=expected, tolerance=case.tolerance
+        )
         result = (
-            Outcome.ERROR,
-            f"result truncated at {len(answer.rows)} rows; no total available",
+            (Outcome.PASS, "")
+            if counted.outcome is Outcome.PASS
+            else (
+                Outcome.ERROR,
+                f"rows are a sample ({len(answer.rows)} of {answer.row_count}); "
+                "no total available",
+            )
         )
     else:
         scored = compare(actual=actual, expected=expected, tolerance=case.tolerance)

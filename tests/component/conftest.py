@@ -97,6 +97,9 @@ class FakeSource:
     # SQL containing one of these runs fine and returns nothing — the shape of
     # a literal that does not match, which is not an error anywhere.
     empty_for: set[str] = field(default_factory=set)
+    # The true size of the result when the read was capped; None means the
+    # frame is the whole result.
+    total_rows: int | None = None
     # The same non-match through an aggregate: SUM() over no rows returns one
     # row holding NULL. That is what BigQuery actually returns, and it is the
     # shape the live failure took.
@@ -139,7 +142,13 @@ class FakeSource:
             frame = pd.DataFrame({"total_revenue": [None]})
             return QueryResult(rows=frame, bytes_billed=1_000, row_count=1)
         frame = next(iter(self.frames.values()), pd.DataFrame())
-        return QueryResult(rows=frame, bytes_billed=1_000, row_count=len(frame))
+        # `total_rows` lets a test say more rows matched than were fetched,
+        # which is what the real warehouse reports when the read is capped.
+        return QueryResult(
+            rows=frame,
+            bytes_billed=1_000,
+            row_count=self.total_rows if self.total_rows is not None else len(frame),
+        )
 
 
 @pytest.fixture

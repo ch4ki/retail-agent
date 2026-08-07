@@ -122,7 +122,17 @@ class BigQuerySource:
         job = self._run(sql, config)
 
         try:
-            completed = job.result(timeout=self._settings.bq_timeout_seconds)
+            # Capped here rather than with a LIMIT in the SQL. A LIMIT truncates
+            # server-side, so the size of the result is lost — 500 rows returned
+            # looks the same whether 500 or 5,823 matched, and a query whose
+            # rows were meant to be counted comes back silently wrong. Reading
+            # with `max_results` bounds the transfer while `total_rows` still
+            # reports the truth. It costs nothing: BigQuery bills bytes scanned,
+            # and a LIMIT was measured to save 0% of them.
+            completed = job.result(
+                timeout=self._settings.bq_timeout_seconds,
+                max_results=self._settings.display_row_limit,
+            )
             frame = completed.to_dataframe()
         except gexc.GoogleAPICallError as err:
             raise self._translate(err) from err
@@ -130,7 +140,8 @@ class BigQuerySource:
         return QueryResult(
             rows=frame,
             bytes_billed=int(getattr(job, "total_bytes_billed", 0) or 0),
-            row_count=len(frame),
+            # The real size of the result, not the number of rows fetched.
+            row_count=int(completed.total_rows or len(frame)),
         )
 
     # --- internals ---

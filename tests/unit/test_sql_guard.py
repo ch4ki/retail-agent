@@ -421,36 +421,3 @@ def test_date_sub_with_a_month_is_fine():
         "SELECT id FROM users WHERE created_at > DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)"
     ).ok
 
-
-# --- knowing what the limit was, so truncation can be detected ---
-
-
-def test_the_applied_limit_can_be_read_back():
-    """`execute` needs it to tell "500 rows" from "500 rows and there were
-    more". Without that the two are indistinguishable, and the agent counted a
-    truncated sample and reported it as the total."""
-    from retail_agent.safety.sql_guard import applied_limit
-
-    assert applied_limit("SELECT id FROM users LIMIT 500") == 500
-
-
-def test_a_query_with_no_limit_reports_none():
-    from retail_agent.safety.sql_guard import applied_limit
-
-    assert applied_limit("SELECT COUNT(*) FROM users") is None
-
-
-def test_only_the_outer_limit_counts():
-    """An inner LIMIT bounds a subquery, not the result the caller receives."""
-    from retail_agent.safety.sql_guard import applied_limit
-
-    sql = "SELECT id FROM (SELECT id FROM users LIMIT 10) LIMIT 500"
-
-    assert applied_limit(sql) == 500
-
-
-def test_unparseable_sql_reports_none_rather_than_raising():
-    """Truncation detection must never be the thing that breaks a turn."""
-    from retail_agent.safety.sql_guard import applied_limit
-
-    assert applied_limit("this is not sql (((") is None

@@ -9,7 +9,7 @@ def test_defaults_do_not_require_any_env(monkeypatch):
 
     assert settings.llm_provider == "gemini"
     assert settings.bq_dataset == "bigquery-public-data.thelook_ecommerce"
-    assert settings.default_row_limit == 500
+    assert settings.display_row_limit == 500
     assert "users" in settings.allowed_tables
 
 
@@ -22,12 +22,12 @@ def test_repair_budget_allows_two_retries():
 
 def test_env_overrides_defaults(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "openai")
-    monkeypatch.setenv("DEFAULT_ROW_LIMIT", "25")
+    monkeypatch.setenv("DISPLAY_ROW_LIMIT", "25")
 
     settings = Settings(_env_file=None)
 
     assert settings.llm_provider == "openai"
-    assert settings.default_row_limit == 25
+    assert settings.display_row_limit == 25
 
 
 def test_rejects_unknown_provider(monkeypatch):

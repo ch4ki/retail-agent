@@ -20,15 +20,19 @@ class FakeTable:
 
 
 class FakeJob:
-    def __init__(self, df=None, total_bytes_processed=1000, error=None):
+    def __init__(self, df=None, total_bytes_processed=1000, error=None, total_rows=None):
         self._df = df if df is not None else pd.DataFrame({"id": [1]})
         self.total_bytes_processed = total_bytes_processed
         self.total_bytes_billed = total_bytes_processed
         self._error = error
+        # What the warehouse says matched, which can exceed what is fetched.
+        self.total_rows = total_rows if total_rows is not None else len(self._df)
+        self.max_results = None
 
-    def result(self, timeout=None):
+    def result(self, timeout=None, max_results=None):
         if self._error:
             raise self._error
+        self.max_results = max_results
         return self
 
     def to_dataframe(self):
@@ -147,3 +151,31 @@ def test_list_tables_returns_allowed_tables(settings):
 def test_describe_all_covers_every_allowed_table(settings):
     source = BigQuerySource(settings, client=FakeClient())
     assert len(source.describe_all()) == len(settings.allowed_tables)
+
+
+# --- reading a capped result without losing its true size ---
+
+
+def test_the_fetch_is_capped_at_the_display_limit():
+    """Not a LIMIT in the SQL. A LIMIT truncates server-side and the true size
+    of the result is lost with it — and it saves no money, since BigQuery bills
+    bytes scanned (measured at 0% on the query that exposed this)."""
+    job = FakeJob(df=pd.DataFrame({"id": list(range(500))}), total_rows=5823)
+    source = BigQuerySource(Settings(_env_file=None, google_cloud_project="p"), client=FakeClient(job))
+
+    source.execute("SELECT id FROM users")
+
+    assert job.max_results == 500
+
+
+def test_the_row_count_is_the_true_total_not_the_number_fetched():
+    """The whole point of capping at read time: "how many loyal customers" has
+    a correct answer available even when the agent returned rows rather than a
+    COUNT."""
+    job = FakeJob(df=pd.DataFrame({"id": list(range(500))}), total_rows=5823)
+    source = BigQuerySource(Settings(_env_file=None, google_cloud_project="p"), client=FakeClient(job))
+
+    result = source.execute("SELECT id FROM users")
+
+    assert result.row_count == 5823
+    assert len(result.rows) == 500

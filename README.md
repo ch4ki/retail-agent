@@ -150,7 +150,13 @@ every call.
 - **Egress scan** — the final answer is swept for anything resembling contact
   data. This is the second line of defence, not the first.
 - **Cost ceiling** — every query is dry-run first and capped by
-  `BQ_MAX_BYTES_BILLED` (2 GB by default).
+  `BQ_MAX_BYTES_BILLED` (2 GB by default). Note that a SQL `LIMIT` is *not* a
+  cost control: BigQuery bills bytes scanned, and adding `LIMIT 500` to a real
+  query here was measured to save 0%. The guard still injects a `LIMIT` as a
+  ceiling against an unbounded result, but how many rows are shown is decided
+  when the result is read — so `row_count` is the true size of the result rather
+  than the cap, and a question like "how many customers are loyal" has a correct
+  answer even when the agent returns rows instead of a `COUNT`.
 - **Confirmed deletes** — removing saved reports shows the exact list first and
   requires typing the token it asks for (`y` for one, `DELETE <n>` for several).
   Deletes are soft, audited and reversible with `/undo`. Ownership is a SQL
@@ -211,8 +217,11 @@ uv run pytest -m vector    # 14 tests, needs DENSE_RETRIEVAL deps; 9 need an Ope
 The safety modules are pure functions and are tested first, against an
 adversarial corpus. Graph behaviour is tested with a scripted fake LLM and a
 fake warehouse, asserting *paths* rather than output text — for example that an
-exhausted repair budget degrades instead of looping, and that a query selecting
-PII never reaches the warehouse at all.
+exhausted repair budget degrades instead of looping, and that a query which
+would disclose PII is rejected before execution. Selecting a PII column *bare*
+is deliberately allowed — an unaliased column keeps its name, which is what lets
+the masking policy find it on the way back. What the guard rejects is anything
+that would defeat that: an alias, or the column buried inside an expression.
 
 ## Troubleshooting
 
