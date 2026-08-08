@@ -213,3 +213,84 @@ def test_every_provider_open_still_attempts_rather_than_giving_up():
     resilient = build(only, breaker=CircuitBreaker(threshold=0, now=lambda: 0))
 
     assert resilient.invoke("hi") == "gemini:ok"
+
+
+# --- tool binding, which is how `create_agent` compiles ---------------------
+
+
+class ToolBindable(FlakyModel):
+    """A provider that records what it was bound to.
+
+    `FlakyModel` deliberately has no `bind_tools`, because most of this file is
+    about the calling behaviour. This subclass exists for the compile path.
+    """
+
+    def __init__(self, name, errors=(), answer="ok"):
+        super().__init__(name, errors=errors, answer=answer)
+        self.bound = None
+
+    def bind_tools(self, tools, **kwargs):
+        bound = ToolBindable(f"{self.name}+tools", errors=self.errors, answer=self.answer)
+        bound.bound = list(tools)
+        self.bound = list(tools)
+        return bound
+
+
+def test_binding_tools_keeps_the_whole_chain():
+    """The bug this exists for: `create_agent` compiles by calling `bind_tools`,
+    and without it the agent raises `AttributeError` at the first model call.
+
+    Every offline test passed while that was true, because the doubles are bound
+    directly rather than through the chain. It took a live run to find.
+    """
+    primary, fallback = ToolBindable("a"), ToolBindable("b")
+    chain = ResilientChatModel([("a", primary), ("b", fallback)], sleep=lambda _: None)
+
+    bound = chain.bind_tools([print])
+
+    assert isinstance(bound, ResilientChatModel)
+    assert primary.bound == [print]
+    assert fallback.bound == [print], (
+        "a fallback that lost its tools is worse than the outage it recovers from"
+    )
+
+
+def test_a_bound_chain_still_falls_back():
+    primary = ToolBindable("a", errors=[RuntimeError("503 unavailable")] * 3)
+    fallback = ToolBindable("b")
+    chain = ResilientChatModel([("a", primary), ("b", fallback)], sleep=lambda _: None)
+
+    assert chain.bind_tools([print]).invoke("hi") == "b+tools:ok"
+
+
+def test_the_breaker_survives_binding():
+    """A fresh breaker per binding would forget an outage on every turn, and the
+    agent rebuilds its model binding once per turn."""
+    breaker = CircuitBreaker(threshold=1)
+    breaker.record_failure("a")
+    chain = ResilientChatModel(
+        [("a", ToolBindable("a")), ("b", ToolBindable("b"))],
+        breaker=breaker,
+        sleep=lambda _: None,
+    )
+
+    assert chain.bind_tools([print]).invoke("hi") == "b+tools:ok", "skipped the open provider"
+
+
+def test_a_descriptive_attribute_comes_from_the_primary():
+    """Langchain reads `profile` and `_llm_type` off a model. Those describe a
+    provider, not a chain, so the primary is the right answer."""
+    primary = ToolBindable("a")
+    primary.profile = {"max_tokens": 1}
+    chain = ResilientChatModel([("a", primary), ("b", ToolBindable("b"))])
+
+    assert chain.profile == {"max_tokens": 1}
+
+
+def test_a_private_attribute_is_not_invented():
+    """`__getattr__` delegating everything would make `hasattr(chain, '__deepcopy__')`
+    true and break copying in ways that are very hard to trace back to here."""
+    chain = ResilientChatModel([("a", ToolBindable("a"))])
+
+    with pytest.raises(AttributeError):
+        chain._not_a_real_attribute

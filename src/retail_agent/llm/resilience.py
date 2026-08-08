@@ -135,8 +135,51 @@ class ResilientChatModel:
         return self._call(lambda model: model.invoke(messages, **kwargs))
 
     def with_structured_output(self, schema, **kwargs):
-        """Routing and planning go through here, so it needs the same chain."""
+        """Anything asking for a typed reply goes through here."""
         return _ResilientStructured(self, schema, kwargs)
+
+    def bind_tools(self, tools, **kwargs):
+        """A new chain, with every provider bound to the same tools.
+
+        `create_agent` compiles by calling this, so without it the whole
+        resilience story is an `AttributeError` at the first model call — which
+        is exactly how it was found: every offline test passes, because the
+        doubles are bound directly rather than through the chain.
+
+        Binding provider by provider rather than wrapping the bound primary is
+        the point. A chain whose fallbacks lost their tools would fail over to a
+        model that cannot call anything, which is a worse outcome than the
+        outage it is recovering from.
+
+        The breaker is shared with the unbound chain deliberately: a provider
+        that is down is down, and a fresh breaker per binding would forget that
+        on every turn.
+        """
+        return ResilientChatModel(
+            [(name, model.bind_tools(tools, **kwargs)) for name, model in self._providers],
+            attempts=self._attempts,
+            breaker=self._breaker,
+            sleep=self._sleep,
+        )
+
+    def __getattr__(self, name: str):
+        """Anything else, answered by the primary provider.
+
+        Langchain reads descriptive attributes off a model — `profile`,
+        `_llm_type`, `get_name` — and those are properties of a provider rather
+        than of the chain, so the primary is the right answer.
+
+        It logs, because the dangerous case is indistinguishable from the
+        harmless one here: if a future langchain calls `stream` or `ainvoke`,
+        this hands back the primary's bound method and the call silently skips
+        the fallback chain. A warning naming the attribute is what turns that
+        into something findable rather than a resilience claim that quietly
+        stopped being true.
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+        log.debug("delegating %r to the primary provider", name)
+        return getattr(self.primary, name)
 
     def _call(self, run):
         last_error: Exception | None = None

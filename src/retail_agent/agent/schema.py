@@ -33,9 +33,11 @@ def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
         be asked rather than about the numbers themselves.
         """
         with capture.step("describe_schema") as step:
-            rendered = render_schema(deps)
-            step.detail = f"{rendered.count('CREATE TABLE')} table(s)"
-            return SCHEMA_PROMPT.format(schema=rendered)
+            schemas = deps.source.describe_all()
+            step.detail = f"{len(schemas)} table(s)"
+            return SCHEMA_PROMPT.format(
+                schema="\n\n".join(schema.to_ddl() for schema in schemas)
+            )
 
     return [describe_schema]
 

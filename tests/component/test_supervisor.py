@@ -135,3 +135,23 @@ def test_the_final_answer_is_swept_for_leaked_contact_details(make_deps):
     assert "dana@example.com" not in answer
     assert "[redacted:email]" in answer
     assert capture.status == "degraded"
+
+
+def test_describe_schema_costs_no_query_and_says_what_it_found(make_deps, source):
+    """The trace line is the only place a reader learns this path is free.
+
+    It read "0 table(s)" against a live warehouse holding six, because the count
+    grepped for a string the DDL renderer does not emit.
+    """
+    from retail_agent.agent.capture import TurnCapture
+    from retail_agent.agent.schema import build_schema_tool
+
+    deps = make_deps(src=source)
+    capture = TurnCapture()
+    describe = build_schema_tool(deps, capture)[0]
+
+    rendered = describe()
+
+    assert source.executed == [], "answering what data exists must cost nothing"
+    assert "order_items" in rendered
+    assert capture.events[0][2] == "4 table(s)"
