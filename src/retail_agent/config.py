@@ -38,7 +38,17 @@ class Settings(BaseSettings):
     # Explicit output cap. Without one, providers reserve credit for the model's
     # full output ceiling (OpenRouter 402s on this), and per-turn cost is
     # unbounded. Every prompt here wants a query or a few paragraphs.
-    llm_max_tokens: int = 2048
+    #
+    # 2048 was that size and no more, which breaks a reasoning model: it spends
+    # the output budget thinking, and structured output is emitted last.
+    # Measured on OpenRouter — the planner spent 2,239 tokens reasoning and hit
+    # the ceiling before writing any JSON, so `with_structured_output` raised
+    # and the node took its degraded path. About 12% of turns across a 47-case
+    # run, silently, because the router and the planner both catch it.
+    #
+    # 8192 clears the thinking with room for the answer and still bounds the
+    # turn. This is a cost control, not a length preference.
+    llm_max_tokens: int = 8192
     google_api_key: str | None = None
     openai_api_key: str | None = None
     openrouter_api_key: str | None = None
