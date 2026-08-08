@@ -7,14 +7,13 @@ import re
 from langchain_core.messages import HumanMessage
 
 from retail_agent.agent.deps import AgentDeps
-from retail_agent.agent.nodes.recall import personal, recalled
+from retail_agent.agent.nodes.recall import definitions_for
 from retail_agent.agent.nodes.schema_qa import render_schema_for_sql
 from retail_agent.agent.prompts import REPAIR_PROMPT, SQL_PROMPT
 from retail_agent.agent.state import AnalysisStep, MaskedFrame, SqlAttempt, TurnState
-from retail_agent.knowledge.trios import definitions_block, sql_assumption_note
+from retail_agent.knowledge.trios import sql_assumption_note
 from retail_agent.llm.messages import message_text
 from retail_agent.safety.sql_guard import check_sql, without_limit
-from retail_agent.store.definitions import personal_definitions_block
 
 FENCE = re.compile(r"^```(?:sql)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 
@@ -175,14 +174,7 @@ def _strip_fences(text: str) -> str:
     return FENCE.sub("", text).strip()
 
 
-def _all_definitions(state: TurnState, deps: AgentDeps) -> str:
-    """Agreed definitions first, then the user's own.
-
-    Order matters: if both cover a term the corpus wins, and the model reads
-    the reviewed decision before the personal one.
-    """
-    blocks = [
-        definitions_block(recalled(state, deps)),
-        personal_definitions_block(personal(state, deps)),
-    ]
-    return "\n\n".join(b for b in blocks if b)
+# One definition of "the definitions", in `recall`, which is the node that
+# resolves them. It lived here until the planner turned out to need it too, and
+# a second copy is how the two would drift into disagreeing about a term.
+_all_definitions = definitions_for

@@ -127,3 +127,29 @@ def personal(state: TurnState, deps: AgentDeps) -> dict[str, str]:
     return remembered(
         deps.definitions, state.get("user_id", ""), state.get("personal_terms", [])
     )
+
+
+def definitions_for(state: TurnState, deps: AgentDeps) -> str:
+    """Everything settled about this turn's terms: agreed first, then personal.
+
+    Lives here rather than in `sql` because `recall` is what resolves it and
+    more than one node downstream needs it. It used to be private to
+    `draft_sql`, which is why the planner never received it — and the planner
+    decides the shape of the answer.
+
+    Measured live: asked for "engaged customers" the planner emitted a step
+    reading "count of distinct users who have placed at least one order", and
+    `draft_sql` could not recover, because the word the definition explains was
+    already gone from the question it was handed.
+
+    Order matters: where both cover a term the corpus wins, so the model reads
+    the reviewed decision before the personal one.
+    """
+    from retail_agent.knowledge.trios import definitions_block
+    from retail_agent.store.definitions import personal_definitions_block
+
+    blocks = [
+        definitions_block(recalled(state, deps)),
+        personal_definitions_block(personal(state, deps)),
+    ]
+    return "\n\n".join(block for block in blocks if block)

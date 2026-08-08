@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.nodes.recall import definitions_for
 from retail_agent.agent.nodes.route import last_user_message, render_history
 from retail_agent.agent.nodes.schema_qa import render_schema
 from retail_agent.agent.prompts import PLANNER_PROMPT
@@ -67,6 +68,11 @@ def plan_node(state: TurnState, deps: AgentDeps) -> dict:
         max_steps=max_steps,
         schema=render_schema(deps),
         history=render_history(state, deps.settings.history_messages),
+        # `recall` resolved these before this node ran, and until they were
+        # passed here the planner invented its own reading of every business
+        # term — leaving `draft_sql` a step from which the defined word had
+        # already been removed.
+        definitions=definitions_for(state, deps),
     )
     try:
         decomposed = deps.llm.with_structured_output(Plan).invoke(
@@ -82,12 +88,21 @@ def plan_node(state: TurnState, deps: AgentDeps) -> dict:
     # An empty list is possible even on success; asking the original question as
     # a single step beats answering nothing.
     usable = []
+    seen = set()
     for text in steps:
         if not text.strip():
             continue
         if is_lookup_step(text):
             log.info("dropping non-retrieval step: %r", text)
             continue
+        # Observed live: the same sentence returned twice for one question.
+        # That runs the query twice and lets `_final_frame` score the repeat as
+        # though it were a separate finding.
+        key = " ".join(text.split()).lower()
+        if key in seen:
+            log.info("dropping duplicate step: %r", text)
+            continue
+        seen.add(key)
         usable.append(text)
 
     questions = usable[:max_steps]

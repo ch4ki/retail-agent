@@ -38,7 +38,17 @@ Each step must be answerable by exactly one query. A later step may build on
 the results of an earlier one. You do not write queries — a separate step
 does that.
 
+{definitions}
+
 Rules:
+- Keep every business term the user wrote — loyal, engaged, churn, top, at
+  risk, high value, underspending, performing well — VERBATIM in the step
+  that needs it. Do not translate it into criteria, however obvious the
+  translation looks. The step "count engaged customers" is correct; "count
+  users with at least one completed order" is not, even if you believe that
+  is what engaged means. Whoever writes the query is given the agreed
+  definition; you are not the one who applies it, and a term you paraphrase
+  away cannot be recovered downstream.
 - Use at most {max_steps} steps. Most questions need one.
 - Use one step when a single query answers the question. Use several only
   when the parts need separate queries — for example comparing two things,
@@ -50,6 +60,8 @@ Rules:
   been retrieved: any that exist appear above, and any that do not are stated
   as an assumption in the answer. A step like "find the definition of loyal
   customers" cannot be turned into a query and wastes an attempt.
+- Never emit the same step twice. Two identical steps run the same query
+  twice and the second result is mistaken for a separate finding.
 - Name the tables or columns from the schema each step relies on.
 - Each step must stand on its own. The conversation below is there to resolve
   references: if the question says "that", "the same period" or "compared to
