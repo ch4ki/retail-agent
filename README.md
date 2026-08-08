@@ -6,8 +6,6 @@ data before the model ever sees it, and explains the results.
 
 - **[Design document](docs/design.md)** — architecture, services, and how each
   requirement is handled, with what is built vs designed marked per section
-- **[Example run](docs/example-run.md)** — an annotated transcript of a real
-  session against live BigQuery
 
 ## Requirements
 
@@ -53,14 +51,11 @@ Try:
 › delete all reports mentioning revenue
 › /reports        list what you have saved
 › /undo           reverse the last deletion
-› /trace          explain the last turn: nodes, timings, every SQL attempt
-› /metrics        first-pass SQL validity, self-correction, latency per node
+› /trace          explain the last turn: every tool call, timing, SQL attempt
+› /metrics        first-pass SQL validity, self-correction, latency per step
 › /persona list   change the agent's tone without a restart
 › /prefs          your answer format, depth and table size
 ```
-
-See [docs/example-run.md](docs/example-run.md) for an annotated transcript of a
-real session, including the confirmation flow.
 
 ## Using a different LLM
 
@@ -79,25 +74,42 @@ until a cooldown elapses.
 
 ## How it works
 
-A LangGraph state machine owns each turn. The model decides *what* to ask; the
-graph decides *what is allowed*. Every safety property is an edge in
-`src/retail_agent/agent/graph.py`, not an instruction in a prompt.
+One ReAct supervisor with seven tools, two of which are subagents. The model
+decides *what* to ask; middleware and tool preconditions decide *what is
+allowed*. No safety property is an instruction in a prompt.
 
 ```
-start_turn → route ─┬─ schema      answered from cached metadata, no SQL
-                    ├─ chat        follow-ups, answered from history
-                    ├─ report_ops  save / list / stage a delete
-                    │                └─ await_confirmation ─→ apply_delete
-                    │                   (a breakpoint: nothing writes before you answer)
-                    └─ plan → draft_sql → guard → dry_run → execute → mask
-                                  ↑                │              → synthesize → egress
-                                  ├──── repair ────┤  (budget: 3, held by the graph)
-                                  └─── diagnose ───┘  (budget: 1, for empty results)
+your question
+  └─ scope guard          lexical, before any model call — refusals end here
+     └─ supervisor        persona + your preferences, read per model call
+        ├─ analyst        ── a subagent with its own loop ──────────────┐
+        │                    resolves what terms mean first;            │
+        │                    returns without querying if one is unsettled│
+        │                    run_sql → guard → dry_run → execute → mask │
+        │                       ↑                    │                  │
+        │                       └──── error back to the model ──────────┘
+        │                            (budget: 14 queries per turn)
+        ├─ report_writer   a subagent with no data tools, so it cannot
+        │                  invent a figure the analyst did not find
+        ├─ describe_schema cached metadata, no SQL
+        ├─ save_report · list_reports
+        ├─ delete_reports  ⟵ interrupts for approval BEFORE it runs
+        └─ remember_definition · note_preference
+     └─ egress scan, then the trace
 ```
 
-The two budgets are separate on purpose. An empty result is not a broken query —
-sometimes "no orders matched" is the true answer — so diagnosing one must not
-consume the retries that exist for SQL that genuinely failed.
+Two properties are worth being precise about, because they are what the earlier
+hand-built graph was built to guarantee:
+
+**PII cannot leak.** `run_sql` is the only code in the system that returns a
+warehouse row, and masking is inside it — before a single row is rendered. This
+does not depend on what order anything runs in, and a test reads the source of
+every other tool to make sure none of them reaches the warehouse.
+
+**Nothing runs before a business term is settled.** The `analyst` tool resolves
+definitions — the shared corpus first, then your own — *before* it builds its
+subagent, and returns without querying if something is left over. There is no
+model in that decision and no tool the model could decline to call.
 
 ## Viewing the pipeline in LangGraph Studio
 
@@ -111,24 +123,24 @@ Then open:
 https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
 ```
 
-Studio renders the graph, lets you run a thread against the real BigQuery
-connection, and shows the state after every node — including which SQL the
-guard rejected and how the repair budget was spent.
+Studio renders the compiled agent — the model node, the tool node, and every
+middleware hook around them — lets you run a thread against the real BigQuery
+connection, and shows the messages after each step, including which SQL the
+guard rejected.
 
-The graph it loads is `src/retail_agent/agent/studio.py`, which builds the same
-deps the CLI does. It passes no checkpointer, because the Studio server owns
-thread persistence.
+What it loads is `src/retail_agent/agent/studio.py`, which builds the same deps
+the CLI does. It passes no checkpointer, because the Studio server owns thread
+persistence.
 
 Studio does not replace the CLI: the confirmation flow for destructive actions
-is a terminal interaction. Studio does show it paused, though — `pending_action`
-in the state panel is the exact manifest awaiting your answer.
+is a terminal interaction. Studio does show the run paused at the interrupt.
 
 ## Tracing (optional)
 
 Set both `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in `.env` to send
-per-node traces to [LangSmith](https://smith.langchain.com). You get a span per
-graph node — `route`, `plan`, `draft_sql`, `execute`, `synthesize` — plus every
-model call, which is enough to see exactly where a turn went wrong.
+traces to [LangSmith](https://smith.langchain.com). You get a span per model
+call and per tool call — including the analyst subagent's own loop nested inside
+the supervisor's — which is enough to see exactly where a turn went wrong.
 
 The banner tells you when it is on. Enabling it sends prompts and query results
 off the machine; results are PII-masked before the model sees them, so what
@@ -161,9 +173,15 @@ every call.
   requires typing the token it asks for (`y` for one, `DELETE <n>` for several).
   Deletes are soft, audited and reversible with `/undo`. Ownership is a SQL
   predicate on every statement, so it holds even if the model is compromised.
-- **Bounded self-correction** — a failed query is retried at most twice. The
-  counter lives in graph state, so the bound holds regardless of what the model
-  decides. When it runs out the agent explains what it tried instead of looping.
+- **Scope guard** — attempts to override the instructions, extract the prompt,
+  read out contact details or write to the warehouse are refused before any
+  model call. It is deliberately not a topic classifier: ordinary scope is held
+  by the fact that every tool reads retail data or your own reports.
+- **Bounded self-correction** — a failed query comes back to the model as an
+  error it can act on, and `run_sql` can be called at most 14 times in a turn.
+  The counter is middleware, so the bound holds regardless of what the model
+  decides. When it runs out the agent says what it could not retrieve instead of
+  looping.
 
 ## Semantic search over the analyst corpus (optional)
 
@@ -209,17 +227,18 @@ so no floor could be both sensitive and precise.
 ## Tests
 
 ```bash
-uv run pytest              # 836 tests, no credentials or database needed
+uv run pytest              # 773 tests, no credentials or database needed
 uv run pytest -m db        # 94 tests, needs `docker compose up -d postgres`
-uv run pytest -m live      # 9 tests, needs real BigQuery access and an LLM key
+uv run pytest -m live      # 10 tests, needs real BigQuery access and an LLM key
 uv run pytest -m vector    # 14 tests, needs DENSE_RETRIEVAL deps; 9 need an OpenAI key
+uv run retail-agent eval   # 47 cases against live BigQuery; exit 0 ships
 ```
 
 The safety modules are pure functions and are tested first, against an
-adversarial corpus. Graph behaviour is tested with a scripted fake LLM and a
-fake warehouse, asserting *paths* rather than output text — for example that an
-exhausted repair budget degrades instead of looping, and that a query which
-would disclose PII is rejected before execution. Selecting a PII column *bare*
+adversarial corpus. Agent behaviour is tested with a scripted chat model and a
+fake warehouse, asserting *what happened* rather than output text — for example
+that a rejected query never reaches the warehouse, and that a delete does not
+reach the store while you are still being asked about it. Selecting a PII column *bare*
 is deliberately allowed — an unaliased column keeps its name, which is what lets
 the masking policy find it on the way back. What the guard rejects is anything
 that would defeat that: an alias, or the column buried inside an expression.
@@ -239,27 +258,31 @@ or `ollama`, or set `LLM_FALLBACKS` so the agent moves on by itself.
 
 ## Status
 
-Built: BigQuery access, SQL guard, PII masking, egress scan, the turn graph and
-the CLI; the saved-reports library with its delete-confirmation gate, audit
-trail and `/undo`; turn traces with `/trace`, `/trace <id>` and `/metrics`; and
-the full resilience story — bounded self-correction, the `diagnose` edge for
-empty results, and a provider fallback chain with a circuit breaker.
+Built: BigQuery access, the scope guard, the SQL guard, PII masking, the egress
+scan, the agent and the CLI; the saved-reports library with its
+delete-confirmation gate, audit trail and `/undo`; turn traces with `/trace`,
+`/trace <id>` and `/metrics`; the eval suite and its release gate; and the full
+resilience story — bounded self-correction, an empty result that says what it
+probably means, and a provider fallback chain with a circuit breaker.
 
 Also built: personas, so a non-developer can change the agent's tone without a
-deploy — versioned, attributed, and provably unable to reach the safety rules —
-and per-user answer preferences.
-
-The agent also learns preferences from how you phrase questions, and proposes
-them rather than applying them — it will ask before changing anything. It reads
-the phrasing with the model, in the router call it already makes, and refuses to
-quote you on anything you did not literally type.
+deploy — versioned, attributed, read per model call, and provably unable to
+reach the safety rules — and per-user answer preferences.
 
 Also built: the Golden Bucket of analyst Trios — question, SQL, report and the
 metric definitions that connect them — with hybrid lexical/dense retrieval, a
 measured relevance floor, a clarifying question when a term is undefined that is
 remembered per user, and promotion of an answered definition into the corpus.
 
-Not yet built: the LLM judge for narrative quality, and system-level learning.
-Both are designed in
+Partial: the agent learns preferences from how you phrase questions and proposes
+them rather than applying them — it asks before changing anything, and refuses to
+quote you on anything you did not literally type. It now notices those phrases
+with a tool it may decline to call, where it used to notice them inside a
+classification it always made. Under-detection is the failure mode, not a
+fabricated preference, and §5.4 of the design says what restoring the guarantee
+would take.
+
+Not yet built: the LLM judge for narrative quality, a numeric-provenance check,
+and system-level learning. All three are designed in
 [docs/design.md](docs/design.md), which marks each requirement Built, Partial or
 Designed and names the command or test that demonstrates each Built claim.
