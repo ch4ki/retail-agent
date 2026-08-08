@@ -1,4 +1,4 @@
-"""Everything a node needs, injected once rather than imported ad hoc.
+"""Everything the tools need, injected once rather than imported ad hoc.
 
 Keeping this explicit is what lets component tests swap in a fake LLM and a
 fake warehouse without patching module globals.

@@ -124,7 +124,6 @@ class Settings(BaseSettings):
     # Prior messages shown to the router and planner so that "compare that to
     # April" resolves to something queryable. Bounded: history grows for a whole
     # session, and every turn pays for it in tokens.
-    history_messages: int = 6
 
     @property
     def resolved_model(self) -> str:

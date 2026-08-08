@@ -5,7 +5,7 @@ string; Gemini returns a list of content blocks, each carrying a thinking
 signature. Calling `str()` on the latter yields a Python repr of a list, which
 downstream code then tries to parse as SQL.
 
-Every node reads model output through this function.
+Every reader of model output goes through this function.
 """
 
 from __future__ import annotations

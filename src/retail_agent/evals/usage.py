@@ -2,7 +2,7 @@
 
 A callback handler rather than instrumentation inside either agent. Both drive a
 langchain `BaseChatModel`, so one handler attached through `config["callbacks"]`
-sees every model call on the graph arm and on the ReAct arm alike. Counting them
+sees every model call the agent makes, including its subagents'. Counting them
 separately — walking `events` on one side and the message list on the other —
 would leave two implementations to disagree, and the disagreement would read as
 a finding about the agents.

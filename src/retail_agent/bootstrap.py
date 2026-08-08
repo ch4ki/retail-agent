@@ -23,7 +23,7 @@ from retail_agent.store.reports import build_report_store
 
 
 def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
-    """Assemble everything the graph needs from the stores.
+    """Assemble everything the agent needs from the stores.
 
     Split out of `_chat` so it can be exercised without credentials — a missing
     name in here used to surface only when a user ran the app, and was reported

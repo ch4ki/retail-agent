@@ -6,8 +6,9 @@ setting: transient failures are retried on the current provider, permanent ones
 move straight to the next, and a provider that keeps failing is skipped
 entirely until a cooldown elapses.
 
-The whole chain sits behind the two methods the nodes actually use — `invoke`
-and `with_structured_output` — so nothing in `agent/` knows this exists.
+The whole chain sits behind the three methods a caller actually uses —
+`invoke`, `with_structured_output` and `bind_tools` — so nothing in `agent/`
+knows this exists.
 """
 
 from __future__ import annotations

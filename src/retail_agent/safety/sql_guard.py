@@ -294,21 +294,3 @@ def _parse(sql: str) -> exp.Expression | None:
         return None
 
 
-def without_limit(sql: str) -> str:
-    """The same query with its outermost LIMIT removed.
-
-    Used when handing an earlier step's query to a later one. The guard appends
-    a LIMIT so results stay printable; that bound is about display, not meaning,
-    and passing it along made the model reproduce it faithfully —
-    `SELECT AVG(age) FROM (SELECT age FROM users LIMIT 100)` averages a hundred
-    rows and calls it the average age, moving the truncation out of the prompt
-    and into the SQL.
-
-    Only the outer one goes. A LIMIT the question asked for ("top 10
-    customers") lives in a subquery and is part of what that step computed.
-    """
-    tree = _parse(sql) if sql else None
-    if tree is None:
-        return sql
-    tree.set("limit", None)
-    return tree.sql(dialect="bigquery")

@@ -7,7 +7,6 @@ replayed confirmation inserts nothing and therefore deletes nothing.
 
 from __future__ import annotations
 
-import logging
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -24,7 +23,6 @@ from retail_agent.store.models import ReportAuditRow, ReportRow
 
 # Long enough for a container still starting, short enough that a dead
 # database does not stall the CLI.
-PROBE_SECONDS = 2
 
 
 @dataclass(frozen=True)

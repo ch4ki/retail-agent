@@ -61,11 +61,6 @@ PII_TYPES = ("email", "credit_card", "ip")
 # A model that has stopped making progress still costs money on every turn.
 MAX_MODEL_CALLS = 30
 
-# `fresh_scratch` used to default this and the graph spent it outside
-# `repair_budget`. Named here rather than read from Settings because it is not
-# one — if it becomes a setting, this should follow it.
-DIAGNOSE_BUDGET = 1
-
 
 def analyst_middleware(settings: Settings) -> list[AgentMiddleware]:
     """The stack that bounds the SQL loop.
@@ -75,7 +70,9 @@ def analyst_middleware(settings: Settings) -> list[AgentMiddleware]:
     it. A loop silently allowed twice the queries would look like better
     accuracy for a reason no report would mention.
     """
-    sql_budget = settings.max_analysis_steps + settings.repair_budget + DIAGNOSE_BUDGET
+    sql_budget = (
+        settings.max_analysis_steps + settings.repair_budget + settings.diagnose_budget
+    )
 
     return [
         *_pii(),

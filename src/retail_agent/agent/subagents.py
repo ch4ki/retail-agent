@@ -41,11 +41,7 @@ from retail_agent.knowledge.trios import (
     unresolved,
 )
 from retail_agent.llm.messages import message_text
-from retail_agent.store.definitions import (
-    ask_for_definition,
-    personal_definitions_block,
-    remembered,
-)
+from retail_agent.store.definitions import personal_definitions_block, remembered
 from retail_agent.store.personas import active_body
 from retail_agent.store.preferences import preferred, style_instruction
 
@@ -177,11 +173,6 @@ def _describe(found: list, known: dict[str, str], assumed: list[str]) -> str:
     if assumed:
         parts.append(f"assuming: {', '.join(assumed)}")
     return "; ".join(parts)
-
-
-def definition_question(term: str) -> str:
-    """What the CLI shows when the agent needs a term defined."""
-    return ask_for_definition(term, UNDEFINED_TERMS.get(term, "it is undefined"))
 
 
 def final_text(result: dict) -> str:
