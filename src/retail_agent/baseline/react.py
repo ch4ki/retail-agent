@@ -94,13 +94,20 @@ def build_middleware(settings: Settings) -> list[AgentMiddleware]:
 _DIAGNOSE_BUDGET = 1
 
 
-def _describe_failure(error: Exception) -> str | None:
+def _describe_failure(error: Exception, request: object) -> str | None:
     """Turn a tool failure into the message the model gets back.
 
     This is the ReAct arm's repair prompt. Only the two failures the graph also
     recovers from are handled; anything else propagates, so an internal bug
     surfaces as a failed case rather than as an agent that quietly worked around
     it.
+
+    `request` is the `ToolCallRequest` and is unused, but the parameter is not
+    optional: `OnError` is `Callable[[Exception, ToolCallRequest], ...]`, and a
+    one-argument version type-checks, imports, and passes every test that does
+    not call it — then raises TypeError against the live provider the first time
+    a query is rejected. Which is exactly what happened: the repair path was
+    dead for a whole eval run and reported as an agent failure.
     """
     if isinstance(error, GuardRejection):
         return f"The query was rejected before running: {error}. Rewrite it."

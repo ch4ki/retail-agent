@@ -73,3 +73,43 @@ def test_tool_errors_are_returned_to_the_model_rather_than_raised():
     """This is the ReAct arm's repair path. Without it a rejected query kills
     the turn instead of giving the model the violation to fix."""
     assert only(build_middleware(settings()), ToolErrorMiddleware)
+
+
+# --- the repair path ---
+
+
+def failure(error):
+    """Call `_describe_failure` the way `ToolErrorMiddleware` does.
+
+    Its `OnError` is `Callable[[Exception, ToolCallRequest], ...]` — two
+    arguments. Calling it with one passed every unit test and then raised
+    TypeError against the live provider, which scored as an agent failure
+    rather than as the repair it was supposed to be.
+    """
+    from retail_agent.baseline.react import _describe_failure
+
+    return _describe_failure(error, object())
+
+
+def test_a_guard_rejection_is_handed_back_to_the_model_to_fix():
+    from retail_agent.baseline.tools import GuardRejection
+
+    message = failure(GuardRejection("Only SELECT is allowed."))
+
+    assert message is not None
+    assert "Only SELECT is allowed." in message
+
+
+def test_a_warehouse_error_is_handed_back_too():
+    from retail_agent.datasources.base import QuerySyntaxError
+
+    message = failure(QuerySyntaxError("Unrecognized name: sale_pric"))
+
+    assert message is not None
+    assert "sale_pric" in message
+
+
+def test_an_unexpected_error_propagates_rather_than_being_explained_away():
+    """Returning None lets it raise. An internal bug dressed up as a repair
+    prompt is how the agent silently works around its own broken code."""
+    assert failure(RuntimeError("something internal")) is None
