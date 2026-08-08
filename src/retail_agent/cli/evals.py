@@ -63,26 +63,6 @@ def read_baseline(path: str | None) -> float | None:
         return None
 
 
-def seams_builder(agent: str | None):
-    """The `build_seams` callable for the named arm.
-
-    Both are imported lazily for the reason the harness already documents:
-    `--help` should not pay for BigQuery and langchain. An unknown name raises
-    rather than falling through to the graph — a typo that silently defaulted
-    would produce a report labelled `react` containing the graph's numbers,
-    which is worse than no report at all.
-    """
-    if agent in (None, "graph"):
-        from retail_agent.evals.harness import build_seams
-
-        return build_seams
-    if agent == "react":
-        from retail_agent.baseline.seams import build_react_seams
-
-        return build_react_seams
-    raise ValueError(f"unknown agent {agent!r}: expected 'graph' or 'react'")
-
-
 def run_compare(args) -> int:
     """Put two `--json` reports side by side.
 
@@ -104,8 +84,8 @@ def run_compare(args) -> int:
     comparison = compare_runs(
         runs[0],
         runs[1],
-        left_name=getattr(args, "left_name", None) or "graph",
-        right_name=getattr(args, "right_name", None) or "react",
+        left_name=getattr(args, "left_name", None) or "before",
+        right_name=getattr(args, "right_name", None) or "after",
     )
     # Plain print rather than rich markup: SQL in the disagreement list contains
     # brackets that rich would read as style tags and swallow.
@@ -127,22 +107,16 @@ def run_evals(args) -> int:
 
     # Imported here, not at module scope: this is what costs a second of
     # BigQuery and langchain imports, and `--help` should not pay for it.
+    from retail_agent.agent.seams import build_seams
     from retail_agent.evals.runner import run_suite
 
-    agent = getattr(args, "agent", None) or "graph"
     try:
-        ask, execute = seams_builder(agent)(settings)
-    except ValueError as err:
-        console.print(f"[red]{err}[/red]")
-        return 1
+        ask, execute = build_seams(settings)
     except Exception as err:
         console.print(f"[red]Could not reach the agent or the warehouse: {err}[/red]")
         return 1
 
-    console.print(
-        f"Running {len(cases)} cases against live BigQuery "
-        f"with the {agent} agent…\n"
-    )
+    console.print(f"Running {len(cases)} cases against live BigQuery…\n")
 
     def show(result: CaseResult) -> None:
         mark = {Outcome.PASS: "[green]ok[/green]", Outcome.FAIL: "[red]WRONG[/red]"}.get(

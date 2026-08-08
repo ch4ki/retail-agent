@@ -1,10 +1,14 @@
-"""A scripted LLM and warehouse so graph behaviour can be tested offline."""
+"""A scripted model and warehouse so agent behaviour can be tested offline."""
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import pandas as pd
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.config import Settings
@@ -86,6 +90,67 @@ def _as_text(messages) -> str:
     if isinstance(messages, str):
         return messages
     return "\n".join(str(getattr(m, "content", m)) for m in messages)
+
+
+class ScriptedChatModel(BaseChatModel):
+    """A real `BaseChatModel` that replays queued turns through `create_agent`.
+
+    `ScriptedLLM` cannot be used here: `create_agent` calls `bind_tools`, which
+    `BaseChatModel` leaves unimplemented, and the agent loop reads
+    `AIMessage.tool_calls` rather than content. So a script entry is either a
+    string (a final answer) or a list of `(tool_name, args)` pairs (one round of
+    tool calls).
+
+    Every prompt is recorded, because several tests assert on what the model was
+    *given* — that the persona reached it, that the safety rules did — and those
+    are the assertions a mock returning canned text cannot make.
+    """
+
+    script: list = []
+    prompts: list = []
+    bound_tools: list = []
+
+    def __init__(self, script: list, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        # Assigned after init so each instance owns its lists rather than
+        # sharing the class attribute pydantic would otherwise hand out.
+        object.__setattr__(self, "script", list(script))
+        object.__setattr__(self, "prompts", [])
+        object.__setattr__(self, "bound_tools", [])
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools, **kwargs):
+        object.__setattr__(
+            self, "bound_tools", [getattr(t, "name", getattr(t, "__name__", t)) for t in tools]
+        )
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        self.prompts.append("\n".join(str(m.content) for m in messages))
+        if not self.script:
+            raise ScriptExhausted("ScriptedChatModel ran out of turns")
+
+        turn = self.script.pop(0)
+        if isinstance(turn, str):
+            message = AIMessage(content=turn)
+        else:
+            message = AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": name, "args": args, "id": f"call_{index}"}
+                    for index, (name, args) in enumerate(turn)
+                ],
+            )
+        return ChatResult(generations=[ChatGeneration(message=message)])
 
 
 @dataclass
@@ -179,14 +244,15 @@ def traces():
 
 @pytest.fixture
 def make_deps(settings, source, reports, traces):
-    def _make(replies: list, src=None, blocks: bool = False, store=None):
+    def _make(script: list | None = None, src=None, store=None, **extra):
         return AgentDeps(
             settings=settings,
-            llm=ScriptedLLM(replies, blocks=blocks),
+            llm=ScriptedChatModel(script or []),
             source=src or source,
             policy=PiiPolicy.default(),
             reports=store or reports,
             traces=traces,
+            **extra,
         )
 
     return _make

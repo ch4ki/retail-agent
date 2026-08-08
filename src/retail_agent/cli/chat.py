@@ -17,33 +17,33 @@ from contextlib import contextmanager
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.types import Command
 from rich.console import Console
 
-from retail_agent.agent.graph import build_graph, run_turn
+from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.subagents import final_text
+from retail_agent.agent.supervisor import build_agent
 from retail_agent.bootstrap import build_deps
 from retail_agent.cli.render import (
     render_answer,
     render_banner,
+    render_confirmation,
+    render_definitions,
     render_error,
-    render_manifest,
     render_metrics,
     render_persona,
     render_personas,
     render_preferences,
-    render_definitions,
-    render_stored_trace,
     render_trace,
     render_trios,
 )
 from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
-from retail_agent.llm.errors import describe_llm_error
-from retail_agent.llm.provider import MissingCredentialsError, build_llm
-from retail_agent.knowledge.trios import UNDEFINED_TERMS as DEFINITION_HINTS
 from retail_agent.knowledge.promotion import PromotionError, promote_definition
 from retail_agent.knowledge.trios import live_trios
+from retail_agent.llm.errors import describe_llm_error
+from retail_agent.llm.provider import MissingCredentialsError, build_llm
 from retail_agent.obs.tracing import configure_tracing
-from retail_agent.store.definitions import ask_for_definition
 from retail_agent.store.preferences import preferred
 
 HELP = """
@@ -52,7 +52,7 @@ HELP = """
   /reports list saved reports
   /undo    restore the last deletion
   /trace   explain the last turn; /trace <id> reads a stored one back
-  /metrics first-pass SQL validity, self-correction, latency per node
+  /metrics first-pass SQL validity, self-correction, latency per step
   /trios   the analyst definitions the agent answers from
   /definitions what you told it terms mean; forget|promote <term>
   /prefs   answer format, depth, table size; accept|decline a suggestion
@@ -61,7 +61,6 @@ HELP = """
 
 Everything else is treated as a question about the data.
 """.strip()
-
 
 
 def run_chat(args) -> int:
@@ -114,8 +113,7 @@ def run_chat(args) -> int:
     )
 
     with _checkpointer(console, settings.database_url) as saver:
-        graph = build_graph(deps, checkpointer=saver)
-        return _repl(console, graph, deps, args.user, session_id)
+        return _repl(console, deps, saver, args.user, session_id)
 
 
 @contextmanager
@@ -140,8 +138,8 @@ def _checkpointer(console: Console, database_url: str):
     yield MemorySaver()
 
 
-def _repl(console, graph, deps, user, session_id) -> int:
-    last_turn: dict = {}
+def _repl(console, deps, saver, user, session_id) -> int:
+    last_trace = None
     while True:
         try:
             question = console.input("\n[bold cyan]›[/bold cyan] ").strip()
@@ -164,7 +162,7 @@ def _repl(console, graph, deps, user, session_id) -> int:
             _undo(console, deps, user)
             continue
         if question.startswith("/trace"):
-            _trace(console, deps, user, last_turn, question)
+            _trace(console, deps, user, last_trace, question)
             continue
         if question.startswith("/prefs"):
             _prefs(console, deps, user, question)
@@ -182,10 +180,8 @@ def _repl(console, graph, deps, user, session_id) -> int:
             render_metrics(console, deps.traces.metrics(owner_id=user))
             continue
 
-        # Evidence about how this user likes answers is recorded by the router
-        # node, inside the turn, so every caller learns — not just this one.
-        last_turn = (
-            _answer(console, graph, deps, user, session_id, question) or last_turn
+        last_trace = (
+            _answer(console, deps, saver, user, session_id, question) or last_trace
         )
         _offer_proposal(console, deps, user)
 
@@ -341,74 +337,98 @@ def _undo(console, deps, user) -> None:
     )
 
 
-def _answer(console, graph, deps, user, session_id, question) -> dict | None:
-    """Run one turn. Returns the finished state so the REPL can `/trace` it."""
+def _answer(console, deps, saver, user, session_id, question):
+    """Run one turn. Returns its trace so the REPL can `/trace` it.
+
+    A fresh agent and a fresh capture per turn: both close over the turn's
+    identity, and the persona and preferences are read per model call, so
+    rebuilding costs nothing and rules out a stale binding.
+    """
+    capture = TurnCapture(user_id=user, session_id=session_id, question=question)
     config = {"configurable": {"thread_id": session_id}}
-    state: dict = {}
+
     try:
+        # Inside the guard, not above it: assembling the agent reads the persona
+        # store and the tool list, and a REPL that dies before its own error
+        # handler is a REPL that dies.
+        agent = build_agent(deps, capture, checkpointer=saver)
         with console.status("thinking…"):
-            state = run_turn(
-                graph,
-                user_id=user,
-                session_id=session_id,
-                question=question,
-                config=config,
+            result = agent.invoke(
+                {"messages": [{"role": "user", "content": question}]}, config
             )
 
-        # The graph breaks before `await_confirmation` when a delete is staged.
-        # Show the manifest, take the answer, and fill it in as though that node
-        # had produced it.
-        # Two kinds of pause, both breakpoints declared in graph.py: a delete
-        # awaiting a typed token, and a term awaiting a definition.
-        while graph.get_state(config).next == ("await_definition",):
-            values = graph.get_state(config).values
-            console.print(
-                f"\n[cyan]{ask_for_definition(values['pending_term'], DEFINITION_HINTS.get(values['pending_term'], 'it is undefined'))}[/cyan]"
-            )
-            reply = console.input("[bold cyan]definition ›[/bold cyan] ").strip()
-            graph.update_state(
-                config, {"definition_reply": reply}, as_node="await_definition"
-            )
-            with console.status("thinking…"):
-                state = graph.invoke(None, config)
-
-        while graph.get_state(config).next == ("await_confirmation",):
-            render_manifest(console, graph.get_state(config).values["pending_action"])
-            typed = console.input("[bold yellow]›[/bold yellow] ").strip()
-            graph.update_state(
-                config, {"confirmation": typed}, as_node="await_confirmation"
-            )
+        # A destructive tool call pauses the agent before it runs. The manifest
+        # was resolved against the store by the approval gate, so what is shown
+        # is what would go — and the typed token means a bulk delete cannot be
+        # approved by reflex.
+        while _pending(result):
+            approved = _confirm(console, result, capture)
             with console.status("working…"):
-                state = graph.invoke(None, config)
+                decision = {"type": "approve"} if approved else {
+                    "type": "reject",
+                    "message": "The executive did not confirm. Nothing was deleted.",
+                }
+                result = agent.invoke(
+                    # A dict with `decisions`, not a bare list: the middleware
+                    # subscripts the resume value by name, and a list resumes
+                    # with a TypeError that surfaces as a failed turn.
+                    Command(resume={"decisions": [decision]}),
+                    config,
+                )
     except Exception as err:  # the REPL must survive anything
-        # Full detail goes to the log; the user gets one actionable line.
+        # Full detail goes to the log; the user gets one actionable line. The
+        # turn id makes a complaint a single lookup rather than an
+        # investigation, so it goes on screen and not only into the log.
         logging.getLogger(__name__).exception("turn failed")
-        # The turn id makes a complaint a single lookup instead of an
-        # investigation, so it goes on screen rather than only into the log.
         render_error(
             console,
             describe_llm_error(err, provider=deps.settings.llm_provider),
-            turn_id=state.get("turn_id", ""),
+            turn_id=capture.turn_id,
         )
-        return state or None
+        return None
 
-    # The trace was recorded by the graph's finish_turn node, so every caller
-    # gets one — not just this REPL.
-    render_answer(console, state, prefs=preferred(deps.preferences, user))
-    return state
+    answer = final_text(result)
+    render_answer(console, answer, capture, prefs=preferred(deps.preferences, user))
+    # The trace was written by the recorder middleware, on every path out. This
+    # is the same record, kept so `/trace` needs no round trip to storage.
+    return capture.to_trace(answer)
 
 
-def _trace(console, deps, user, last_turn, command) -> None:
+def _pending(result) -> bool:
+    return bool(result.get("__interrupt__"))
+
+
+def _confirm(console, result, capture) -> bool:
+    """Show the manifest and take a typed answer.
+
+    The typed token rather than a bare y/n: `DELETE 7` cannot be produced by
+    someone who has not read how many reports they are about to lose.
+    """
+    interrupt = result["__interrupt__"][0]
+    requests = interrupt.value.get("action_requests", []) if isinstance(interrupt.value, dict) else []
+    description = requests[0].get("description", "") if requests else ""
+    render_confirmation(console, description)
+
+    typed = console.input("[bold yellow]›[/bold yellow] ").strip()
+    expected = capture.pending.token if capture.pending else "y"
+    if typed == expected:
+        return True
+
+    console.print("[dim]Cancelled — nothing was deleted.[/dim]")
+    return False
+
+
+def _trace(console, deps, user, last_trace, command) -> None:
     """`/trace` explains the last turn; `/trace <id>` reads one back from
     storage, which is what makes a user's complaint a single lookup."""
     _, _, wanted = command.partition(" ")
     wanted = wanted.strip()
     if not wanted:
-        render_trace(console, last_turn)
+        render_trace(console, last_trace)
         return
 
     stored = deps.traces.get(owner_id=user, turn_id=wanted)
     if stored is None:
         console.print(f"No trace for turn {wanted}.")
         return
-    render_stored_trace(console, stored)
+    render_trace(console, stored)

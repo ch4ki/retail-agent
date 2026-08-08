@@ -65,37 +65,6 @@ def test_no_baseline_path_means_no_baseline():
     assert read_baseline(None) is None
 
 
-# --- choosing which agent answers ---
-
-
-def test_the_graph_is_the_arm_that_runs_by_default():
-    """Adding a second arm must not quietly change what `retail-agent eval`
-    has always meant."""
-    from retail_agent.cli.evals import seams_builder
-    from retail_agent.evals.harness import build_seams
-
-    assert seams_builder(None) is build_seams
-    assert seams_builder("graph") is build_seams
-
-
-def test_the_react_arm_is_selectable():
-    from retail_agent.baseline.seams import build_react_seams
-    from retail_agent.cli.evals import seams_builder
-
-    assert seams_builder("react") is build_react_seams
-
-
-def test_an_unknown_arm_is_refused_rather_than_silently_defaulting():
-    """A typo that fell through to the graph would produce a report labelled
-    react containing the graph's numbers."""
-    import pytest
-
-    from retail_agent.cli.evals import seams_builder
-
-    with pytest.raises(ValueError, match="grpah"):
-        seams_builder("grpah")
-
-
 # --- the comparison command ---
 
 
@@ -124,8 +93,8 @@ def test_comparing_two_reports_prints_both_arms(tmp_path, capsys):
 
     printed = capsys.readouterr().out
     assert code == 0
-    assert "graph" in printed
-    assert "react" in printed
+    assert "before" in printed
+    assert "after" in printed
     assert "loyal-count" in printed
 
 

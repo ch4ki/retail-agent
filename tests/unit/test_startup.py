@@ -32,12 +32,18 @@ def test_every_dependency_is_wired():
         assert getattr(deps, field) is not None, f"{field} was not wired"
 
 
-def test_the_graph_can_be_built_from_them():
+def test_the_agent_can_be_built_from_them():
     """The other half: a store that exists but has the wrong shape would pass
-    the check above and fail when the graph runs."""
-    from retail_agent.agent.graph import build_graph
+    the check above and fail when a turn runs.
 
-    assert build_graph(build_deps(_settings(), llm=object(), source=object()))
+    A model that can `bind_tools` is required where the graph needed nothing —
+    `create_agent` binds the tool schemas when the agent is compiled.
+    """
+    from retail_agent.agent.capture import TurnCapture
+    from retail_agent.agent.supervisor import build_agent
+
+    deps = build_deps(_settings(), llm=_bindable(), source=_schema_only())
+    assert build_agent(deps, TurnCapture())
 
 
 def test_an_unreachable_database_degrades_rather_than_raising():
@@ -87,7 +93,7 @@ def test_the_studio_graph_builds():
     """
     from retail_agent.agent.studio import build_studio_graph
 
-    assert build_studio_graph(llm=object(), source=object())
+    assert build_studio_graph(llm=_bindable(), source=_schema_only())
 
 
 def test_both_entry_points_use_the_same_wiring():
@@ -107,28 +113,32 @@ def test_both_entry_points_use_the_same_wiring():
         assert "build_deps" in source
 
 
-# --- the ReAct arm's entry point ---
+def _bindable():
+    """A model `create_agent` will accept.
 
-
-def test_the_react_studio_graph_builds():
-    """Same lesson as `test_the_studio_graph_builds`: Studio imports this at
-    load time, so a name that does not resolve fails `langgraph dev` and no
-    other test would notice.
-
-    Unlike the graph's, this needs a source carrying a schema: the ReAct arm
-    renders the schema into its system prompt when the agent is *built*, where
-    the graph's nodes read it per invocation. So `langgraph dev` describes the
-    tables once at load rather than on the first question.
+    `object()` was enough for the graph, whose nodes only ever called `invoke`.
+    Compiling an agent binds the tool schemas, so the double has to answer
+    `bind_tools`.
     """
     from langchain_core.language_models.fake_chat_models import (
         FakeMessagesListChatModel,
     )
 
-    from retail_agent.datasources.base import ColumnSchema, TableSchema
-
     class Bindable(FakeMessagesListChatModel):
         def bind_tools(self, tools, **kwargs):
             return self
+
+    return Bindable(responses=[])
+
+
+def _schema_only():
+    """A source that can describe itself and nothing else.
+
+    The analyst renders the schema into its prompt, and Studio compiles at
+    import time, so a source that cannot answer `describe_all` fails
+    `langgraph dev` at load — which is the failure this file exists to catch.
+    """
+    from retail_agent.datasources.base import ColumnSchema, TableSchema
 
     class SchemaOnly:
         def describe_all(self):
@@ -139,29 +149,4 @@ def test_the_react_studio_graph_builds():
                 )
             ]
 
-    from retail_agent.baseline.studio import build_react_studio_graph
-
-    assert build_react_studio_graph(llm=Bindable(responses=[]), source=SchemaOnly())
-
-
-def test_the_react_entry_point_shares_the_same_wiring():
-    """One `build_deps`, three callers now. A second construction site is what
-    broke Studio the first time."""
-    import inspect
-
-    from retail_agent.baseline import studio as react_studio
-
-    source = inspect.getsource(react_studio)
-    assert "AgentDeps(" not in source
-    assert "build_deps" in source
-
-
-def test_studio_serves_both_arms():
-    """The point of registering it: seeing the two graphs side by side is the
-    clearest statement of what the comparison is about."""
-    import json
-    from pathlib import Path
-
-    config = json.loads(Path("langgraph.json").read_text())
-
-    assert set(config["graphs"]) == {"retail_agent", "react_baseline"}
+    return SchemaOnly()

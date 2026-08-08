@@ -1,30 +1,50 @@
-"""Answers structural questions from cached schema metadata. No SQL runs."""
+"""Rendering the warehouse's shape for a prompt.
+
+Two renderings, because two callers want different things and only one of them
+should pay for the expensive one.
+"""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
-from langchain_core.messages import AIMessage, HumanMessage
-
+from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
-from retail_agent.agent.nodes.route import last_user_message
-from retail_agent.agent.prompts import SAFETY_RULES, SCHEMA_PROMPT
-from retail_agent.agent.state import TurnState
+from retail_agent.agent.prompts import SCHEMA_PROMPT
 from retail_agent.datasources.column_values import enumerable_columns, with_values
 from retail_agent.knowledge.conventions import notes_for
-from retail_agent.llm.messages import message_text
-from retail_agent.safety.egress import scan_text
-from retail_agent.store.personas import active_body
 
 log = logging.getLogger(__name__)
+
+
+def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
+    """"What data do you have?" answered without spending anything.
+
+    A tool rather than a subagent: there is no loop to run and nothing to
+    decide. It hands back the structure and lets the supervisor put it in its
+    own words, which is also what keeps the persona applied to the answer.
+    """
+
+    def describe_schema() -> str:
+        """Describe the data available: tables, columns and what they support.
+
+        Runs no query and costs nothing. Use this for questions about what can
+        be asked rather than about the numbers themselves.
+        """
+        with capture.step("describe_schema") as step:
+            rendered = render_schema(deps)
+            step.detail = f"{rendered.count('CREATE TABLE')} table(s)"
+            return SCHEMA_PROMPT.format(schema=rendered)
+
+    return [describe_schema]
 
 
 def render_schema(deps: AgentDeps) -> str:
     """Structure only: table and column names with their types.
 
-    Deliberately free of any warehouse query. `schema_node` answers "what data
-    do you have" from this, and that path is asserted to cost nothing — see
-    `test_schema_node_answers_without_sql`.
+    Deliberately free of any warehouse query. `describe_schema` answers "what
+    data do you have" from this, and that path is asserted to cost nothing.
     """
     return "\n\n".join(schema.to_ddl() for schema in deps.source.describe_all())
 
@@ -32,11 +52,11 @@ def render_schema(deps: AgentDeps) -> str:
 def render_schema_for_sql(deps: AgentDeps) -> str:
     """The same schema, plus the values each enumerable column actually holds.
 
-    Only the SQL-drafting path needs this, and only that path should pay for it.
-    A bare `gender STRING` cannot stop the model writing `gender = 'female'`
-    against a column holding 'F' — that happened twice in one eval run, and both
-    queries were valid, passed the guard, ran without error and returned zero
-    rows, so no layer reported a problem.
+    Only the analyst needs this, and only the analyst should pay for it. A bare
+    `gender STRING` cannot stop the model writing `gender = 'female'` against a
+    column holding 'F' — that happened twice in one eval run, and both queries
+    were valid, passed the guard, ran without error and returned zero rows, so
+    no layer reported a problem.
     """
     schemas = deps.source.describe_all()
     values = _discover_values(deps, schemas)
@@ -87,21 +107,3 @@ def _discover_values(deps: AgentDeps, schemas) -> dict[str, dict[str, tuple[str,
             log.warning("could not read column values for %s (%s)", schema.name, err)
 
     return discovered
-
-
-def schema_node(state: TurnState, deps: AgentDeps) -> dict:
-    question = last_user_message(state)
-    prompt = SCHEMA_PROMPT.format(
-        persona=active_body(deps.personas),
-        safety=SAFETY_RULES,
-        question=question,
-        schema=render_schema(deps),
-    )
-    reply = deps.llm.invoke([HumanMessage(content=prompt)])
-    scanned = scan_text(message_text(reply))
-
-    return {
-        "answer": scanned.text,
-        "status": "ok",
-        "messages": [AIMessage(content=scanned.text)],
-    }

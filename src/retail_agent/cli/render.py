@@ -7,11 +7,14 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
-from retail_agent.agent.state import TurnState
 
+def render_answer(console: Console, answer: str, capture=None, prefs=None) -> None:
+    """The answer, plus what it cost to produce it.
 
-def render_answer(console: Console, state: TurnState, prefs=None) -> None:
-    answer = state.get("answer", "")
+    The footnote is the only place a masked value or a repaired query is
+    admitted to in the normal flow. `/trace` has the detail; this says whether
+    there is any detail worth asking for.
+    """
     if not answer:
         return
 
@@ -20,41 +23,29 @@ def render_answer(console: Console, state: TurnState, prefs=None) -> None:
     from retail_agent.store.preferences import DEFAULT_PREFERENCES
 
     prefs = prefs or DEFAULT_PREFERENCES
-    if not prefs.show_attempt_footnote:
+    if capture is None or not prefs.show_attempt_footnote:
         return
 
     footnotes = []
-    if state.get("status") == "degraded":
+    if capture.status == "degraded":
         footnotes.append("partial answer — see the explanation above")
-    redactions = state.get("redactions", 0)
-    if redactions:
-        footnotes.append(f"{redactions} personal-data values masked")
-    # A diagnosis marker is not a try the agent made; see SqlAttempt.
-    attempts = len(
-        [a for a in state.get("sql_attempts", []) if not a.is_diagnosis]
-    )
-    if attempts > 1:
-        footnotes.append(f"{attempts} query attempts")
+    if capture.redactions:
+        footnotes.append(f"{capture.redactions} personal-data values masked")
+    if len(capture.attempts) > 1:
+        footnotes.append(f"{len(capture.attempts)} query attempts")
 
     if footnotes:
         console.print(f"[dim]{' · '.join(footnotes)}[/dim]")
 
 
-def render_manifest(console: Console, action) -> None:
+def render_confirmation(console: Console, description: str) -> None:
     """Show exactly what is about to be deleted, in full.
 
-    Every title is printed. A truncated list would mean asking someone to
-    confirm a deletion they cannot see.
+    Every title is printed — the manifest is built by the approval gate, which
+    resolved the target set against the store. A truncated list would mean
+    asking someone to confirm a deletion they cannot see.
     """
-    lines = "\n".join(f"  • {title}" for title in action.titles)
-    console.print(
-        Panel(
-            f"About to delete {len(action.report_ids)} report(s):\n\n{lines}\n\n"
-            f"Type [bold]{action.token}[/bold] to confirm. Anything else cancels.",
-            title="Confirm deletion",
-            style="yellow",
-        )
-    )
+    console.print(Panel(description, title="Confirm deletion", style="yellow"))
 
 
 def render_error(console: Console, message: str, turn_id: str = "") -> None:
@@ -82,36 +73,22 @@ def render_banner(
     )
 
 
-def render_trace(console: Console, state) -> None:
-    """The full message correspondence for a turn.
+def render_trace(console: Console, trace) -> None:
+    """The full tool correspondence for a turn.
 
     Answers the question the footnote cannot: "3 query attempts" does not say
-    whether that was a three-step plan or one step failing twice, nor what the
-    guard objected to. This does.
+    whether that was three separate questions or one query failing twice, nor
+    what the guard objected to. This does.
+
+    One renderer for the live turn and for one read back from storage, because
+    both are now a `TraceRecord` — the live one is `capture.to_trace(...)`.
+    There used to be two near-identical renderers, which is how they drifted:
+    only one of them showed bytes billed.
     """
-    events = (state or {}).get("events") or []
-    if not events:
+    if trace is None:
         console.print("No turn to trace yet — ask a question first.")
         return
 
-    total_ms = sum(event.duration_ms for event in events)
-    console.print(
-        f"[bold]turn {state.get('turn_id', 'unknown')}[/bold]  "
-        f"[dim]intent={state.get('intent', '?')} · "
-        f"status={state.get('status', '?')} · {total_ms} ms · "
-        f"{state.get('redactions', 0)} masked[/dim]"
-    )
-    _render_events(console, [(e.node, e.duration_ms, e.detail) for e in events])
-    _render_attempts(console, state.get("sql_attempts") or [])
-
-
-def render_stored_trace(console: Console, trace) -> None:
-    """A trace read back from storage.
-
-    Same rendering as the live one — reconstructed from rows rather than from
-    graph state — so `/trace <id>` answers a complaint about a turn that
-    happened days ago in a session that has since ended.
-    """
     console.print(
         f"[bold]turn {trace.turn_id}[/bold]  [dim]{trace.intent} · {trace.status} · "
         f"{trace.duration_ms} ms · {trace.redactions} masked · "
@@ -123,9 +100,9 @@ def render_stored_trace(console: Console, trace) -> None:
 
 
 def _render_events(console: Console, events) -> None:
-    """One row per node visit, from `(node, duration_ms, detail)` triples."""
+    """One row per tool call, from `(step, duration_ms, detail)` triples."""
     table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
-    table.add_column("node")
+    table.add_column("step")
     table.add_column("ms", justify="right")
     table.add_column("what happened", overflow="fold")
     for node, duration_ms, detail in events:
@@ -134,20 +111,13 @@ def _render_events(console: Console, events) -> None:
 
 
 def _render_attempts(console: Console, attempts) -> None:
-    """Every draft, what became of it, and the query the warehouse actually saw.
-
-    Takes `SqlAttempt` objects from live state or plain dicts read back from
-    storage. The two used to have their own near-identical renderer, which is
-    how they drifted: only one of them showed bytes billed.
-    """
+    """Every draft, what became of it, and the query the warehouse actually saw."""
     if not attempts:
         return
 
     console.print("\n[bold]SQL attempts[/bold]")
     for index, attempt in enumerate(attempts, 1):
-        field = (
-            attempt.get if isinstance(attempt, dict) else lambda k: getattr(attempt, k, None)
-        )
+        field = attempt.get
         violations, error = field("violations"), field("error")
         if violations:
             outcome = f"[red]rejected:[/red] {'; '.join(violations)}"
@@ -190,11 +160,11 @@ def render_metrics(console: Console, metrics: dict) -> None:
 
     if metrics.get("node_p50_ms"):
         latency = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
-        latency.add_column("node")
+        latency.add_column("step")
         latency.add_column("p50 ms", justify="right")
-        for node, p50 in metrics["node_p50_ms"].items():
-            latency.add_row(node, str(p50))
-        console.print("\n[bold]Median latency per node[/bold]")
+        for step, p50 in metrics["node_p50_ms"].items():
+            latency.add_row(step, str(p50))
+        console.print("\n[bold]Median latency per step[/bold]")
         console.print(latency)
 
 

@@ -38,18 +38,12 @@ def main() -> int:
         help="a previous --json report; blocks on a regression against its accuracy",
     )
     evals.add_argument("--json", dest="json_path", help="write the full report here")
-    evals.add_argument(
-        "--agent",
-        choices=("graph", "react"),
-        default="graph",
-        help="which agent answers: the LangGraph state machine or the ReAct baseline",
-    )
 
     compare = sub.add_parser("compare", help="put two --json eval reports side by side")
-    compare.add_argument("left", help="a --json report, conventionally the graph's")
-    compare.add_argument("right", help="a --json report, conventionally the ReAct arm's")
-    compare.add_argument("--left-name", dest="left_name", default="graph")
-    compare.add_argument("--right-name", dest="right_name", default="react")
+    compare.add_argument("left", help="a --json report, conventionally the older run")
+    compare.add_argument("right", help="a --json report, conventionally the newer run")
+    compare.add_argument("--left-name", dest="left_name", default="before")
+    compare.add_argument("--right-name", dest="right_name", default="after")
 
     args = parser.parse_args()
     if args.command == "migrate":

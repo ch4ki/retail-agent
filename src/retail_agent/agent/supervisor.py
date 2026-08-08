@@ -1,0 +1,50 @@
+"""The agent, assembled.
+
+One `create_agent` with seven tools and one middleware stack. This is the whole
+control flow of the product; there is no second place a turn can be shaped.
+
+The system prompt is absent on purpose — `supervisor_middleware` supplies it
+per model call, so an edited persona and a changed preference take effect on
+the next turn rather than the next deploy.
+"""
+
+from __future__ import annotations
+
+from langchain.agents import create_agent
+
+from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.memory import build_memory_tools
+from retail_agent.agent.middleware import supervisor_middleware
+from retail_agent.agent.reports import build_report_tools
+from retail_agent.agent.schema import build_schema_tool
+from retail_agent.agent.subagents import build_subagents
+
+
+def build_tools(deps: AgentDeps, capture: TurnCapture) -> list:
+    """Every capability the agent has, in one list.
+
+    Adding one is adding a line here — that is the extensibility story, and it
+    is the same line whether the new capability is a plain function or another
+    `create_agent` behind a callable.
+    """
+    return [
+        *build_subagents(deps, capture),
+        *build_schema_tool(deps, capture),
+        *build_report_tools(deps, capture),
+        *build_memory_tools(deps, capture),
+    ]
+
+
+def build_agent(deps: AgentDeps, capture: TurnCapture, checkpointer=None):
+    """The compiled agent for one turn.
+
+    Bound to a capture because the tools write what they did into it, and a turn
+    is the unit the eval scores and the trace records.
+    """
+    return create_agent(
+        model=deps.llm,
+        tools=build_tools(deps, capture),
+        middleware=supervisor_middleware(deps, capture),
+        checkpointer=checkpointer,
+    )

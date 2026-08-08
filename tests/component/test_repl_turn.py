@@ -1,0 +1,120 @@
+"""The REPL driving a real turn, including the confirmation flow.
+
+The interrupt payload shape is the reason this file exists. `Command(resume=...)`
+takes a dict the middleware subscripts by name; a bare list type-checks, imports,
+and fails only at the moment a user confirms a deletion — which is the worst
+possible moment to find out.
+"""
+
+import io
+
+import pytest
+from langgraph.checkpoint.memory import MemorySaver
+from rich.console import Console
+
+from retail_agent.cli.chat import _answer
+
+
+class FakeConsole:
+    """Answers `input` from a script; renders through a real console."""
+
+    def __init__(self, script=()):
+        self.script = list(script)
+        self._console = Console(record=True, width=100, file=io.StringIO())
+
+    def input(self, _prompt=""):
+        if not self.script:
+            raise EOFError
+        return self.script.pop(0)
+
+    def print(self, *args, **kwargs):
+        self._console.print(*args, **kwargs)
+
+    def status(self, *_args, **_kwargs):
+        class _Null:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Null()
+
+    def text(self) -> str:
+        return self._console.export_text(clear=False)
+
+
+@pytest.fixture
+def saved(reports):
+    reports.save(owner_id="dana", session_id="s1", title="Acme Q1", body="Acme.")
+    reports.save(owner_id="dana", session_id="s1", title="Beta Q1", body="Beta.")
+    return reports
+
+
+def answer(console, deps, question):
+    return _answer(console, deps, MemorySaver(), "dana", "s1", question)
+
+
+def test_an_ordinary_turn_renders_and_returns_its_trace(make_deps):
+    console = FakeConsole()
+    deps = make_deps(script=["Revenue was 12."])
+
+    trace = answer(console, deps, "what was revenue?")
+
+    assert "Revenue was 12." in console.text()
+    assert trace is not None and trace.owner_id == "dana"
+
+
+def test_typing_the_token_confirms_the_deletion(make_deps, saved):
+    console = FakeConsole(["y"])
+    deps = make_deps(
+        script=[[("delete_reports", {"term": "Acme"})], "Deleted 1 report."]
+    )
+
+    answer(console, deps, "delete the reports mentioning Acme")
+
+    assert [r.title for r in saved.list_reports(owner_id="dana")] == ["Beta Q1"]
+    assert "Acme Q1" in console.text(), "the manifest named what would go"
+
+
+def test_typing_anything_else_cancels(make_deps, saved):
+    """"Anything else cancels" has to include a plausible near-miss: someone who
+    types `yes` when the token is `DELETE 2` has not read the manifest."""
+    console = FakeConsole(["yes"])
+    deps = make_deps(script=[[("delete_reports", {"term": ""})], "Nothing deleted."])
+
+    answer(console, deps, "delete all my reports")
+
+    assert len(saved.list_reports(owner_id="dana")) == 2
+    assert "Cancelled" in console.text()
+
+
+def test_a_bulk_delete_needs_the_counted_token(make_deps, saved):
+    console = FakeConsole(["DELETE 2"])
+    deps = make_deps(script=[[("delete_reports", {"term": ""})], "Deleted 2 reports."])
+
+    answer(console, deps, "delete all my reports")
+
+    assert saved.list_reports(owner_id="dana") == []
+
+
+def test_a_failing_turn_is_rendered_rather_than_raised(make_deps):
+    """The REPL must survive anything: an exception here ends the session and
+    loses the conversation.
+
+    A provider-shaped failure rather than `ScriptExhausted`, which is a
+    `BaseException` on purpose so an over-broad `except Exception` in the code
+    under test cannot swallow a test's own bug.
+    """
+    console = FakeConsole()
+    deps = make_deps(script=["unused"])
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("the provider is down")
+
+    object.__setattr__(deps.llm, "_generate", explode)
+
+    trace = answer(console, deps, "what was revenue?")
+
+    assert trace is None
+    assert "went wrong" in console.text()

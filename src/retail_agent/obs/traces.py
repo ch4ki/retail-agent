@@ -1,8 +1,8 @@
 """Turn traces: what the agent did, kept so it can be explained afterwards.
 
 The record is deliberately flat and already-masked. Everything in it comes from
-`TurnState` after the turn finished, and `frames` — the only place row values
-live — is not among the fields. A trace cannot become a second disclosure path.
+the turn's `TurnCapture`, and the result frame — the only place row values live
+— is not among the fields. A trace cannot become a second disclosure path.
 
 Metrics live behind the same protocol as storage because "how often does SQL
 pass the guard first time" is a question about stored turns, and answering it in
@@ -15,7 +15,8 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-# (node, duration_ms, detail)
+# (step, duration_ms, detail) — one tool call. Built by `TurnCapture`, which is
+# where a turn's timings are accumulated; nothing here reads agent internals.
 Event = tuple[str, int, str]
 
 MAX_ANSWER_CHARS = 4_000
@@ -46,48 +47,6 @@ class TraceStore(Protocol):
     def recent(self, *, owner_id: str, limit: int = 20) -> list[TraceRecord]: ...
 
     def metrics(self, *, owner_id: str, limit: int = 200) -> dict: ...
-
-
-def from_state(state: dict) -> TraceRecord:
-    """Build a record from a finished turn.
-
-    Reads only fields the turn already produced. The answer is truncated because
-    a trace is for debugging, not for storing a second copy of every report.
-    """
-    attempts = [
-        {
-            "step_id": a.step_id,
-            "sql": a.sql,
-            "executed_sql": a.executed_sql,
-            "violations": list(a.violations),
-            "error": a.error,
-            "row_count": a.row_count,
-            "bytes_billed": a.bytes_billed,
-        }
-        for a in state.get("sql_attempts", [])
-    ]
-    events = [(e.node, e.duration_ms, e.detail) for e in state.get("events", [])]
-
-    return TraceRecord(
-        turn_id=state.get("turn_id", ""),
-        session_id=state.get("session_id", ""),
-        owner_id=state.get("user_id", ""),
-        question=_last_question(state),
-        intent=state.get("intent", ""),
-        status=state.get("status", ""),
-        answer=state.get("answer", "")[:MAX_ANSWER_CHARS],
-        redactions=state.get("redactions", 0),
-        bytes_billed=sum(a.get("bytes_billed") or 0 for a in attempts),
-        duration_ms=sum(duration for _, duration, _ in events),
-        events=events,
-        attempts=attempts,
-    )
-
-
-def _last_question(state: dict) -> str:
-    from retail_agent.agent.nodes.route import last_user_message
-
-    return last_user_message(state)
 
 
 def compute_metrics(traces: list[TraceRecord]) -> dict:

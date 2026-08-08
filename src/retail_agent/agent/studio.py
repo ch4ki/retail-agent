@@ -1,17 +1,19 @@
 """Graph entrypoint for LangGraph Studio (`langgraph dev`).
 
-Studio needs a compiled graph as a module-level object, and it supplies its own
-persistence — so unlike the CLI this builds the graph with no checkpointer.
+Studio owns thread persistence, so no checkpointer is passed here. It does not
+construct `AgentDeps` itself for a reason worth keeping: a second construction
+site is what broke Studio the last two times a dependency was added to only one
+path. `build_deps` is the one place.
 
-Everything else is the same wiring the CLI uses, through the same function. It
-used to be a copy of it, described in this docstring as "not a parallel code
-path that could drift", and it drifted: `traces` was added to the CLI's
-construction and not to this one, and Studio failed to load.
+The capture is per-process rather than per-turn. Studio is for looking at the
+agent, not for scoring it — `ask_once` builds a fresh capture per turn, and that
+is the path the eval and the CLI use.
 """
 
 from __future__ import annotations
 
-from retail_agent.agent.graph import build_graph
+from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.supervisor import build_agent
 from retail_agent.bootstrap import build_deps
 from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
@@ -31,8 +33,7 @@ def build_studio_graph(*, llm=None, source=None):
         llm=llm if llm is not None else build_llm(settings),
         source=source if source is not None else BigQuerySource(settings),
     )
-    # No checkpointer: the Studio server owns thread persistence.
-    return build_graph(deps)
+    return build_agent(deps, TurnCapture(user_id="studio", session_id="studio"))
 
 
 graph = build_studio_graph()

@@ -53,9 +53,9 @@ def test_bad_column_is_classified_as_a_syntax_error(source):
         )
 
 
-# Structured output varies more across providers than plain text does
-# (json_schema vs function_calling vs json_mode), and the component tests use a
-# double that validates rather than negotiates. These call the real provider.
+# One real question, end to end. The component tests script the model, so
+# nothing else in the suite exercises tool calling against the actual provider —
+# and tool-call formats differ by vendor in a way a validating double hides.
 
 
 def _llm():
@@ -68,26 +68,22 @@ def _llm():
         pytest.skip(f"LLM unavailable: {err}")
 
 
-def test_router_schema_works_against_the_real_provider():
-    from retail_agent.agent.nodes.route import RouteDecision
+def test_a_real_question_produces_a_number_from_a_real_query(source):
+    """Asserts on the captured frame, not on the prose.
 
-    decision = _llm().with_structured_output(RouteDecision).invoke(
-        "Which category is this: 'what tables do you have?'"
-    )
+    A model that answers "revenue was strong" without querying would pass any
+    text assertion. What must be true is that a query ran and returned a row.
+    """
+    from retail_agent.agent.seams import ask_once
+    from retail_agent.bootstrap import build_deps
+    from retail_agent.config import Settings
 
-    assert decision.intent in {"schema", "analyze", "chat"}
+    deps = build_deps(Settings(), llm=_llm(), source=source)
+    answer = ask_once(deps, "How many orders were placed in March 2023?")
 
-
-def test_planner_schema_works_against_the_real_provider():
-    from retail_agent.agent.nodes.plan import Plan
-
-    plan = _llm().with_structured_output(Plan).invoke(
-        "Break into retrieval steps: compare revenue for brand X and brand Y."
-    )
-
-    assert isinstance(plan.steps, list)
-    assert all(isinstance(step, str) for step in plan.steps)
-    assert plan.steps, "a comparison should decompose into at least one step"
+    assert answer.sql, "no query ran"
+    assert answer.rows, "the query returned nothing"
+    assert answer.intent == "analyze"
 
 
 # Dense retrieval against the real embedding model and a real database. Marked
@@ -139,61 +135,54 @@ def test_dense_retrieval_finds_a_synonym_the_lexical_ranker_misses():
 # the agent quietly deciding every analyst wants essays.
 
 
-def test_causal_questions_are_not_read_as_style_preferences():
-    from retail_agent.agent.nodes.route import RouteDecision, style_signal
-    from retail_agent.agent.prompts import ROUTER_PROMPT
-    from retail_agent.config import get_settings
-    from retail_agent.llm.provider import build_llm
+def _note_preference_calls(source, question):
+    """Run one real turn and report which steps the model chose.
 
-    from langchain_core.messages import HumanMessage, SystemMessage
+    Detection used to be folded into the router's structured output, where it
+    cost nothing and could not be skipped. It is a tool now, so whether the
+    model elects to call it is a behaviour of the live provider — which means it
+    can only be checked against the live provider.
+    """
+    from retail_agent.agent.capture import TurnCapture
+    from retail_agent.agent.supervisor import build_agent
+    from retail_agent.bootstrap import build_deps
+    from retail_agent.config import Settings
 
-    llm = build_llm(get_settings()).with_structured_output(RouteDecision)
-    prompt = ROUTER_PROMPT.format(history="(first question)")
+    from langgraph.checkpoint.memory import MemorySaver
 
-    misread = []
-    for question in [
-        "why are users in state X underspending?",
+    deps = build_deps(Settings(), llm=_llm(), source=source)
+    capture = TurnCapture(user_id="live", session_id="live", question=question)
+    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+    agent.invoke(
+        {"messages": [{"role": "user", "content": question}]},
+        {"configurable": {"thread_id": "live"}},
+    )
+    return [name for name, _, _ in capture.events if name == "note_preference"]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "why are users in state Texas underspending?",
         "why did our churn rate spike last month?",
-        "why does brand Calvin Klein outperform brand Levis?",
-        "explain the drop in March",
-        "how come revenue fell?",
         "what was revenue in March?",
-        "who are our top 10 customers by spend?",
-    ]:
-        decision = llm.invoke(
-            [SystemMessage(content=prompt), HumanMessage(content=question)]
-        )
-        if style_signal(decision, question=question) is not None:
-            misread.append((question, decision.style_field, decision.style_value))
+    ],
+)
+def test_a_question_about_the_data_is_not_read_as_a_style_preference(source, question):
+    """The failure mode the regex this replaced actually had.
 
-    assert not misread, f"read as style preferences: {misread}"
+    "don't just give me the number, tell me why" recorded `depth=summary` — the
+    opposite of what was asked. A causal question misfiling a preference is the
+    same class of error, and it silently changes how later answers are written.
+    """
+    assert _note_preference_calls(source, question) == []
 
 
-def test_a_real_preference_is_detected_with_a_quotable_span():
-    """The half the regex could not do: no pattern in the old list matches any
-    of these, and the negation case recorded the opposite."""
-    from retail_agent.agent.nodes.route import RouteDecision, style_signal
-    from retail_agent.agent.prompts import ROUTER_PROMPT
-    from retail_agent.config import get_settings
-    from retail_agent.llm.provider import build_llm
+def test_a_stated_preference_is_noticed(source):
+    """The other half. A tool nothing ever calls is a learning loop that does
+    not run."""
+    called = _note_preference_calls(
+        source, "spare me the details from now on — what was Q1 revenue?"
+    )
 
-    from langchain_core.messages import HumanMessage, SystemMessage
-
-    llm = build_llm(get_settings()).with_structured_output(RouteDecision)
-    prompt = ROUTER_PROMPT.format(history="(first question)")
-
-    missed = []
-    for question, expected in [
-        ("cut to the chase, how many brands?", "summary"),
-        ("spare me the details — what was Q1 revenue?", "summary"),
-        ("walk me through it: why did churn spike?", "deep"),
-        ("don't just give me the number, tell me why", "deep"),
-    ]:
-        decision = llm.invoke(
-            [SystemMessage(content=prompt), HumanMessage(content=question)]
-        )
-        signal = style_signal(decision, question=question)
-        if signal is None or signal.value != expected:
-            missed.append((question, expected, signal))
-
-    assert not missed, f"not detected as expected: {missed}"
+    assert called, "the model did not record a preference the user stated outright"

@@ -102,7 +102,7 @@ class FakeDeps:
 def run(script):
     console = FakeConsole(script)
     deps = FakeDeps()
-    code = _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+    code = _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
     return console, deps, code
 
 
@@ -192,7 +192,7 @@ def test_activating_switches_the_voice():
     deps = FakeDeps()
     deps.personas.save(name="terse", body="Be brief.", updated_by="ceo")
 
-    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+    _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
 
     assert deps.personas.active().name == "terse"
 
@@ -220,7 +220,7 @@ def test_prefs_are_per_user():
         console = FakeConsole([f"/prefs answer_format {fmt}"])
         deps = FakeDeps()
         deps.preferences = shared
-        _repl(console, graph=None, deps=deps, user=user, session_id="s1")
+        _repl(console, deps=deps, saver=None, user=user, session_id="s1")
 
     assert shared.get(user_id="dana").answer_format == "bullets"
     assert shared.get(user_id="sam").answer_format == "prose"
@@ -232,10 +232,10 @@ def test_prefs_are_per_user():
 def _ask(deps, times, phrase="keep it brief"):
     """Seed the evidence, then open the REPL to see what it does with it.
 
-    Detection lives in the router node now, not here — see
-    `tests/component/test_style_learning.py`. What these tests own is the half
-    the user sees: that accumulated evidence produces a *proposal* quoting them,
-    and that nothing changes until they accept.
+    Detection lives in the `note_preference` tool now, not here — see
+    `tests/unit/test_memory_tools.py`. What these tests own is the half the user
+    sees: that accumulated evidence produces a *proposal* quoting them, and that
+    nothing changes until they accept.
     """
     from retail_agent.store.learning import Signal
 
@@ -245,10 +245,11 @@ def _ask(deps, times, phrase="keep it brief"):
         )
 
     # One ordinary question, because the proposal is offered after a turn.
-    # graph=None makes that turn fail, which the REPL catches and renders — the
-    # proposal is offered either way, which is what is under test.
+    # `FakeDeps` has no model, so the turn fails and the REPL catches and
+    # renders it — the proposal is offered either way, which is what is under
+    # test.
     console = FakeConsole(["how many brands?", "/quit"])
-    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+    _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
     return console
 
 
@@ -281,7 +282,7 @@ def test_accepting_applies_the_setting():
     _ask(deps, PROPOSAL_THRESHOLD)
 
     console = FakeConsole(["/prefs accept"])
-    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+    _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
 
     assert deps.preferences.get(user_id="dana").depth == "summary"
 
@@ -293,7 +294,7 @@ def test_declining_changes_nothing_and_stops_asking():
     _ask(deps, PROPOSAL_THRESHOLD)
 
     console = FakeConsole(["/prefs decline"])
-    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+    _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
     assert deps.preferences.get(user_id="dana").depth == "standard"
 
     asked_again = _ask(deps, PROPOSAL_THRESHOLD)
@@ -312,7 +313,7 @@ def test_a_remembered_definition_can_be_forgotten():
     deps = FakeDeps()
     deps.definitions.remember(user_id="dana", term="loyal", definition="3+ orders")
 
-    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+    _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
 
     assert deps.definitions.lookup(user_id="dana", term="loyal") is None
     assert "ask next time" in console.text()
@@ -329,7 +330,7 @@ def test_promoting_puts_a_personal_definition_in_the_shared_bucket():
     deps = FakeDeps()
     deps.definitions.remember(user_id="dana", term="at risk", definition="120 days silent")
 
-    _repl(console, graph=None, deps=deps, user="dana", session_id="s1")
+    _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
 
     from retail_agent.knowledge.trios import unresolved
 
