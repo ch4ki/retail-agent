@@ -22,10 +22,19 @@ class MissingCredentialsError(RuntimeError):
 
 
 def build_llm(settings: Settings) -> BaseChatModel:
-    """The model the agent calls: one provider, or a chain over several."""
+    """The model the agent calls: one provider, or a chain over several.
+
+    Always wrapped, including for a single provider. This used to return the
+    bare model whenever the chain had one entry — the reasoning being that with
+    nothing to fall back to there was nothing to do. But retry and the circuit
+    breaker are not about fallback, so `llm_retry_attempts` was configured and
+    silently ignored for the most common deployment there is.
+
+    Measured: a transient `Connection error.` ended the turn rather than being
+    retried, and a single blip cost 37 of 47 cases in a live eval run.
+    `_TRANSIENT` has always listed "connection". Nothing was asking it.
+    """
     chain = build_chain(settings)
-    if len(chain) == 1:
-        return chain[0][1]
 
     from retail_agent.llm.resilience import CircuitBreaker, ResilientChatModel
 
