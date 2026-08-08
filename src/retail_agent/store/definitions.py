@@ -104,17 +104,6 @@ def personal_definitions_block(definitions: dict[str, str]) -> str:
     )
 
 
-def ask_for_definition(term: str, hint: str) -> str:
-    """What the user is asked. Names the term, says what is undecided, and
-    gives an example so the answer is usable rather than another abstraction."""
-    return (
-        f"No agreed definition for **{term}** — {hint}.\n"
-        f"How should I define it? For example: "
-        f"\"three or more completed orders\".\n"
-        f"Press enter to let me choose and I will say what I assumed."
-    )
-
-
 class PostgresDefinitionStore:
     """One row per (user, term), upserted. Every statement carries `user_id`."""
 

@@ -119,6 +119,32 @@ def test_without_a_definition_store_the_agent_assumes_rather_than_asks(make_deps
     assert capture.assumed_terms == ["loyal"]
 
 
+def test_the_report_writer_is_shown_how_analysts_here_write(make_deps):
+    """The other half of what a trio carries, and it had gone missing.
+
+    `metric_definitions` says what to measure and reaches the analyst. `report`
+    demonstrates the house shape — split by cohort, compare against a baseline,
+    close with numbered actions — which is hard to specify and easy to show. It
+    was injected by the graph's synthesis node, and deleting that node dropped
+    it silently: nothing failed, the corpus field simply stopped being read.
+    """
+    deps = make_deps(script=["## Summary\nRevenue rose."], trios=[LOYAL])
+    writer, capture = subagents_for(deps)
+    capture.record_definitions(["trio-loyal"])
+
+    writer["report_writer"]("Revenue rose 4% in Q1.")
+
+    assert "Loyalty is measured over a rolling year." in deps.llm.prompts[0]
+
+
+def test_a_report_with_no_trio_behind_it_still_writes(make_deps):
+    """An empty corpus is a valid state; the examples block just goes away."""
+    deps = make_deps(script=["## Summary\nRevenue rose."])
+    writer, _ = subagents_for(deps)
+
+    assert writer["report_writer"]("Revenue rose 4%.")
+
+
 def test_the_report_writer_cannot_reach_the_data(make_deps):
     """No tools, so a number missing from the brief cannot appear in the report."""
     deps = make_deps(script=["## Summary\nRevenue rose."])

@@ -37,7 +37,9 @@ from retail_agent.knowledge.trios import (
     UNDEFINED_TERMS,
     assumption_note,
     definitions_block,
+    live_trios,
     sql_assumption_note,
+    style_examples,
     unresolved,
 )
 from retail_agent.llm.messages import message_text
@@ -125,12 +127,21 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
         in the report.
         """
         with capture.step("report_writer") as step:
+            # The other half of what a trio carries. `metric_definitions` says
+            # what to measure and reaches the analyst; `report` shows how
+            # analysts here write a finding — split by cohort, compare against a
+            # baseline, close with numbered actions — and that is a property of
+            # the writing, so it belongs here rather than in the SQL loop.
+            consulted = [
+                trio for trio in live_trios(deps.trios) if trio.id in capture.trio_ids
+            ]
             agent = create_agent(
                 model=deps.llm,
                 tools=[],
                 system_prompt=REPORT_WRITER_PROMPT.format(
                     persona=active_body(deps.personas) or PERSONA_DEFAULT,
                     safety=SAFETY_RULES,
+                    examples=style_examples(consulted),
                     style=style_instruction(
                         preferred(deps.preferences, capture.user_id)
                     ),

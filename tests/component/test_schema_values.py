@@ -113,8 +113,12 @@ def test_a_restricted_column_is_never_annotated(make_deps, monkeypatch):
 
 
 def test_the_structural_schema_carries_no_conventions(make_deps):
-    """`schema_node` answers "what data do you have" from table shape. Business
-    conventions belong to the query writer, and that path pays nothing."""
-    from retail_agent.agent.schema import render_schema
+    """`describe_schema` answers "what data do you have" from table shape.
+    Business conventions belong to the query writer, and that path pays
+    nothing."""
+    from retail_agent.agent.capture import TurnCapture
+    from retail_agent.agent.schema import build_schema_tool
 
-    assert "NOT IN" not in render_schema(make_deps([], src=ValueSource()))
+    describe = build_schema_tool(make_deps(src=ValueSource()), TurnCapture())[0]
+
+    assert "NOT IN" not in describe()

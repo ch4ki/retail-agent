@@ -116,6 +116,8 @@ Numbered, concrete, each one something a manager could assign tomorrow.
 Never invent a number. If the brief does not support an action item, write
 fewer of them.
 
+{examples}
+
 {style}
 """.strip()
 

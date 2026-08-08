@@ -3,7 +3,6 @@ import pytest
 from retail_agent.store.definitions import (
     DefinitionStore,
     InMemoryDefinitionStore,
-    ask_for_definition,
     personal_definitions_block,
     remembered,
 )
@@ -48,10 +47,3 @@ def test_personal_definitions_are_labelled_as_the_users_own():
     assert "user's own" in block
     assert "3+ orders" in block
 
-
-def test_the_question_names_the_term_and_offers_an_example():
-    question = ask_for_definition("loyal", "what makes a customer loyal")
-
-    assert "loyal" in question
-    assert "For example" in question
-    assert "enter" in question.lower(), "opting out has to be visible"

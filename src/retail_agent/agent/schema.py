@@ -42,15 +42,6 @@ def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
     return [describe_schema]
 
 
-def render_schema(deps: AgentDeps) -> str:
-    """Structure only: table and column names with their types.
-
-    Deliberately free of any warehouse query. `describe_schema` answers "what
-    data do you have" from this, and that path is asserted to cost nothing.
-    """
-    return "\n\n".join(schema.to_ddl() for schema in deps.source.describe_all())
-
-
 def render_schema_for_sql(deps: AgentDeps) -> str:
     """The same schema, plus the values each enumerable column actually holds.
 
