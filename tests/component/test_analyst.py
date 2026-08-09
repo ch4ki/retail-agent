@@ -140,7 +140,7 @@ def test_the_report_writer_is_shown_how_analysts_here_write(make_deps):
     writer, capture = subagents_for(deps)
     capture.record_definitions(["trio-loyal"])
 
-    writer["report_writer"]("Revenue rose 4% in Q1.")
+    writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue")
 
     assert "Loyalty is measured over a rolling year." in deps.llm.prompts[0]
 
@@ -150,26 +150,30 @@ def test_a_report_with_no_trio_behind_it_still_writes(make_deps):
     deps = make_deps(script=["## Summary\nRevenue rose."])
     writer, _ = subagents_for(deps)
 
-    assert writer["report_writer"]("Revenue rose 4%.")
+    assert writer["report_writer"]("Revenue rose 4%.", title="Q1 Revenue")
 
 
 def test_the_report_writer_runs_through_the_provider_chain(make_deps):
     """The tool-less subagent compiles down a different path, and it was broken.
 
     Every other agent here has tools, so every other agent compiled through
-    `bind_tools`, which the chain implements. `create_agent` binds a tool-less
-    agent with `bind` instead — so the first live report died on
-    `AttributeError` while the whole offline suite stayed green, because the
-    doubles are handed to `create_agent` directly rather than through a chain.
-    """
-    from retail_agent.llm.resilience import ResilientChatModel
+    `bind_tools`. `create_agent` binds a tool-less agent with `bind` instead,
+    and the chain object that used to sit in front of the model implemented one
+    and not the other — so the first live report died on `AttributeError` while
+    the whole offline suite stayed green.
 
+    The chain object is gone and the fallbacks are middleware now, which is
+    what makes that class of bug unreachable: middleware is handed a model
+    rather than having to impersonate one. Kept, with a fallback configured, so
+    the tool-less compile path stays covered.
+    """
     deps = make_deps(script=["## Summary\nRevenue rose."])
-    chain = ResilientChatModel([("primary", deps.llm), ("fallback", deps.llm)])
-    object.__setattr__(deps, "llm", chain)
+    object.__setattr__(deps, "llm_fallbacks", [deps.llm])
     writer, _ = subagents_for(deps)
 
-    assert "Revenue rose" in writer["report_writer"]("Revenue rose 4% in Q1.")
+    assert "Revenue rose" in writer["report_writer"](
+        "Revenue rose 4% in Q1.", title="Q1 Revenue"
+    )
 
 
 def test_the_report_writer_cannot_reach_the_data(make_deps):
@@ -177,7 +181,7 @@ def test_the_report_writer_cannot_reach_the_data(make_deps):
     deps = make_deps(script=["## Summary\nRevenue rose."])
     writer, _ = subagents_for(deps)
 
-    body = writer["report_writer"]("Revenue rose 4% in Q1.")
+    body = writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue")
 
     assert "Revenue rose" in body
     assert deps.llm.bound_tools == []

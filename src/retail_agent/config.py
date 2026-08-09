@@ -57,9 +57,8 @@ class Settings(BaseSettings):
     # Comma-separated; ones without credentials are dropped rather than fatal.
     # Empty means no chain, which is the common single-provider case.
     llm_fallbacks: str = ""
+    # Total attempts against one provider before falling over to the next.
     llm_retry_attempts: int = 3
-    llm_breaker_threshold: int = 3
-    llm_breaker_cooldown_seconds: float = 60.0
 
     # --- BigQuery ---
     google_cloud_project: str | None = None

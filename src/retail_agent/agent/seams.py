@@ -110,10 +110,13 @@ def build_seams(settings, *, user: str = "eval"):
     """
     from retail_agent.bootstrap import build_deps
     from retail_agent.datasources.bigquery import BigQuerySource
-    from retail_agent.llm.provider import build_llm
+    from retail_agent.llm.provider import build_models
 
     source = BigQuerySource(settings)
-    deps = build_deps(settings, llm=build_llm(settings), source=source)
+    llm, llm_fallbacks = build_models(settings)
+    deps = build_deps(
+        settings, llm=llm, llm_fallbacks=llm_fallbacks, source=source
+    )
     usage = UsageCollector()
 
     def ask(question: str) -> AgentAnswer:

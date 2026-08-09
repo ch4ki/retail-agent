@@ -90,7 +90,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                     schema=render_schema_for_sql(deps),
                     dataset=deps.settings.bq_dataset,
                 ),
-                middleware=analyst_middleware(deps.settings),
+                middleware=analyst_middleware(deps),
             )
             result = agent.invoke({"messages": [{"role": "user", "content": question}]})
 

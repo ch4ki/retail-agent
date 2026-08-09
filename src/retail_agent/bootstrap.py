@@ -21,7 +21,7 @@ from retail_agent.store.preferences import build_preference_store
 from retail_agent.store.reports import build_report_store
 
 
-def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
+def build_deps(settings, *, llm, source, llm_fallbacks=(), console=None) -> AgentDeps:
     """Assemble everything the agent needs from the stores.
 
     Split out of `_chat` so it can be exercised without credentials — a missing
@@ -41,6 +41,7 @@ def build_deps(settings, *, llm, source, console=None) -> AgentDeps:
     return AgentDeps(
         settings=settings,
         llm=llm,
+        llm_fallbacks=list(llm_fallbacks),
         source=source,
         policy=PiiPolicy.default(),
         # Rows, seeded from the hand-authored corpus on first run, so a

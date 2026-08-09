@@ -22,6 +22,8 @@ from langchain.agents.middleware import (
     HumanInTheLoopMiddleware,
     InterruptOnConfig,
     ModelCallLimitMiddleware,
+    ModelFallbackMiddleware,
+    ModelRetryMiddleware,
     PIIMiddleware,
     ToolCallLimitMiddleware,
     ToolErrorMiddleware,
@@ -39,9 +41,13 @@ from retail_agent.agent.prompts import (
 )
 from retail_agent.agent.reports import render_manifest, resolve_delete
 from retail_agent.agent.tools import GuardRejection
-from retail_agent.config import Settings
 from retail_agent.datasources.base import DataSourceError
 from retail_agent.llm.messages import message_text
+from retail_agent.llm.resilience import (
+    BASE_DELAY_SECONDS,
+    MAX_DELAY_SECONDS,
+    is_retryable,
+)
 from retail_agent.store.definitions import all_definitions
 from retail_agent.store.personas import active_body
 from retail_agent.store.preferences import notes_for, preference_block
@@ -60,14 +66,19 @@ PII_TYPES = ("email", "credit_card", "ip")
 MAX_MODEL_CALLS = 30
 
 
-def analyst_middleware(settings: Settings) -> list[AgentMiddleware]:
+def analyst_middleware(deps: AgentDeps) -> list[AgentMiddleware]:
     """The stack that bounds the SQL loop.
 
     `run_limit` is computed from the same settings the budgets were computed
     from, rather than written down, so tuning one in config moves the agent with
     it. A loop silently allowed twice the queries would look like better
     accuracy for a reason no report would mention.
+
+    Takes the whole `deps` rather than just `settings` because the provider
+    chain reaches the model through here now: the fallbacks are built once at
+    startup and carried on `deps`, not rebuilt per turn.
     """
+    settings = deps.settings
     sql_budget = (
         settings.max_analysis_steps + settings.repair_budget + settings.diagnose_budget
     )
@@ -77,6 +88,7 @@ def analyst_middleware(settings: Settings) -> list[AgentMiddleware]:
         ToolCallLimitMiddleware(tool_name="run_sql", run_limit=sql_budget),
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS, exit_behavior="end"),
         ToolErrorMiddleware(on_error=describe_failure),
+        *_resilience(deps),
     ]
 
 
@@ -99,7 +111,50 @@ def supervisor_middleware(
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS, exit_behavior="end"),
         ToolErrorMiddleware(on_error=describe_failure),
         _recorder(deps, capture),
+        *_resilience(deps),
     ]
+
+
+def _resilience(deps: AgentDeps) -> list[AgentMiddleware]:
+    """Retry the current provider, then fall over to the next one.
+
+    Last in the stack, which makes it innermost: the composed handlers run
+    first-is-outermost, so everything above counts one logical model call while
+    this layer quietly spends several attempts on it. Put the other way round,
+    `ModelCallLimitMiddleware` would bill a rate-limited turn three times.
+
+    Order within the pair matters for the same reason. Fallback is outermost,
+    so retries are exhausted against one provider before moving to the next —
+    reversed, a single retry would restart the whole sweep.
+
+    These replace a hand-written chain object that impersonated a chat model.
+    Nothing here knows how to call a model; it is handed one.
+    """
+    stack: list[AgentMiddleware] = []
+
+    if deps.llm_fallbacks:
+        stack.append(ModelFallbackMiddleware(*deps.llm_fallbacks))
+
+    stack.append(
+        ModelRetryMiddleware(
+            # `max_retries` counts attempts *after* the first, so a setting of
+            # 3 total attempts is 2 retries.
+            max_retries=max(0, deps.settings.llm_retry_attempts - 1),
+            # Without this the default retries every exception, spending the
+            # whole budget on a rejected API key before reaching a provider
+            # that would have answered.
+            retry_on=is_retryable,
+            # The default is "continue", which swallows the exception and hands
+            # the agent an AIMessage describing the failure. That would look
+            # like an answer, and `ModelFallbackMiddleware` outside it would
+            # never see a failure to fall back from.
+            on_failure="error",
+            initial_delay=BASE_DELAY_SECONDS,
+            backoff_factor=2.0,
+            max_delay=MAX_DELAY_SECONDS,
+        )
+    )
+    return stack
 
 
 def _pii() -> list[AgentMiddleware]:

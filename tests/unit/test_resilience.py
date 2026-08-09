@@ -1,53 +1,16 @@
-"""Provider failure handling.
+"""Which provider failures are worth waiting for, and how that is wired in.
 
 The brief asks for resilience to third-party downtime, and a single-vendor
-agent cannot answer that honestly. These use fake models, so no network and no
-sleeping: the backoff is injected.
+agent cannot answer that honestly. The mechanism is langchain's
+`ModelRetryMiddleware` and `ModelFallbackMiddleware` now, so what is left to
+test here is the judgement we still own — `is_retryable` — and the wiring that
+hands it to them. The behaviour itself is covered end to end in
+`tests/component/test_supervisor.py`, through a real compiled agent.
 """
 
 import pytest
 
-from retail_agent.llm.resilience import (
-    CircuitBreaker,
-    ResilientChatModel,
-    is_retryable,
-)
-
-
-class FlakyModel:
-    """Raises the queued errors in order, then answers."""
-
-    def __init__(self, name, errors=(), answer="ok"):
-        self.name = name
-        self.errors = list(errors)
-        self.answer = answer
-        self.calls = 0
-
-    def invoke(self, messages, **kwargs):
-        self.calls += 1
-        if self.errors:
-            raise self.errors.pop(0)
-        return f"{self.name}:{self.answer}"
-
-    def with_structured_output(self, schema, **kwargs):
-        return _Structured(self, schema)
-
-
-class _Structured:
-    def __init__(self, model, schema):
-        self.model = model
-        self.schema = schema
-
-    def invoke(self, messages, **kwargs):
-        self.model.invoke(messages)
-        return self.schema
-
-
-def build(*models, **kwargs):
-    kwargs.setdefault("sleep", lambda _seconds: None)
-    return ResilientChatModel(
-        [(m.name, m) for m in models], attempts=3, **kwargs
-    )
+from retail_agent.llm.resilience import is_retryable
 
 
 # --- classification ---
@@ -75,254 +38,76 @@ def test_permanent_failures_are_not_retryable(message):
     assert not is_retryable(RuntimeError(message))
 
 
-# --- retry ---
+def test_a_permanent_marker_beats_a_transient_one_in_the_same_message():
+    """A rejected key often arrives in an envelope that also says
+    "connection". Retrying that spends the budget before the identical
+    failure, and never reaches the provider that would have answered."""
+    assert not is_retryable(RuntimeError("Connection error: 401 invalid api key"))
 
 
-def test_a_transient_failure_is_retried_on_the_same_provider():
-    model = FlakyModel("gemini", errors=[RuntimeError("429 rate limited")])
-
-    assert build(model).invoke("hi") == "gemini:ok"
-    assert model.calls == 2
-
-
-def test_retries_are_bounded_then_fall_through():
-    primary = FlakyModel("gemini", errors=[RuntimeError("429")] * 5)
-    backup = FlakyModel("openai")
-
-    assert build(primary, backup).invoke("hi") == "openai:ok"
-    assert primary.calls == 3, "attempts=3, then move on"
+# --- wiring ---
+#
+# These assert the three settings that decide whether the pair composes at all.
+# Each was wrong in an early draft, and none of them fails loudly: the agent
+# still runs, it just stops falling back.
 
 
-def test_backoff_grows_and_is_jittered():
-    slept = []
-    primary = FlakyModel("gemini", errors=[RuntimeError("429")] * 5)
-    backup = FlakyModel("openai")
+def _stack(**deps_kwargs):
+    from retail_agent.agent.middleware import _resilience
 
-    build(primary, backup, sleep=slept.append).invoke("hi")
-
-    assert len(slept) == 2, "one wait between each pair of attempts"
-    assert slept[1] > slept[0], "exponential"
-    assert all(0 < s < 10 for s in slept), "bounded"
+    return _resilience(_FakeDeps(**deps_kwargs))
 
 
-# --- fallback ---
+class _FakeDeps:
+    def __init__(self, *, fallbacks=(), attempts=3):
+        from retail_agent.config import Settings
+
+        self.llm_fallbacks = list(fallbacks)
+        self.settings = Settings(_env_file=None, llm_retry_attempts=attempts)
 
 
-def test_a_permanent_failure_skips_straight_to_the_next_provider():
-    primary = FlakyModel("gemini", errors=[RuntimeError("401 invalid api key")])
-    backup = FlakyModel("openai")
-
-    assert build(primary, backup).invoke("hi") == "openai:ok"
-    assert primary.calls == 1, "no point retrying a rejected key"
-
-
-def test_the_last_provider_failing_raises_the_last_error():
-    """Degrading to silence is worse than an error the CLI can explain."""
-    primary = FlakyModel("gemini", errors=[RuntimeError("401 bad key")])
-    backup = FlakyModel("ollama", errors=[RuntimeError("connection refused")] * 5)
-
-    with pytest.raises(Exception) as excinfo:
-        build(primary, backup).invoke("hi")
-
-    assert "refused" in str(excinfo.value)
-
-
-def test_structured_output_falls_back_too():
-    """Routing and planning go through with_structured_output, so a fallback
-    that only covered invoke would leave both unprotected."""
-
-    class Schema:
-        pass
-
-    primary = FlakyModel("gemini", errors=[RuntimeError("401")])
-    backup = FlakyModel("openai")
-
-    result = build(primary, backup).with_structured_output(Schema).invoke("hi")
-
-    assert result is Schema
-    assert backup.calls == 1
-
-
-# --- circuit breaker ---
-
-
-class Clock:
-    """A clock the test moves deliberately.
-
-    An iterator of timestamps couples the assertions to how many times the
-    implementation happens to read the clock, which is not behaviour worth
-    pinning.
-    """
-
-    def __init__(self):
-        self.seconds = 0.0
-
-    def __call__(self):
-        return self.seconds
-
-
-def test_the_breaker_opens_after_repeated_failures():
-    breaker = CircuitBreaker(threshold=2, cooldown_seconds=60, now=Clock())
-
-    breaker.record_failure("gemini")
-    assert breaker.is_open("gemini") is False, "one failure is not an outage"
-    breaker.record_failure("gemini")
-    assert breaker.is_open("gemini") is True
-
-
-def test_the_breaker_closes_after_the_cooldown():
-    clock = Clock()
-    breaker = CircuitBreaker(threshold=1, cooldown_seconds=60, now=clock)
-
-    breaker.record_failure("gemini")
-    assert breaker.is_open("gemini") is True
-
-    clock.seconds = 61
-    assert breaker.is_open("gemini") is False, "cooldown elapsed"
-
-
-def test_success_closes_the_breaker():
-    breaker = CircuitBreaker(threshold=2, cooldown_seconds=60, now=lambda: 0)
-
-    breaker.record_failure("gemini")
-    breaker.record_success("gemini")
-    breaker.record_failure("gemini")
-
-    assert breaker.is_open("gemini") is False, "the streak was broken"
-
-
-def test_an_open_provider_is_skipped_without_being_called():
-    """The point of the breaker: stop paying latency for a provider that is
-    known to be down."""
-    primary = FlakyModel("gemini", errors=[RuntimeError("503")] * 20)
-    backup = FlakyModel("openai")
-    resilient = build(primary, backup, breaker=CircuitBreaker(threshold=1, now=lambda: 0))
-
-    resilient.invoke("first")
-    calls_after_first = primary.calls
-    resilient.invoke("second")
-
-    assert primary.calls == calls_after_first, "not called again while open"
-    assert backup.calls == 2
-
-
-def test_every_provider_open_still_attempts_rather_than_giving_up():
-    """A breaker that can refuse every provider turns a slow agent into a dead
-    one. When nothing is available, try anyway."""
-    only = FlakyModel("gemini")
-    resilient = build(only, breaker=CircuitBreaker(threshold=0, now=lambda: 0))
-
-    assert resilient.invoke("hi") == "gemini:ok"
-
-
-# --- tool binding, which is how `create_agent` compiles ---------------------
-
-
-class ToolBindable(FlakyModel):
-    """A provider that records what it was bound to.
-
-    `FlakyModel` deliberately has no `bind_tools`, because most of this file is
-    about the calling behaviour. This subclass exists for the compile path.
-    """
-
-    def __init__(self, name, errors=(), answer="ok"):
-        super().__init__(name, errors=errors, answer=answer)
-        self.bound = None
-        self.settings = None
-
-    def bind_tools(self, tools, **kwargs):
-        bound = ToolBindable(f"{self.name}+tools", errors=self.errors, answer=self.answer)
-        bound.bound = list(tools)
-        self.bound = list(tools)
-        return bound
-
-    def bind(self, **kwargs):
-        bound = ToolBindable(f"{self.name}+bound", errors=self.errors, answer=self.answer)
-        bound.settings = dict(kwargs)
-        self.settings = dict(kwargs)
-        return bound
-
-
-def test_binding_tools_keeps_the_whole_chain():
-    """The bug this exists for: `create_agent` compiles by calling `bind_tools`,
-    and without it the agent raises `AttributeError` at the first model call.
-
-    Every offline test passed while that was true, because the doubles are bound
-    directly rather than through the chain. It took a live run to find.
-    """
-    primary, fallback = ToolBindable("a"), ToolBindable("b")
-    chain = ResilientChatModel([("a", primary), ("b", fallback)], sleep=lambda _: None)
-
-    bound = chain.bind_tools([print])
-
-    assert isinstance(bound, ResilientChatModel)
-    assert primary.bound == [print]
-    assert fallback.bound == [print], (
-        "a fallback that lost its tools is worse than the outage it recovers from"
+def test_fallback_wraps_retry_rather_than_the_other_way_round():
+    """Composed handlers run first-is-outermost. Fallback has to be outermost
+    so the retry budget is spent on one provider before moving to the next;
+    reversed, the first retry would restart the whole sweep."""
+    from langchain.agents.middleware import (
+        ModelFallbackMiddleware,
+        ModelRetryMiddleware,
     )
 
+    stack = _stack(fallbacks=[object()])
 
-def test_a_bound_chain_still_falls_back():
-    primary = ToolBindable("a", errors=[RuntimeError("503 unavailable")] * 3)
-    fallback = ToolBindable("b")
-    chain = ResilientChatModel([("a", primary), ("b", fallback)], sleep=lambda _: None)
-
-    assert chain.bind_tools([print]).invoke("hi") == "b+tools:ok"
+    assert isinstance(stack[0], ModelFallbackMiddleware)
+    assert isinstance(stack[1], ModelRetryMiddleware)
 
 
-def test_binding_settings_keeps_the_whole_chain():
-    """A subagent with no tools compiles through `bind`, not `bind_tools`.
-
-    `create_agent` only calls `bind_tools` when it has tools to bind; with an
-    empty tool list it calls `bind` instead. The report writer is exactly that
-    agent, so it was the one caller the chain had no method for, and it raised
-    `AttributeError` on the first live report.
-    """
-    primary, fallback = ToolBindable("a"), ToolBindable("b")
-    chain = ResilientChatModel([("a", primary), ("b", fallback)], sleep=lambda _: None)
-
-    bound = chain.bind(temperature=0)
-
-    assert isinstance(bound, ResilientChatModel)
-    assert primary.settings == {"temperature": 0}
-    assert fallback.settings == {"temperature": 0}, (
-        "a fallback bound differently from the primary answers differently"
-    )
+def test_retries_are_exhausted_before_the_next_provider_is_tried():
+    """`max_retries` counts attempts after the first, so three total attempts
+    is two retries. Off by one, the last configured attempt never happens."""
+    assert _stack()[0].max_retries == 2
+    assert _stack(attempts=1)[0].max_retries == 0
 
 
-def test_a_settings_bound_chain_still_falls_back():
-    primary = ToolBindable("a", errors=[RuntimeError("503 unavailable")] * 3)
-    fallback = ToolBindable("b")
-    chain = ResilientChatModel([("a", primary), ("b", fallback)], sleep=lambda _: None)
-
-    assert chain.bind(temperature=0).invoke("hi") == "b+bound:ok"
-
-
-def test_the_breaker_survives_binding():
-    """A fresh breaker per binding would forget an outage on every turn, and the
-    agent rebuilds its model binding once per turn."""
-    breaker = CircuitBreaker(threshold=1)
-    breaker.record_failure("a")
-    chain = ResilientChatModel(
-        [("a", ToolBindable("a")), ("b", ToolBindable("b"))],
-        breaker=breaker,
-        sleep=lambda _: None,
-    )
-
-    assert chain.bind_tools([print]).invoke("hi") == "b+tools:ok", "skipped the open provider"
+def test_an_exhausted_retry_raises_rather_than_answering():
+    """The default is "continue", which returns an AIMessage describing the
+    failure. That reads as an answer, and the fallback middleware outside it
+    would never see a failure to fall back from."""
+    assert _stack()[0].on_failure == "error"
 
 
+def test_only_transient_failures_are_retried():
+    """The default retries every exception, which spends the whole budget on a
+    rejected API key."""
+    assert _stack()[0].retry_on is is_retryable
 
-def test_an_unknown_attribute_raises_rather_than_reaching_the_primary():
-    """There is no delegating `__getattr__`, on purpose.
 
-    One existed briefly, forwarding anything it did not implement to the primary
-    provider — which would have let a langchain that calls `stream()` silently
-    skip the fallback chain while the resilience claim stayed in the README.
-    Raising is what surfaced the missing `bind`: a delegator would have compiled
-    the report writer onto the primary alone and reported no error at all.
-    """
-    chain = ResilientChatModel([("a", ToolBindable("a"))])
+def test_a_single_provider_gets_retries_but_no_fallback_layer():
+    """The common deployment. Nothing should wrap the model for a fallback
+    that does not exist — but `llm_retry_attempts` still has to be honoured,
+    which is exactly what the old chain-of-one existed to guarantee."""
+    from langchain.agents.middleware import ModelRetryMiddleware
 
-    with pytest.raises(AttributeError):
-        chain.stream
+    stack = _stack(fallbacks=[])
+
+    assert len(stack) == 1
+    assert isinstance(stack[0], ModelRetryMiddleware)

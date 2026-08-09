@@ -42,7 +42,7 @@ from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
 from retail_agent.knowledge.trios import live_trios
 from retail_agent.llm.errors import describe_llm_error
-from retail_agent.llm.provider import MissingCredentialsError, build_llm
+from retail_agent.llm.provider import MissingCredentialsError, build_models
 from retail_agent.obs.tracing import configure_tracing
 from retail_agent.store.preferences import preferred
 
@@ -71,12 +71,12 @@ def run_chat(args) -> int:
     console = Console()
     settings = get_settings()
 
-    # Must happen before build_llm: the tracer reads os.environ when the model
-    # is constructed, not when it is called.
+    # Must happen before the models are built: the tracer reads os.environ when
+    # a model is constructed, not when it is called.
     tracing = configure_tracing(settings)
 
     try:
-        llm = build_llm(settings)
+        llm, llm_fallbacks = build_models(settings)
     except MissingCredentialsError as err:
         render_error(console, str(err))
         return 1
@@ -94,7 +94,13 @@ def run_chat(args) -> int:
         return 1
 
     try:
-        deps = build_deps(settings, llm=llm, source=source, console=console)
+        deps = build_deps(
+            settings,
+            llm=llm,
+            llm_fallbacks=llm_fallbacks,
+            source=source,
+            console=console,
+        )
     except Exception as err:
         # Anything here is a wiring fault, not the user's environment. Saying
         # "check your GCP project" would send them to fix something that is

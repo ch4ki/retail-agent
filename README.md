@@ -271,7 +271,7 @@ scan, the agent and the CLI; the saved-reports library with its
 delete-confirmation gate, audit trail and `/undo`; turn traces with `/trace`,
 `/trace <id>` and `/metrics`; the eval suite and its release gate; and the full
 resilience story — bounded self-correction, an empty result that says what it
-probably means, and a provider fallback chain with a circuit breaker.
+probably means, and a provider fallback chain with classified retries.
 
 Also built: personas, so a non-developer can change the agent's tone without a
 deploy — versioned, attributed, read per model call, and provably unable to

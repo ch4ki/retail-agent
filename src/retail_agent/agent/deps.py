@@ -29,6 +29,10 @@ class AgentDeps:
     policy: PiiPolicy
     reports: ReportStore
     traces: TraceStore
+    # The rest of the provider chain, in order. Empty is the ordinary single-
+    # provider deployment: `ModelFallbackMiddleware` is only added when this is
+    # non-empty, so nothing wraps the model for a fallback that does not exist.
+    llm_fallbacks: list[BaseChatModel] = field(default_factory=list)
     personas: PersonaStore | None = None
     preferences: PreferenceStore | None = None
     definitions: DefinitionStore | None = None

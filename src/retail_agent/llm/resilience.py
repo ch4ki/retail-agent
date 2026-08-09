@@ -1,24 +1,22 @@
-"""Retry, fall back, and stop calling a provider that is down.
+"""Which provider failures are worth waiting for.
 
-The brief asks for resilience to third-party downtime. A single-vendor agent
-cannot answer that honestly, so provider selection is a chain rather than a
-setting: transient failures are retried on the current provider, permanent ones
-move straight to the next, and a provider that keeps failing is skipped
-entirely until a cooldown elapses.
+The brief asks for resilience to third-party downtime, and a single-vendor
+agent cannot answer that honestly. The mechanism now lives in langchain's own
+middleware — `ModelRetryMiddleware` retries the current provider,
+`ModelFallbackMiddleware` moves to the next one — assembled in
+`agent/middleware.py`. What is left here is the one judgement those middlewares
+cannot make for us: whether a given error is worth a second attempt.
 
-The whole chain sits behind the four methods a caller actually uses —
-`invoke`, `with_structured_output`, `bind_tools` and `bind` — so nothing in
-`agent/` knows this exists.
+This file used to hold a `ResilientChatModel` that wrapped the whole chain
+behind a hand-written model interface. It was deleted because that interface
+was never finished: `bind_tools`, then `bind`, then `ainvoke` each surfaced as
+an `AttributeError` in front of a user, because every offline test drove the
+sync path and langchain kept reaching for a method the wrapper had not thought
+to implement. Middleware is handed the model rather than pretending to be one,
+so that failure mode is gone rather than fixed.
 """
 
 from __future__ import annotations
-
-import logging
-import random
-import time
-from collections.abc import Callable, Sequence
-
-log = logging.getLogger(__name__)
 
 # Worth waiting for: the provider is up but busy, slow, or briefly unreachable.
 _TRANSIENT = (
@@ -61,169 +59,12 @@ def is_retryable(err: Exception) -> bool:
     Permanent markers are checked first: a rejected key often arrives in an
     envelope that also mentions a connection, and retrying it just adds latency
     before the identical failure.
+
+    Passed to `ModelRetryMiddleware` as its `retry_on` predicate. The default
+    there is to retry every exception, which would spend the whole budget on a
+    bad API key before falling over to a provider that might have worked.
     """
     lowered = str(err).lower()
     if any(marker in lowered for marker in _PERMANENT):
         return False
     return any(marker in lowered for marker in _TRANSIENT)
-
-
-class CircuitBreaker:
-    """Consecutive failures per provider, with a cooldown.
-
-    Deliberately never refuses every provider — see `ResilientChatModel`. A
-    breaker that can leave nothing available converts a degraded agent into a
-    dead one, which is a worse failure than a slow call.
-    """
-
-    def __init__(
-        self,
-        *,
-        threshold: int = 3,
-        cooldown_seconds: float = 60.0,
-        now: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._threshold = threshold
-        self._cooldown = cooldown_seconds
-        self._now = now
-        self._failures: dict[str, int] = {}
-        self._opened_at: dict[str, float] = {}
-
-    def record_failure(self, provider: str) -> None:
-        self._failures[provider] = self._failures.get(provider, 0) + 1
-        if self._failures[provider] >= max(1, self._threshold):
-            self._opened_at[provider] = self._now()
-
-    def record_success(self, provider: str) -> None:
-        self._failures.pop(provider, None)
-        self._opened_at.pop(provider, None)
-
-    def is_open(self, provider: str) -> bool:
-        opened = self._opened_at.get(provider)
-        if opened is None:
-            return False
-        if self._now() - opened >= self._cooldown:
-            # Cooldown elapsed: let one call through and judge by its outcome.
-            self._opened_at.pop(provider, None)
-            self._failures.pop(provider, None)
-            return False
-        return True
-
-
-class ResilientChatModel:
-    """A chat model backed by an ordered chain of providers."""
-
-    def __init__(
-        self,
-        providers: Sequence[tuple[str, object]],
-        *,
-        attempts: int = 3,
-        breaker: CircuitBreaker | None = None,
-        sleep: Callable[[float], None] = time.sleep,
-    ) -> None:
-        if not providers:
-            raise ValueError("a chain needs at least one provider")
-        self._providers = list(providers)
-        self._attempts = max(1, attempts)
-        self._breaker = breaker or CircuitBreaker()
-        self._sleep = sleep
-
-    @property
-    def primary(self):
-        return self._providers[0][1]
-
-    def invoke(self, messages, **kwargs):
-        return self._call(lambda model: model.invoke(messages, **kwargs))
-
-    def with_structured_output(self, schema, **kwargs):
-        """Anything asking for a typed reply goes through here."""
-        return _ResilientStructured(self, schema, kwargs)
-
-    def bind_tools(self, tools, **kwargs):
-        """Every provider bound, not just the primary.
-
-        A chain whose fallbacks lost their tools would fail over to a model that
-        cannot call anything. The breaker is shared, so an outage is not
-        forgotten each time the agent rebinds.
-        """
-        return self._rebind(lambda model: model.bind_tools(tools, **kwargs))
-
-    def bind(self, **kwargs):
-        """The compile path for an agent with no tools.
-
-        `create_agent` calls `bind_tools` only when it has tools to bind and
-        `bind` otherwise, so the report writer — the one subagent that queries
-        nothing — reaches this instead. Same rule as above: every provider gets
-        the settings, or a fallback answers under a different configuration than
-        the primary it replaced.
-        """
-        return self._rebind(lambda model: model.bind(**kwargs))
-
-    def _rebind(self, bind):
-        return ResilientChatModel(
-            [(name, bind(model)) for name, model in self._providers],
-            attempts=self._attempts,
-            breaker=self._breaker,
-            sleep=self._sleep,
-        )
-
-    def _call(self, run):
-        last_error: Exception | None = None
-
-        for name, model in self._usable():
-            for attempt in range(1, self._attempts + 1):
-                try:
-                    result = run(model)
-                except Exception as err:  # provider SDKs raise their own types
-                    last_error = err
-                    self._breaker.record_failure(name)
-
-                    if not is_retryable(err) or attempt == self._attempts:
-                        log.warning(
-                            "provider %s failed (%s); %s",
-                            name,
-                            type(err).__name__,
-                            "trying the next provider" if self._has_next(name) else "no fallback left",
-                        )
-                        break
-
-                    delay = self._backoff(attempt)
-                    log.info("provider %s transient failure; retrying in %.1fs", name, delay)
-                    self._sleep(delay)
-                else:
-                    self._breaker.record_success(name)
-                    return result
-
-        assert last_error is not None  # _usable() never yields nothing
-        raise last_error
-
-    def _usable(self):
-        """Closed providers first; if the breaker has opened every one of them,
-        fall back to trying them all rather than failing without a call."""
-        closed = [p for p in self._providers if not self._breaker.is_open(p[0])]
-        return closed or self._providers
-
-    def _has_next(self, name: str) -> bool:
-        names = [n for n, _ in self._providers]
-        return names.index(name) < len(names) - 1
-
-    @staticmethod
-    def _backoff(attempt: int) -> float:
-        """Exponential with jitter, so retries from concurrent turns spread out
-        instead of arriving together and re-triggering the same rate limit."""
-        ceiling = min(BASE_DELAY_SECONDS * (2 ** (attempt - 1)), MAX_DELAY_SECONDS)
-        return ceiling * (0.5 + random.random() / 2)
-
-
-class _ResilientStructured:
-    def __init__(self, resilient: ResilientChatModel, schema, kwargs: dict) -> None:
-        self._resilient = resilient
-        self._schema = schema
-        self._kwargs = kwargs
-
-    def invoke(self, messages, **kwargs):
-        return self._resilient._call(
-            lambda model: model.with_structured_output(
-                self._schema, **self._kwargs
-            ).invoke(messages, **kwargs)
-        )

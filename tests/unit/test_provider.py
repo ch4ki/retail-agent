@@ -62,9 +62,8 @@ def test_error_message_names_the_fix():
 def only_model(settings):
     """The single constructed provider, unwrapped.
 
-    `build_llm` wraps every chain in `ResilientChatModel` now, including a chain
-    of one. These tests are about how a provider is constructed, not about what
-    wraps it, so they ask the layer that constructs it.
+    These tests are about how one provider is constructed, not about the chain
+    it sits in, so they ask the layer that constructs it.
     """
     from retail_agent.llm.provider import build_chain
 
@@ -116,29 +115,30 @@ def test_default_cap_is_generous_but_bounded():
 # --- the fallback chain ---
 
 
-def test_no_fallbacks_configured_still_gets_retries():
-    """This asserted the opposite until a live run disproved it.
+def test_no_fallbacks_configured_produces_a_bare_model():
+    """`build_llm` returns an ordinary model again, and that is now safe.
 
-    The reasoning was that wrapping a chain of one "only adds a layer to read
-    through when something breaks". But the layer is what stops it breaking:
-    retry and the circuit breaker have nothing to do with fallback, so
-    returning the bare model left `llm_retry_attempts` configured and ignored
-    for the commonest deployment there is. One transient `Connection error.`
-    then cost 37 of 47 cases in a 47-case eval.
+    It used to wrap even a chain of one, because retry lived in the wrapper:
+    returning the bare model left `llm_retry_attempts` configured and silently
+    ignored for the commonest deployment there is, and one transient
+    `Connection error.` cost 37 of 47 cases in a live eval.
 
-    An extra frame in a traceback is the cheaper price.
+    Retry is middleware now, so it no longer depends on what this returns. The
+    guarantee that a single provider still retries moved with it — see
+    `test_resilience.py::test_a_single_provider_gets_retries_but_no_fallback_layer`.
     """
-    from retail_agent.llm.provider import build_llm
-    from retail_agent.llm.resilience import ResilientChatModel
+    from retail_agent.llm.provider import build_models
 
     settings = Settings(_env_file=None, llm_provider="ollama", llm_fallbacks="")
 
-    assert isinstance(build_llm(settings), ResilientChatModel)
+    model, fallbacks = build_models(settings)
+
+    assert fallbacks == []
+    assert hasattr(model, "invoke"), "a plain chat model, not a wrapper"
 
 
 def test_a_configured_fallback_produces_a_chain():
-    from retail_agent.llm.provider import build_chain, build_llm
-    from retail_agent.llm.resilience import ResilientChatModel
+    from retail_agent.llm.provider import build_chain, build_models
 
     settings = Settings(
         _env_file=None,
@@ -147,10 +147,11 @@ def test_a_configured_fallback_produces_a_chain():
         llm_fallbacks="ollama",
     )
 
-    model = build_llm(settings)
+    model, fallbacks = build_models(settings)
 
-    assert isinstance(model, ResilientChatModel)
     assert [name for name, _ in build_chain(settings)] == ["gemini", "ollama"]
+    assert model.__class__.__name__ == "ChatGoogleGenerativeAI", "primary first"
+    assert len(fallbacks) == 1, "the rest of the chain, for the middleware"
 
 
 def test_a_fallback_without_credentials_is_dropped_not_fatal():
@@ -234,24 +235,22 @@ def _openrouter_only(monkeypatch):
     monkeypatch.setenv("OPENROUTER_MODEL", "some/model")
 
 
-def test_a_single_provider_still_retries(monkeypatch):
-    """`build_llm` used to return the bare model whenever the chain had one
-    entry, so `llm_retry_attempts` was configured and silently ignored for
-    anyone running a single provider — which is most deployments.
+def test_a_single_provider_deployment_has_nothing_to_fall_back_to(monkeypatch):
+    """The default deployment: one provider, no fallbacks to hand the
+    middleware, and — per `_resilience` — no fallback layer built for it.
 
-    Measured: a transient `Connection error.` ended the turn instead of being
-    retried, and one blip cost 37 of 47 eval cases in a live run. `_TRANSIENT`
-    has always listed "connection"; nothing was ever asking it.
+    Retries still apply. That used to be this file's problem, because retry
+    lived in what `build_llm` returned; it is asserted against the middleware
+    now, in `test_resilience.py`.
     """
     from retail_agent.config import Settings
-    from retail_agent.llm.provider import build_llm
-    from retail_agent.llm.resilience import ResilientChatModel
+    from retail_agent.llm.provider import build_models
 
     _openrouter_only(monkeypatch)
 
-    model = build_llm(Settings(_env_file=None))
+    _, fallbacks = build_models(Settings(_env_file=None))
 
-    assert isinstance(model, ResilientChatModel)
+    assert fallbacks == []
 
 
 def test_a_single_provider_chain_is_still_one_provider(monkeypatch):

@@ -17,7 +17,7 @@ from retail_agent.agent.supervisor import build_agent
 from retail_agent.bootstrap import build_deps
 from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
-from retail_agent.llm.provider import build_llm
+from retail_agent.llm.provider import build_models
 from retail_agent.obs.tracing import configure_tracing
 
 
@@ -28,9 +28,14 @@ def build_studio_graph(*, llm=None, source=None):
     settings = get_settings()
     configure_tracing(settings)
 
+    # An injected model is taken alone: a test that supplies its own model is
+    # not asking for the configured providers to be constructed behind it.
+    primary, fallbacks = (llm, []) if llm is not None else build_models(settings)
+
     deps = build_deps(
         settings,
-        llm=llm if llm is not None else build_llm(settings),
+        llm=primary,
+        llm_fallbacks=fallbacks,
         source=source if source is not None else BigQuerySource(settings),
     )
     return build_agent(deps, TurnCapture(user_id="studio", session_id="studio"))

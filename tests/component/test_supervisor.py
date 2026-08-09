@@ -5,6 +5,10 @@ model, what never runs, and what is left behind for `/trace` afterwards.
 """
 
 import pandas as pd
+import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import MemorySaver
 
 from retail_agent.agent.capture import TurnCapture
@@ -148,19 +152,128 @@ def test_describe_schema_costs_no_query_and_says_what_it_found(make_deps, source
     assert capture.events[0][2] == "4 table(s)"
 
 
-def test_a_turn_runs_through_the_provider_chain(make_deps):
-    """The agent is compiled over `ResilientChatModel`, not over a raw model.
+class DeadProvider(BaseChatModel):
+    """A provider that is down, and counts how often it was asked."""
 
-    This is the test that would have caught `bind_tools` being missing, and it
-    is also the evidence for there being no `__getattr__` on the chain: a whole
-    turn needs `bind_tools` and `invoke` and nothing else.
+    message: str = "503 Service Unavailable"
+
+    def __init__(self, message: str = "503 Service Unavailable", **kwargs):
+        super().__init__(message=message, **kwargs)
+        object.__setattr__(self, "calls", [])
+
+    @property
+    def _llm_type(self) -> str:
+        return "dead"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.calls.append(messages)
+        raise RuntimeError(self.message)
+
+
+def with_dead_primary(deps, message="503 Service Unavailable", attempts=3):
+    """Put a dead provider in front, and the working double behind it."""
+    dead = DeadProvider(message)
+    object.__setattr__(deps, "llm_fallbacks", [deps.llm])
+    object.__setattr__(deps, "llm", dead)
+    object.__setattr__(
+        deps, "settings", deps.settings.model_copy(update={"llm_retry_attempts": attempts})
+    )
+    return dead
+
+
+class FlakyProvider(DeadProvider):
+    """Down for the first call, up for the rest."""
+
+    answer: str = "Hello."
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.calls.append(messages)
+        if len(self.calls) == 1:
+            raise RuntimeError(self.message)
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content=self.answer))]
+        )
+
+
+def test_a_transient_failure_is_retried_on_the_same_provider(make_deps):
+    """The single-provider deployment, which is most of them.
+
+    No fallbacks here on purpose: this is the case that had no protection at
+    all when retry lived in a wrapper that `build_llm` only applied to chains
+    of more than one. A transient `Connection error.` ended the turn, and one
+    blip cost 37 of 47 cases in a live eval run.
+
+    This is the only test that actually waits out a backoff — one delay of
+    `BASE_DELAY_SECONDS`, jittered.
     """
-    from retail_agent.llm.resilience import ResilientChatModel
-
-    deps = make_deps(script=["Hello."])
-    chain = ResilientChatModel([("primary", deps.llm), ("fallback", deps.llm)])
-    object.__setattr__(deps, "llm", chain)
+    deps = make_deps(script=[])
+    flaky = FlakyProvider()
+    object.__setattr__(deps, "llm", flaky)
 
     answer, _ = run(deps, "hello")
 
     assert answer == "Hello."
+    assert len(flaky.calls) == 2, "retried on the same provider, not abandoned"
+    assert deps.llm_fallbacks == [], "and with nothing to fall back to"
+
+
+def test_a_dead_primary_falls_over_to_the_fallback(make_deps):
+    """The brief's resilience claim, end to end through a compiled agent.
+
+    `attempts=1` so the turn does not actually sit through the backoff; that
+    the backoff is configured at all is asserted in `test_resilience.py`.
+    """
+    deps = make_deps(script=["Hello."])
+    dead = with_dead_primary(deps, attempts=1)
+
+    answer, _ = run(deps, "hello")
+
+    assert answer == "Hello.", "the fallback answered"
+    assert len(dead.calls) == 1
+
+
+def test_a_rejected_key_reaches_the_fallback_without_retrying(make_deps):
+    """`is_retryable` wired into the middleware, observed rather than asserted.
+
+    Retries are left at their configured 3 here: a 401 is permanent, so the
+    turn should move on after one attempt. If the classifier were not passed
+    through, this would take the full budget — and the two backoff waits are
+    what makes that visible as a slow test rather than a silent one.
+    """
+    deps = make_deps(script=["Hello."])
+    dead = with_dead_primary(deps, message="401 invalid api key")
+
+    answer, _ = run(deps, "hello")
+
+    assert answer == "Hello."
+    assert len(dead.calls) == 1, "a rejected key is not worth a second attempt"
+
+
+@pytest.mark.asyncio
+async def test_an_async_turn_falls_over_too(make_deps):
+    """The same turn, driven the way LangGraph Server drives it.
+
+    `create_agent` compiles its model node as a sync/async pair and LangGraph
+    picks the half that matches how the graph was entered. Every other test in
+    this file — like the CLI and the evals — calls `invoke`, so the async half
+    was never run offline. That is how the chain object that used to sit here
+    shipped without an `ainvoke`: an `AttributeError` on the first model call
+    of every Studio turn, with a green suite behind it.
+
+    Middleware carries both halves itself, which is the point of the swap.
+    """
+    deps = make_deps(script=["Hello."])
+    dead = with_dead_primary(deps, attempts=1)
+
+    capture = TurnCapture(user_id="exec", session_id="s1", question="hello")
+    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+    result = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": "hello"}]},
+        {"configurable": {"thread_id": "s1"}},
+    )
+
+    assert final_text(result) == "Hello."
+    assert len(dead.calls) == 1

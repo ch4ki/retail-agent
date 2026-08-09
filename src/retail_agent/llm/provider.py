@@ -1,9 +1,8 @@
 """Provider factory. One env var switches the whole agent between backends.
 
-`build_llm` returns the primary alone when nothing else is configured, and a
-`ResilientChatModel` over the whole chain when it is — so the retry, fallback
-and circuit-breaker behaviour is opt-in per deployment and invisible to every
-caller either way.
+This builds models and nothing else. Retry and fallback are middleware now
+(`agent/middleware.py`), so what a caller gets back here is an ordinary
+`BaseChatModel` — the primary — plus the fallbacks the middleware needs.
 """
 
 from __future__ import annotations
@@ -22,30 +21,26 @@ class MissingCredentialsError(RuntimeError):
 
 
 def build_llm(settings: Settings) -> BaseChatModel:
-    """The model the agent calls: one provider, or a chain over several.
+    """The primary provider — the model every call starts at.
 
-    Always wrapped, including for a single provider. This used to return the
-    bare model whenever the chain had one entry — the reasoning being that with
-    nothing to fall back to there was nothing to do. But retry and the circuit
-    breaker are not about fallback, so `llm_retry_attempts` was configured and
-    silently ignored for the most common deployment there is.
+    Retry no longer lives in the object this returns, so a caller that only
+    takes this is calling one provider once. That is fine for the agent, whose
+    middleware supplies both, and it is the accepted cost for the one direct
+    model call outside a graph (`knowledge/proposals.py`), which already treats
+    any failure as "no options to offer".
+    """
+    return build_chain(settings)[0][1]
 
-    Measured: a transient `Connection error.` ended the turn rather than being
-    retried, and a single blip cost 37 of 47 cases in a live eval run.
-    `_TRANSIENT` has always listed "connection". Nothing was asking it.
+
+def build_models(settings: Settings) -> tuple[BaseChatModel, list[BaseChatModel]]:
+    """The primary and its fallbacks, from one pass over the chain.
+
+    Both come back together because building them separately would construct
+    the primary twice — two client objects, and the missing-credential warnings
+    for every fallback logged twice with it.
     """
     chain = build_chain(settings)
-
-    from retail_agent.llm.resilience import CircuitBreaker, ResilientChatModel
-
-    return ResilientChatModel(
-        chain,
-        attempts=settings.llm_retry_attempts,
-        breaker=CircuitBreaker(
-            threshold=settings.llm_breaker_threshold,
-            cooldown_seconds=settings.llm_breaker_cooldown_seconds,
-        ),
-    )
+    return chain[0][1], [model for _, model in chain[1:]]
 
 
 def build_chain(settings: Settings) -> list[tuple[str, BaseChatModel]]:
