@@ -81,3 +81,48 @@ def test_langsmith_agrees_that_tracing_is_on():
     configure_tracing(settings(langsmith_tracing=True, langsmith_api_key="ls-key"))
 
     assert utils.tracing_is_enabled() is True
+
+
+def test_context_metrics_ignore_turns_that_were_never_measured():
+    """A turn that died never reached the recorder and carries 0. Counting
+    those would drag the median below the number a threshold is set against."""
+    from retail_agent.obs.traces import TraceRecord, compute_metrics
+
+    def trace(turn_id, tokens, status="ok"):
+        return TraceRecord(
+            turn_id=turn_id,
+            session_id="s1",
+            owner_id="exec",
+            question="q",
+            intent="analyze",
+            status=status,
+            context_tokens=tokens,
+        )
+
+    metrics = compute_metrics(
+        [trace("a", 1_000), trace("b", 3_000), trace("c", 0, "failed")]
+    )
+
+    assert metrics["context_tokens_max"] == 3_000
+    assert metrics["context_tokens_p50"] == 2_000
+
+
+def test_context_metrics_are_zero_with_nothing_measured():
+    """`/metrics` must not divide by zero on a session of failed turns."""
+    from retail_agent.obs.traces import TraceRecord, compute_metrics
+
+    metrics = compute_metrics(
+        [
+            TraceRecord(
+                turn_id="a",
+                session_id="s1",
+                owner_id="exec",
+                question="q",
+                intent="chat",
+                status="failed",
+            )
+        ]
+    )
+
+    assert metrics["context_tokens_max"] == 0
+    assert metrics["context_tokens_p50"] == 0

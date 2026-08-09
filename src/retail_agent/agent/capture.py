@@ -228,4 +228,6 @@ class TurnCapture:
             trios=list(self.trio_ids),
             assumptions=list(self.assumed_terms),
             preference_changes=list(self.preference_changes),
+            report_ids=[report.report_id for report in self.reports_written],
+            context_tokens=self.context_tokens,
         )

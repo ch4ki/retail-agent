@@ -32,6 +32,8 @@ def _record(turn_id="t1", **overrides):
                 "bytes_billed": 2048,
             }
         ],
+        report_ids=["7f3a"],
+        context_tokens=4_200,
     )
     base.update(overrides)
     return TraceRecord(**base)
@@ -153,6 +155,16 @@ class TraceStoreContract:
         metrics = store.metrics(owner_id="dana")
 
         assert metrics["first_pass_validity"] == 0.5
+
+    def test_reports_and_context_size_survive_a_round_trip(self, store):
+        """A deep dive into a bad report starts from the turn that wrote it, and
+        the summarisation threshold is tuned from the context figures."""
+        store.record(_record("ctx1"))
+
+        read_back = store.get(owner_id="dana", turn_id="ctx1")
+
+        assert read_back.report_ids == ["7f3a"]
+        assert read_back.context_tokens == 4_200
 
     def test_node_latency_is_reported_per_node(self, store):
         """Three samples, so the median is an observation rather than a mean of

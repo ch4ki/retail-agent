@@ -150,3 +150,15 @@ def test_context_tokens_default_to_zero():
     """A failed turn never reaches the recorder, so the field must read as
     'not measured' rather than as a missing attribute."""
     assert TurnCapture().context_tokens == 0
+
+
+def test_report_ids_reach_the_trace_but_bodies_do_not():
+    """A trace must not become a second disclosure path, and a deep dive still
+    needs to find which report a turn produced."""
+    capture = TurnCapture(user_id="exec")
+    capture.record_report("7f3a", "Q1 Denim", "Revenue was $412,880.", show=True)
+
+    trace = capture.to_trace("Written and saved.")
+
+    assert trace.report_ids == ["7f3a"]
+    assert "412,880" not in repr(trace)

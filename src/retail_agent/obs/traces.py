@@ -43,6 +43,14 @@ class TraceRecord:
     trios: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     preference_changes: list[tuple[str, str]] = field(default_factory=list)
+    # Which reports this turn produced. Ids and nothing else: the body lives in
+    # the report store, and putting it here would make the trace the second
+    # disclosure path the module docstring rules out.
+    report_ids: list[str] = field(default_factory=list)
+    # The thread's size after this turn. The supervisor's messages are re-sent
+    # whole on every model call, so this is the figure a summarisation trigger
+    # has to be set against — and it was previously invisible.
+    context_tokens: int = 0
 
 
 @runtime_checkable
@@ -69,6 +77,8 @@ def compute_metrics(traces: list[TraceRecord]) -> dict:
             "redactions": 0,
             "bytes_billed": 0,
             "node_p50_ms": {},
+            "context_tokens_max": 0,
+            "context_tokens_p50": 0,
         }
 
     with_sql = [t for t in traces if t.attempts]
@@ -85,6 +95,11 @@ def compute_metrics(traces: list[TraceRecord]) -> dict:
         for node, duration, _ in trace.events:
             by_node.setdefault(node, []).append(duration)
 
+    # Only turns that were actually measured. A turn that raised never reached
+    # the recorder and carries 0; averaging those in would understate the size
+    # the threshold must clear.
+    measured = [t.context_tokens for t in traces if t.context_tokens]
+
     return {
         "turns": len(traces),
         "first_pass_validity": _ratio(len(first_clean), len(with_sql)),
@@ -94,6 +109,8 @@ def compute_metrics(traces: list[TraceRecord]) -> dict:
         "node_p50_ms": {
             node: int(statistics.median(times)) for node, times in sorted(by_node.items())
         },
+        "context_tokens_max": max(measured, default=0),
+        "context_tokens_p50": int(statistics.median(measured)) if measured else 0,
     }
 
 
@@ -169,6 +186,8 @@ class PostgresTraceStore:
             # puts them back. Writing them as a dict instead would lose the
             # order two changes to the same field were made in.
             "preference_changes": [list(pair) for pair in trace.preference_changes],
+            "report_ids": list(trace.report_ids),
+            "context_tokens": trace.context_tokens,
         }
         with self._sessions.begin() as session:
             session.execute(
@@ -256,6 +275,8 @@ class PostgresTraceStore:
             preference_changes=[
                 (pair[0], pair[1]) for pair in (row.preference_changes or [])
             ],
+            report_ids=list(row.report_ids or []),
+            context_tokens=row.context_tokens or 0,
         )
 
 
