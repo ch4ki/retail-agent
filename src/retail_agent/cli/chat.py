@@ -35,6 +35,7 @@ from retail_agent.cli.render import (
     render_persona,
     render_personas,
     render_preferences,
+    render_reports,
     render_trace,
     render_trios,
 )
@@ -344,6 +345,11 @@ def _answer(console, deps, saver, user, session_id, question):
 
     answer = final_text(result)
     render_answer(console, answer, capture, prefs=preferred(deps.preferences, user))
+    # Printed here rather than left to the model, for the same reason the
+    # preference note below is: what the executive was told is not something to
+    # leave to whether the model remembered to say it. Below the answer, which
+    # is the covering sentence introducing it.
+    render_reports(console, capture.reports_written)
     for field, value in capture.preference_changes:
         # Said by the CLI rather than left to the model: a setting that changed
         # without the reader being told is the failure this design cares about.

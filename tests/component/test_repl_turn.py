@@ -136,3 +136,27 @@ def test_a_failing_turn_still_leaves_a_trace(make_deps, traces):
     printed = console.text()
     assert trace.turn_id in printed, "the id on the error panel has to resolve"
     assert traces.get(owner_id="dana", turn_id=trace.turn_id) is not None
+
+
+def test_a_failed_turn_prints_no_report(make_deps, monkeypatch):
+    """The error panel is what the executive gets. A report printed underneath
+    it would claim the turn produced something the turn did not finish."""
+    import io
+
+    from rich.console import Console
+
+    from retail_agent.cli import chat as chat_module
+
+    console = Console(record=True, width=100, file=io.StringIO())
+    deps = make_deps(script=[])
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("provider is down")
+
+    monkeypatch.setattr(chat_module, "build_agent", explode)
+
+    chat_module._answer(console, deps, None, "exec", "s1", "write me a report")
+
+    printed = console.export_text()
+    assert "Something went wrong" in printed
+    assert "Saved as" not in printed

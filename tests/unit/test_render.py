@@ -9,12 +9,13 @@ import io
 
 from rich.console import Console
 
-from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.capture import TurnCapture, WrittenReport
 from retail_agent.cli.render import (
     render_answer,
     render_confirmation,
     render_error,
     render_metrics,
+    render_reports,
     render_trace,
 )
 from retail_agent.safety.frame import MaskedFrame
@@ -192,3 +193,39 @@ def test_metrics_name_the_window_they_are_over():
     printed = text(console)
     assert "last 7 turn(s)" in printed
     assert "run_sql" in printed
+
+
+def written(title="Q1 Denim", body="## Summary\nDenim fell 11.8% in Q1.", show=True):
+    return WrittenReport(report_id="7f3a", title=title, body=body, show=show)
+
+
+def test_the_report_is_printed_whole_with_where_it_was_saved():
+    """The executive asked for a report. Printing a filing receipt instead is
+    the failure this exists to fix."""
+    console = recorder()
+
+    render_reports(console, [written()])
+
+    printed = text(console)
+    assert "Denim fell 11.8% in Q1." in printed
+    assert "7f3a" in printed
+    assert "Q1 Denim" in printed
+
+
+def test_a_hidden_draft_is_not_printed():
+    """`show_to_executive=False` is the model saying the executive did not ask
+    to read this one. The CLI obeys rather than second-guessing it."""
+    console = recorder()
+
+    render_reports(console, [written(body="Interim numbers.", show=False)])
+
+    assert "Interim numbers." not in text(console)
+
+
+def test_a_turn_that_wrote_nothing_prints_nothing():
+    """Most turns write no report. A blank line under every answer is noise."""
+    console = recorder()
+
+    render_reports(console, [])
+
+    assert text(console).strip() == ""

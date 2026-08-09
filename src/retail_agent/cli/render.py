@@ -36,6 +36,27 @@ def render_answer(console: Console, answer: str, capture=None, prefs=None) -> No
         console.print(f"[dim]{' · '.join(footnotes)}[/dim]")
 
 
+def render_reports(console: Console, reports) -> None:
+    """The reports this turn wrote, printed by the CLI rather than by the model.
+
+    These are the capture's bytes — the same ones that were scanned and stored
+    — so what the executive reads and what the library holds cannot differ.
+    Leaving it to the model meant a requested report often arrived as a filing
+    receipt, and a reproduced one could quietly lose a figure.
+
+    The `show` filter is here rather than at the call site so that it is a
+    behaviour with a test, instead of a condition a test would have to restate.
+    """
+    for report in reports:
+        if not report.show:
+            continue
+        console.print()
+        console.print(Markdown(report.body))
+        console.print(
+            f"[dim]Saved as '{report.title}' (id {report.report_id}) · /reports[/dim]"
+        )
+
+
 def render_confirmation(console: Console, description: str) -> None:
     """Show exactly what is about to be deleted, in full.
 
