@@ -32,6 +32,7 @@ from langchain.agents.middleware import (
     dynamic_prompt,
 )
 from langchain_core.messages import AIMessage
+from langchain_core.messages.utils import count_tokens_approximately
 
 from retail_agent.agent.capture import PendingDefinition, TurnCapture
 from retail_agent.agent.deps import AgentDeps
@@ -374,6 +375,13 @@ def _recorder(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
 
     @after_agent
     def record(state, runtime) -> None:
+        # What this turn will cost every later turn: the thread is re-sent
+        # whole on each model call. Approximate on purpose — an exact count is
+        # a provider round trip per turn, spent to tune one setting.
+        capture.context_tokens = count_tokens_approximately(
+            state.get("messages", []) or []
+        )
+
         message = _last_ai_message(state)
         answer = message_text(message).strip() if message is not None else ""
 

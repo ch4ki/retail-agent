@@ -187,6 +187,8 @@ def test_metrics_name_the_window_they_are_over():
             "redactions": 3,
             "bytes_billed": 1_234,
             "node_p50_ms": {"run_sql": 120},
+            "context_tokens_max": 0,
+            "context_tokens_p50": 0,
         },
     )
 
@@ -229,3 +231,52 @@ def test_a_turn_that_wrote_nothing_prints_nothing():
     render_reports(console, [])
 
     assert text(console).strip() == ""
+
+
+def test_the_trace_names_the_reports_the_turn_produced():
+    """The report body no longer passes through the answer, so without this a
+    turn that wrote one leaves no link to it."""
+    from retail_agent.obs.traces import TraceRecord
+
+    console = recorder()
+    render_trace(
+        console,
+        TraceRecord(
+            turn_id="t1",
+            session_id="s1",
+            owner_id="exec",
+            question="write me a report",
+            intent="report_op",
+            status="ok",
+            answer="Written and saved.",
+            report_ids=["7f3a"],
+            context_tokens=4_200,
+        ),
+    )
+
+    printed = text(console)
+    assert "7f3a" in printed
+    assert "4200" in printed.replace(",", "")
+
+
+def test_metrics_report_how_large_conversations_actually_get():
+    """A maximum as well as a median: the threshold has to clear the worst
+    session, not the typical one."""
+    console = recorder()
+    render_metrics(
+        console,
+        {
+            "turns": 3,
+            "first_pass_validity": 1.0,
+            "self_correction_rate": 0.0,
+            "redactions": 0,
+            "bytes_billed": 0,
+            "node_p50_ms": {},
+            "context_tokens_max": 9_000,
+            "context_tokens_p50": 4_000,
+        },
+    )
+
+    printed = text(console).replace(",", "")
+    assert "9000" in printed
+    assert "4000" in printed

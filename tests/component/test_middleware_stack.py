@@ -80,3 +80,25 @@ def test_the_summary_prompt_forbids_restating_figures():
     assert "NEXT STEPS" not in CONVERSATION_SUMMARY_PROMPT
     assert "do not restate any figure" in CONVERSATION_SUMMARY_PROMPT
     assert "{messages}" in CONVERSATION_SUMMARY_PROMPT
+
+
+def test_the_recorder_measures_the_thread_it_just_finished(make_deps):
+    """The threshold in Settings was set against a number nothing measured.
+    This is that number."""
+    deps = make_deps()
+    capture = TurnCapture(user_id="exec")
+    # `_resilience` appends after the recorder, and with no fallbacks
+    # configured it still appends `ModelRetryMiddleware` — so the recorder is
+    # second-to-last, not last.
+    recorder = supervisor_middleware(deps, capture)[-2]
+    state = {
+        "messages": [
+            HumanMessage(content="How did denim do in Q1?"),
+            AIMessage(content="Denim revenue fell 11.8% in Q1."),
+        ]
+    }
+
+    recorder.after_agent(state, None)
+
+    assert capture.context_tokens > 0
+    assert deps.traces.recent(owner_id="exec")[0].context_tokens == capture.context_tokens

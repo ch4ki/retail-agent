@@ -133,7 +133,7 @@ def render_trace(console: Console, trace) -> None:
     console.print(
         f"[bold]turn {trace.turn_id}[/bold]  [dim]{trace.intent} · {trace.status} · "
         f"{trace.duration_ms} ms · {trace.redactions} masked · "
-        f"{trace.bytes_billed} bytes[/dim]"
+        f"{trace.bytes_billed} bytes · {trace.context_tokens} ctx tokens[/dim]"
     )
     console.print(f"[dim]asked:[/dim] {trace.question}")
     if trace.answer:
@@ -153,6 +153,10 @@ def _render_reasons(console: Console, trace) -> None:
     """
     if trace.trios:
         console.print(f"[dim]definitions used:[/dim] {', '.join(trace.trios)}")
+    if trace.report_ids:
+        # Where a deep dive into a disputed report starts. The body is in the
+        # library, not here — this is the pointer to it.
+        console.print(f"[dim]reports written:[/dim] {', '.join(trace.report_ids)}")
     if trace.assumptions:
         console.print(f"[yellow]assumed:[/yellow] {', '.join(trace.assumptions)}")
     for field, value in trace.preference_changes:
@@ -223,6 +227,8 @@ def render_metrics(console: Console, metrics: dict) -> None:
     table.add_row("self-correction succeeded", f"{metrics['self_correction_rate']:.0%}")
     table.add_row("personal-data values masked", str(metrics["redactions"]))
     table.add_row("bytes billed", f"{metrics['bytes_billed']:,}")
+    table.add_row("context tokens (max)", f"{metrics['context_tokens_max']:,}")
+    table.add_row("context tokens (median)", f"{metrics['context_tokens_p50']:,}")
     console.print(f"[bold]Over the last {turns} turn(s)[/bold]")
     console.print(table)
 
