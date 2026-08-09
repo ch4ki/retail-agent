@@ -53,6 +53,8 @@ def answer_from_capture(
         # a term meant *before* it spent a query, and the sequence is the only
         # place that shows.
         tools=tuple(name for name, _, _ in capture.events),
+        report_ids=tuple(r.report_id for r in capture.reports_written),
+        report_bodies=tuple(r.body for r in capture.reports_written),
     )
 
 

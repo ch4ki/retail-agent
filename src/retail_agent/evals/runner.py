@@ -51,6 +51,12 @@ class AgentAnswer:
     # an answer was reached and not only whether it was right — specifically
     # whether the agent asked what a term meant before querying against a guess.
     tools: tuple[str, ...] = field(default_factory=tuple)
+    # Reports this turn produced. Carried because the supervisor's answer is a
+    # covering line now — a case that scored only `text` would pass on a report
+    # that was never written. Bodies as well as ids, so a case can score the
+    # content without a store round trip.
+    report_ids: tuple[str, ...] = field(default_factory=tuple)
+    report_bodies: tuple[str, ...] = field(default_factory=tuple)
 
 
 Ask = Callable[[str], AgentAnswer]

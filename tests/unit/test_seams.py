@@ -88,3 +88,18 @@ def test_the_tools_are_reported_in_the_order_they_ran():
         "analyst",
         "run_sql",
     )
+
+
+def test_a_generated_report_reaches_the_eval():
+    """The supervisor's answer is now a covering line, so a report case that
+    scored `text` would score the covering line and pass on an empty report."""
+    from retail_agent.agent.capture import TurnCapture
+    from retail_agent.agent.seams import answer_from_capture
+
+    capture = TurnCapture(user_id="eval", session_id="s1")
+    capture.record_report("7f3a", "Q1 Denim", "## Summary\nDenim fell.", show=True)
+
+    answer = answer_from_capture("Written and saved.", capture)
+
+    assert answer.report_ids == ("7f3a",)
+    assert answer.report_bodies == ("## Summary\nDenim fell.",)
