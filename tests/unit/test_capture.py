@@ -105,13 +105,13 @@ def test_the_trace_carries_what_actually_changed_the_answer():
     capture = TurnCapture(user_id="exec", question="who is loyal?")
     capture.record_definitions(["trio-loyalty"])
     capture.record_assumptions(["loyal"])
-    capture.preference_changes.append(("answer_format", "bullets"))
+    capture.preference_changes.append(("added", "show prices in euros"))
 
     trace = capture.to_trace("Nine of them.")
 
     assert trace.trios == ["trio-loyalty"]
     assert trace.assumptions == ["loyal"]
-    assert trace.preference_changes == [("answer_format", "bullets")]
+    assert trace.preference_changes == [("added", "show prices in euros")]
 
 
 def test_a_long_answer_is_truncated_in_the_trace():

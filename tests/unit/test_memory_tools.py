@@ -38,12 +38,12 @@ def tools_for(question):
     return {fn.__name__: fn for fn in build_memory_tools(deps, capture)}, deps, capture
 
 
-def test_a_quoted_preference_becomes_the_default():
+def test_a_quoted_preference_is_saved_in_the_users_own_words():
     tools, deps, _ = tools_for("just keep it brief, I don't need the workings")
 
-    tools["note_preference"]("depth", "summary", "keep it brief")
+    tools["note_preference"]("keep answers brief", "keep it brief")
 
-    assert deps.preferences.get(user_id="dana").depth == "summary"
+    assert deps.preferences.list_notes(user_id="dana") == ["keep answers brief"]
 
 
 def test_the_change_is_recorded_so_the_interface_can_announce_it():
@@ -51,51 +51,121 @@ def test_the_change_is_recorded_so_the_interface_can_announce_it():
     reads this rather than trusting the model to mention what it changed."""
     tools, _, capture = tools_for("keep it brief")
 
-    tools["note_preference"]("depth", "summary", "keep it brief")
+    tools["note_preference"]("keep answers brief", "keep it brief")
 
-    assert capture.preference_changes == [("depth", "summary")]
+    assert capture.preference_changes == [("added", "keep answers brief")]
 
 
 def test_evidence_the_user_never_typed_changes_nothing():
     """The check that separates "they asked for this" from "the model thinks
-    they want this" — and this question is about the data, not the layout."""
+    they want this" — and this question is about the data, not the layout.
+
+    This guard is the whole reason the tool may act rather than propose, so it
+    outlived the enum validation that used to sit above it."""
     tools, deps, capture = tools_for("why are sales down in Texas?")
 
-    answer = tools["note_preference"]("depth", "summary", "keep it brief")
+    answer = tools["note_preference"]("keep answers brief", "keep it brief")
 
     assert "exact words" in answer
-    assert deps.preferences.get(user_id="dana").depth == "standard"
+    assert deps.preferences.list_notes(user_id="dana") == []
     assert capture.preference_changes == []
 
 
-def test_a_value_the_setting_does_not_accept_is_refused():
-    tools, deps, capture = tools_for("make it snappy")
+def test_a_preference_already_saved_is_not_saved_twice():
+    tools, deps, capture = tools_for("keep it brief")
+    tools["note_preference"]("keep answers brief", "keep it brief")
 
-    answer = tools["note_preference"]("depth", "snappy", "make it snappy")
+    answer = tools["note_preference"]("Keep answers brief", "keep it brief")
 
-    assert "not a value" in answer
-    assert deps.preferences.get(user_id="dana").depth == "standard"
+    assert "already" in answer.lower()
+    assert deps.preferences.list_notes(user_id="dana") == ["keep answers brief"]
+    assert capture.preference_changes == [("added", "keep answers brief")], "announced once"
+
+
+def test_a_preference_past_the_cap_is_refused_with_a_way_out():
+    from retail_agent.store.preferences import MAX_NOTES
+
+    tools, deps, capture = tools_for("keep it brief")
+    deps.preferences.replace_notes(
+        user_id="dana", notes=[f"preference {i}" for i in range(MAX_NOTES)]
+    )
+
+    answer = tools["note_preference"]("keep answers brief", "keep it brief")
+
+    assert "forget" in answer.lower(), "says how to make room"
+    assert len(deps.preferences.list_notes(user_id="dana")) == MAX_NOTES
     assert capture.preference_changes == []
 
 
-def test_a_store_failure_costs_the_default_not_the_turn():
-    """Losing a layout setting must not lose the answer it was about."""
+def test_an_over_long_preference_is_refused_rather_than_cut_down():
+    """A truncated note is a preference the user did not write."""
+    from retail_agent.store.preferences import MAX_NOTE_CHARS
+
+    tools, deps, capture = tools_for("keep it brief")
+
+    answer = tools["note_preference"]("x" * (MAX_NOTE_CHARS + 1), "keep it brief")
+
+    assert "shorter" in answer.lower()
+    assert deps.preferences.list_notes(user_id="dana") == []
+    assert capture.preference_changes == []
+
+
+def test_a_store_failure_costs_the_preference_not_the_turn():
+    """Losing a preference must not lose the answer it was about."""
     _, deps, capture = tools_for("keep it brief")
 
     class Broken:
-        def get(self, **_):
+        def list_notes(self, **_):
             raise RuntimeError("postgres is down")
 
-        def set(self, **_):
+        def replace_notes(self, **_):
             raise RuntimeError("postgres is down")
 
     object.__setattr__(deps, "preferences", Broken())
     tools = {fn.__name__: fn for fn in build_memory_tools(deps, capture)}
 
-    answer = tools["note_preference"]("depth", "summary", "keep it brief")
+    answer = tools["note_preference"]("keep answers brief", "keep it brief")
 
     assert "could not save" in answer.lower()
     assert capture.preference_changes == []
+
+
+def test_forgetting_removes_the_note_and_announces_it():
+    tools, deps, capture = tools_for("stop showing prices in euros")
+    tools["note_preference"]("show prices in euros", "prices in euros")
+
+    answer = tools["forget_preference"]("show prices in euros")
+
+    assert "removed" in answer.lower()
+    assert deps.preferences.list_notes(user_id="dana") == []
+    assert capture.preference_changes[-1] == ("removed", "show prices in euros")
+
+
+def test_forgetting_something_that_was_never_saved_says_so():
+    tools, deps, capture = tools_for("stop showing prices in euros")
+
+    answer = tools["forget_preference"]("show prices in euros")
+
+    assert "nothing" in answer.lower()
+    assert capture.preference_changes == []
+
+
+def test_editing_a_preference_is_a_forget_then_a_note():
+    """There is no edit tool, so this is the path the model has to take —
+    and both halves have to reach the announcement."""
+    tools, deps, capture = tools_for("make that under two sentences, not three")
+    deps.preferences.replace_notes(user_id="dana", notes=["keep answers under three sentences"])
+
+    tools["forget_preference"]("keep answers under three sentences")
+    tools["note_preference"]("keep answers under two sentences", "under two sentences")
+
+    assert deps.preferences.list_notes(user_id="dana") == [
+        "keep answers under two sentences"
+    ]
+    assert capture.preference_changes == [
+        ("removed", "keep answers under three sentences"),
+        ("added", "keep answers under two sentences"),
+    ]
 
 
 def test_a_definition_is_remembered_under_the_term_the_analyst_looks_up():

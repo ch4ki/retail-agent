@@ -84,8 +84,9 @@ class TurnCapture:
     assumed_terms: list[str] = field(default_factory=list)
     redactions: int = 0
     calls: int = 0
-    # (field, value) pairs `note_preference` applied this turn. Held here so the
-    # CLI reports them itself rather than trusting the model to mention it.
+    # `(action, note)` pairs the preference tools applied this turn, where
+    # action is "added" or "removed". Held here so the CLI reports them itself
+    # rather than trusting the model to mention it.
     preference_changes: list[tuple[str, str]] = field(default_factory=list)
     status: str = "ok"
     pending: PendingDelete | None = None
