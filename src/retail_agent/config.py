@@ -124,6 +124,18 @@ class Settings(BaseSettings):
     # April" resolves to something queryable. Bounded: history grows for a whole
     # session, and every turn pays for it in tokens.
 
+    # --- Context ---
+    # The supervisor's thread is re-sent whole on every model call and grows
+    # about 311 tokens a turn — measured at ~32k after 100 turns, so on a
+    # large-window model this never fires. It is here for small local models,
+    # where an 8k window is exhausted around turn 25, and for very long
+    # sittings. Explicit tokens rather than a fraction of the window: the
+    # window is not discoverable across all four providers, and a fraction
+    # would silently mean something different for each. 0 disables it.
+    context_summarize_trigger_tokens: int = 30_000
+    # Roughly the last five turns, at about four messages each.
+    context_keep_messages: int = 20
+
     @property
     def resolved_model(self) -> str:
         """Model for the active provider."""

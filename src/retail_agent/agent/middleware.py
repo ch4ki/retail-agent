@@ -25,6 +25,7 @@ from langchain.agents.middleware import (
     ModelFallbackMiddleware,
     ModelRetryMiddleware,
     PIIMiddleware,
+    SummarizationMiddleware,
     ToolCallLimitMiddleware,
     ToolErrorMiddleware,
     after_agent,
@@ -35,6 +36,7 @@ from langchain_core.messages import AIMessage
 from retail_agent.agent.capture import PendingDefinition, TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.prompts import (
+    CONVERSATION_SUMMARY_PROMPT,
     PERSONA_DEFAULT,
     SAFETY_RULES,
     SUPERVISOR_PROMPT,
@@ -104,15 +106,25 @@ def supervisor_middleware(
     still runs — it finds nothing in the store, records the assumption and tells
     the model to choose and disclose.
     """
-    return [
-        _prompt(deps, capture),
-        *_pii(),
+    stack: list[AgentMiddleware] = [_prompt(deps, capture), *_pii()]
+
+    # After `_pii()`, and that placement is the guarantee rather than a
+    # preference. Both hook `before_model` and those run in list order; the
+    # summariser writes what it produces back into state, so running it first
+    # would read unredacted warehouse output and persist it — turning a
+    # transient exposure into a stored one.
+    summarizer = _summarization(deps)
+    if summarizer is not None:
+        stack.append(summarizer)
+
+    stack += [
         _approval_gate(deps, capture, pause_for_definitions=pause_for_definitions),
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS, exit_behavior="end"),
         ToolErrorMiddleware(on_error=describe_failure),
         _recorder(deps, capture),
         *_resilience(deps),
     ]
+    return stack
 
 
 def _resilience(deps: AgentDeps) -> list[AgentMiddleware]:
@@ -219,6 +231,31 @@ def _prompt(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
         return supervisor_system_prompt(deps, capture)
 
     return supervisor_prompt
+
+
+def _summarization(deps: AgentDeps) -> AgentMiddleware | None:
+    """Compaction for a session that outgrows the model's window.
+
+    Returns None when disabled rather than a middleware that never fires: a
+    stack is the only place this agent's control flow is visible, and something
+    listed there that cannot act makes it a worse description of the turn.
+
+    Narrative only — `CONVERSATION_SUMMARY_PROMPT` forbids restating figures.
+    A summariser that retypes "$412,880" produces, on the next turn, a number
+    the model believes came from a query, which is precisely what `SAFETY_RULES`
+    exists to prevent. Re-running the query is cheaper than reporting a wrong
+    number.
+    """
+    trigger = deps.settings.context_summarize_trigger_tokens
+    if trigger <= 0:
+        return None
+
+    return SummarizationMiddleware(
+        model=deps.llm,
+        trigger=("tokens", trigger),
+        keep=("messages", deps.settings.context_keep_messages),
+        summary_prompt=CONVERSATION_SUMMARY_PROMPT,
+    )
 
 
 def _approval_gate(

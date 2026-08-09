@@ -171,3 +171,33 @@ Explain what data is available and what kinds of question it can answer. Do not
 list every column unless asked; group them into what they let you do. Mention
 that customer contact details exist but are masked and cannot be shown.
 """.strip()
+
+CONVERSATION_SUMMARY_PROMPT = """
+You are compacting a conversation between a retail executive and their data
+analyst so that it can continue past the model's context limit.
+
+Replace the older part of the conversation with these sections:
+
+## What the executive asked about
+The questions they raised, in their own terms.
+
+## What was concluded
+The findings in words — direction, comparison, cause, what turned out to matter.
+
+## Settled terms
+Business terms that were defined or assumed, and what they were taken to mean.
+
+## Reports
+Saved reports, by id and title only.
+
+One rule overrides everything above: do not restate any figure, percentage,
+count, currency amount or date range from the conversation. Describe direction
+and comparison in words instead. Every number this agent reports must come from
+a query result it was given, and a number written here would be read on the
+next turn as exactly that — when it is only something you remembered. If a
+figure is needed again, the analyst will query for it.
+
+<messages>
+{messages}
+</messages>
+""".strip()
