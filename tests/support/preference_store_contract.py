@@ -56,3 +56,30 @@ class PreferenceStoreContract:
         store.set(user_id="dana", depth="summary")
 
         assert store.get(user_id="dana").depth == "summary"
+
+    # --- the free-text notes list ---
+
+    def test_an_unknown_user_has_no_notes(self, store):
+        assert store.list_notes(user_id="nobody") == []
+
+    def test_replaced_notes_read_back_in_order(self, store):
+        store.replace_notes(user_id="dana", notes=["show prices in euros", "keep it short"])
+
+        assert store.list_notes(user_id="dana") == [
+            "show prices in euros",
+            "keep it short",
+        ]
+
+    def test_notes_do_not_leak_between_users(self, store):
+        store.replace_notes(user_id="dana", notes=["show prices in euros"])
+        store.replace_notes(user_id="sam", notes=["always show the SQL"])
+
+        assert store.list_notes(user_id="dana") == ["show prices in euros"]
+        assert store.list_notes(user_id="sam") == ["always show the SQL"]
+
+    def test_replacing_with_an_empty_list_clears_them(self, store):
+        store.replace_notes(user_id="dana", notes=["show prices in euros"])
+
+        store.replace_notes(user_id="dana", notes=[])
+
+        assert store.list_notes(user_id="dana") == []

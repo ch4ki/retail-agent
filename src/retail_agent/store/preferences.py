@@ -19,6 +19,7 @@ the false one.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol, runtime_checkable
 
@@ -30,6 +31,14 @@ DEPTHS: tuple[Depth, ...] = ("summary", "standard", "deep")
 
 MIN_TABLE_ROWS = 1
 MAX_TABLE_ROWS = 100
+
+# The prompt block is read on every model call, so the list has to be bounded.
+# Rejecting past the cap rather than dropping the oldest note keeps the user in
+# charge of which preference is the one they stopped caring about.
+MAX_NOTES = 20
+# Long enough for a sentence, short enough that a pasted paragraph is refused
+# rather than silently cut down to something they did not ask for.
+MAX_NOTE_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -93,10 +102,15 @@ class PreferenceStore(Protocol):
 
     def set(self, *, user_id: str, **changes) -> Preferences: ...
 
+    def list_notes(self, *, user_id: str) -> list[str]: ...
+
+    def replace_notes(self, *, user_id: str, notes: list[str]) -> None: ...
+
 
 class InMemoryPreferenceStore:
     def __init__(self) -> None:
         self._by_user: dict[str, Preferences] = {}
+        self._notes: dict[str, list[str]] = {}
 
     def get(self, *, user_id: str) -> Preferences:
         return self._by_user.get(user_id, DEFAULT_PREFERENCES)
@@ -108,6 +122,12 @@ class InMemoryPreferenceStore:
         updated = replace(self.get(user_id=user_id), **supplied)
         self._by_user[user_id] = updated
         return updated
+
+    def list_notes(self, *, user_id: str) -> list[str]:
+        return list(self._notes.get(user_id, []))
+
+    def replace_notes(self, *, user_id: str, notes: list[str]) -> None:
+        self._notes[user_id] = list(notes)
 
 
 def preferred(store: PreferenceStore | None, user_id: str) -> Preferences:
@@ -195,6 +215,106 @@ class PostgresPreferenceStore:
                 )
             )
         return merged
+
+    def list_notes(self, *, user_id: str) -> list[str]:
+        from sqlalchemy import select
+
+        from retail_agent.store.models import PreferenceRow
+
+        with self._sessions() as session:
+            row = session.scalar(
+                select(PreferenceRow).where(PreferenceRow.user_id == user_id)
+            )
+        return list(row.notes) if row is not None else []
+
+    def replace_notes(self, *, user_id: str, notes: list[str]) -> None:
+        """The whole list, every time.
+
+        A list of twenty short strings is small enough that rewriting it costs
+        nothing, and it means there is one write path rather than an insert, a
+        delete and an ordering column to keep them straight.
+        """
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        from retail_agent.store.models import PreferenceRow
+
+        stored = list(notes)
+        with self._sessions.begin() as session:
+            session.execute(
+                pg_insert(PreferenceRow)
+                .values(user_id=user_id, notes=stored)
+                .on_conflict_do_update(
+                    index_elements=["user_id"], set_={"notes": stored}
+                )
+            )
+
+
+def _normalised(note: str) -> str:
+    """Trimmed, with runs of whitespace collapsed.
+
+    Both a stored note and a note being matched against one go through this, so
+    "keep it  short" and "keep it short" are the same preference rather than two.
+    """
+    return " ".join(note.split())
+
+
+def notes_for(store: PreferenceStore | None, user_id: str) -> list[str]:
+    """This user's notes, or none. Never raises — see the module docstring."""
+    if store is None:
+        return []
+    try:
+        return list(store.list_notes(user_id=user_id))
+    except Exception:
+        return []
+
+
+def add_note(store: PreferenceStore, *, user_id: str, note: str) -> str:
+    """Save one note, and say what happened.
+
+    Reads through the store rather than through `notes_for`: a read that failed
+    must not be mistaken for a user with no notes, because writing on top of
+    that would erase the list. The caller catches.
+
+    Dedup is checked before the cap, so someone at twenty notes repeating one
+    they already have is told it is already saved rather than told they are full.
+    """
+    text = _normalised(note)
+    if not text:
+        return "empty"
+    if len(text) > MAX_NOTE_CHARS:
+        return "too_long"
+
+    notes = list(store.list_notes(user_id=user_id))
+    if any(_normalised(existing).lower() == text.lower() for existing in notes):
+        return "duplicate"
+    if len(notes) >= MAX_NOTES:
+        return "full"
+
+    store.replace_notes(user_id=user_id, notes=[*notes, text])
+    return "added"
+
+
+def remove_note(store: PreferenceStore, *, user_id: str, note: str) -> bool:
+    """Drop the matching note. True when one went."""
+    target = _normalised(note).lower()
+    notes = list(store.list_notes(user_id=user_id))
+    kept = [n for n in notes if _normalised(n).lower() != target]
+    if len(kept) == len(notes):
+        return False
+    store.replace_notes(user_id=user_id, notes=kept)
+    return True
+
+
+def preference_block(notes: Sequence[str]) -> str:
+    """The prompt-side half: a request, in the user's own words.
+
+    Nothing here is enforced. Free text can only be asked for, and saying so
+    plainly is better than a block that reads like a setting the code applies.
+    """
+    if not notes:
+        return ""
+    lines = "\n".join(f"- {note}" for note in notes)
+    return f"This person has asked for:\n{lines}\nFollow these where they apply."
 
 
 def build_preference_store(settings, on_degraded=None) -> PreferenceStore:

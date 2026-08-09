@@ -199,6 +199,9 @@ class PreferenceRow(Base):
     show_attempt_footnote: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )
+    notes: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
