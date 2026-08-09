@@ -277,20 +277,18 @@ def test_the_breaker_survives_binding():
     assert chain.bind_tools([print]).invoke("hi") == "b+tools:ok", "skipped the open provider"
 
 
-def test_a_descriptive_attribute_comes_from_the_primary():
-    """Langchain reads `profile` and `_llm_type` off a model. Those describe a
-    provider, not a chain, so the primary is the right answer."""
-    primary = ToolBindable("a")
-    primary.profile = {"max_tokens": 1}
-    chain = ResilientChatModel([("a", primary), ("b", ToolBindable("b"))])
 
-    assert chain.profile == {"max_tokens": 1}
+def test_an_unknown_attribute_raises_rather_than_reaching_the_primary():
+    """There is no delegating `__getattr__`, on purpose.
 
-
-def test_a_private_attribute_is_not_invented():
-    """`__getattr__` delegating everything would make `hasattr(chain, '__deepcopy__')`
-    true and break copying in ways that are very hard to trace back to here."""
+    One existed briefly, forwarding anything it did not implement to the primary
+    provider — which would have let a langchain that calls `stream()` silently
+    skip the fallback chain while the resilience claim stayed in the README.
+    Instrumenting a real compiled agent showed langchain reads nothing off the
+    chain but `invoke` and `bind_tools`, so the delegator was covering a case
+    that does not occur and hiding one that would matter.
+    """
     chain = ResilientChatModel([("a", ToolBindable("a"))])
 
     with pytest.raises(AttributeError):
-        chain._not_a_real_attribute
+        chain.stream

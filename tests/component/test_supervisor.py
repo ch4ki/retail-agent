@@ -155,3 +155,21 @@ def test_describe_schema_costs_no_query_and_says_what_it_found(make_deps, source
     assert source.executed == [], "answering what data exists must cost nothing"
     assert "order_items" in rendered
     assert capture.events[0][2] == "4 table(s)"
+
+
+def test_a_turn_runs_through_the_provider_chain(make_deps):
+    """The agent is compiled over `ResilientChatModel`, not over a raw model.
+
+    This is the test that would have caught `bind_tools` being missing, and it
+    is also the evidence for there being no `__getattr__` on the chain: a whole
+    turn needs `bind_tools` and `invoke` and nothing else.
+    """
+    from retail_agent.llm.resilience import ResilientChatModel
+
+    deps = make_deps(script=["Hello."])
+    chain = ResilientChatModel([("primary", deps.llm), ("fallback", deps.llm)])
+    object.__setattr__(deps, "llm", chain)
+
+    answer, _ = run(deps, "hello")
+
+    assert answer == "Hello."

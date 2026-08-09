@@ -63,36 +63,6 @@ def read_baseline(path: str | None) -> float | None:
         return None
 
 
-def run_compare(args) -> int:
-    """Put two `--json` reports side by side.
-
-    Reads only what `eval` already writes, so the two arms never have to run in
-    the same process — or on the same day.
-    """
-    console = Console()
-    from retail_agent.evals.compare import compare_runs, load_run, render_comparison
-
-    runs = []
-    for path in (args.left, args.right):
-        try:
-            with open(path) as handle:
-                runs.append(load_run(json.load(handle)))
-        except (OSError, ValueError, KeyError, TypeError) as err:
-            console.print(f"[red]Could not read {path}: {err}[/red]")
-            return 1
-
-    comparison = compare_runs(
-        runs[0],
-        runs[1],
-        left_name=getattr(args, "left_name", None) or "before",
-        right_name=getattr(args, "right_name", None) or "after",
-    )
-    # Plain print rather than rich markup: SQL in the disagreement list contains
-    # brackets that rich would read as style tags and swallow.
-    print(render_comparison(comparison))
-    return 0
-
-
 def run_evals(args) -> int:
     console = Console()
     settings = get_settings()
