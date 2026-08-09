@@ -202,3 +202,51 @@ def test_there_is_no_save_report_tool(make_deps):
 
     assert "save_report" not in names
     assert "report_writer" in names
+
+
+def asker(deps, capture):
+    return {fn.__name__: fn for fn in build_subagents(deps, capture)}["ask_about_report"]
+
+
+def test_a_report_is_answered_from_its_stored_body(make_deps, reports):
+    """The supervisor has only an id. If this did not load the body, the
+    executive could never ask anything about a report they had saved."""
+    saved = reports.save(
+        owner_id="exec",
+        session_id="s1",
+        title="Q1 Denim",
+        body="## Action items\n1. Audit Texas inventory depth.",
+    )
+    deps = make_deps(script=["Audit Texas inventory depth."])
+    capture = TurnCapture(user_id="exec", session_id="s1")
+
+    answer = asker(deps, capture)(report_id=saved.id, question="what were the actions?")
+
+    assert "Audit Texas" in answer
+    assert "Audit Texas inventory depth." in deps.llm.prompts[0]
+
+
+def test_another_users_report_is_not_readable(make_deps, reports):
+    """Ownership is a property of the store's query, not of the caller. A bare
+    id must not be enough."""
+    saved = reports.save(
+        owner_id="someone-else", session_id="s9", title="Theirs", body="Secret."
+    )
+    deps = make_deps(script=[])
+    capture = TurnCapture(user_id="exec", session_id="s1")
+
+    answer = asker(deps, capture)(report_id=saved.id, question="what does it say?")
+
+    assert "Secret" not in answer
+    assert "list_reports" in answer
+
+
+def test_a_missing_report_costs_no_model_call(make_deps):
+    """An empty script raises if the subagent is built, so this asserts the
+    early return rather than the wording."""
+    deps = make_deps(script=[])
+    capture = TurnCapture(user_id="exec", session_id="s1")
+
+    answer = asker(deps, capture)(report_id="nope", question="?")
+
+    assert "No report nope" in answer

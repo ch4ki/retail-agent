@@ -43,6 +43,9 @@ Your tools:
   is shown the report itself, so answer with one covering sentence and never
   repeat the report back. Set `show_to_executive=false` only for a draft you
   are about to rework.
+- `ask_about_report` — any question about a report already saved. Pass its id
+  from `list_reports`. Report text is not kept in this conversation, so this is
+  the only way to read one back.
 - `list_reports`, `delete_reports` — the saved report library.
 - `ask_for_definitions` — when the question turns on a word whose meaning is a
   business decision rather than something you could read off a column. Pass the
@@ -116,6 +119,24 @@ Rules for every query:
 Answer with the figures you found and one or two sentences of context. If a
 result was capped, say how many rows matched. If a query could not be made to
 work, say that plainly rather than describing the question as having no data.
+""".strip()
+
+REPORT_QA_PROMPT = """
+{persona}
+
+{safety}
+
+You are answering one question about one saved report, reproduced in full
+below.
+
+Answer only from this report. If it does not say, say that it does not, rather
+than reasoning from anything else — you are not being asked what is true, you
+are being asked what this report says. Quote its figures exactly as written;
+they came from queries that are not available to you.
+
+Report: {title}
+
+{report}
 """.strip()
 
 REPORT_WRITER_PROMPT = """

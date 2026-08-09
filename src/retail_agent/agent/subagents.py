@@ -28,6 +28,7 @@ from retail_agent.agent.middleware import analyst_middleware
 from retail_agent.agent.prompts import (
     ANALYST_PROMPT,
     PERSONA_DEFAULT,
+    REPORT_QA_PROMPT,
     REPORT_WRITER_PROMPT,
     SAFETY_RULES,
 )
@@ -148,7 +149,44 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 f"({len(report.body)} chars).\n{shown}"
             )
 
-    return [analyst, report_writer]
+    def ask_about_report(report_id: str, question: str) -> str:
+        """Answer a question about a report the executive has saved.
+
+        Use this for anything about an existing report — what it concluded,
+        what its action items were, what it says about a region. Get the id
+        from `list_reports`. Report text is not kept in this conversation, so
+        this is the only way to read one.
+        """
+        with capture.step("ask_about_report") as step:
+            # Owner-scoped by the store's own query, so an id guessed or
+            # carried over from another session reads nothing.
+            report = deps.reports.get(
+                owner_id=capture.user_id, report_id=report_id
+            )
+            if report is None:
+                step.detail = f"no report {report_id}"
+                return (
+                    f"No report {report_id} in your library. Use list_reports "
+                    f"to see what is saved."
+                )
+
+            step.detail = f"{report.id}, {len(report.body)} chars"
+            agent = create_agent(
+                model=deps.llm,
+                tools=[],
+                system_prompt=REPORT_QA_PROMPT.format(
+                    persona=active_body(deps.personas) or PERSONA_DEFAULT,
+                    safety=SAFETY_RULES,
+                    title=report.title,
+                    report=report.body,
+                ),
+            )
+            result = agent.invoke(
+                {"messages": [{"role": "user", "content": question}]}
+            )
+            return final_text(result) or "I could not find that in the report."
+
+    return [analyst, report_writer, ask_about_report]
 
 
 def report_writer_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
