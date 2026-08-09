@@ -54,7 +54,7 @@ HELP = """
   /metrics first-pass SQL validity, self-correction, latency per step
   /trios   the analyst definitions the agent answers from
   /definitions what you told it terms mean; forget <term> to be asked again
-  /prefs   answer format, depth, table size; accept|decline a suggestion
+  /prefs   answer format, depth, table size
   /persona list|show|activate <name> — change the tone, no restart
   /quit    exit (/exit works too)
 
@@ -182,18 +182,13 @@ def _repl(console, deps, saver, user, session_id) -> int:
         last_trace = (
             _answer(console, deps, saver, user, session_id, question) or last_trace
         )
-        _offer_proposal(console, deps, user)
 
 
 def _prefs(console, deps, user, command) -> None:
-    """`/prefs` shows them; `/prefs <setting> <value>` changes one;
-    `/prefs accept|decline` answers a suggestion the agent made."""
+    """`/prefs` shows them; `/prefs <setting> <value>` changes one."""
     from retail_agent.store.preferences import PreferenceError, coerce, preferred
 
     parts = command.split()
-    if len(parts) == 2 and parts[1] in {"accept", "decline"}:
-        _answer_proposal(console, deps, user, accepted=parts[1] == "accept")
-        return
     if len(parts) == 1:
         render_preferences(console, preferred(deps.preferences, user))
         return
@@ -211,46 +206,6 @@ def _prefs(console, deps, user, command) -> None:
     updated = deps.preferences.set(user_id=user, **{field: parsed})
     console.print(f"Set [bold]{field}[/bold] to {value}.")
     render_preferences(console, updated)
-
-
-def _answer_proposal(console, deps, user, *, accepted: bool) -> None:
-    """Apply or refuse the pending suggestion.
-
-    Either way the evidence for that field is cleared, so the counters that
-    produced the question cannot immediately produce it again.
-    """
-    from retail_agent.store.learning import next_proposal
-    from retail_agent.store.preferences import preferred
-
-    proposal = next_proposal(
-        deps.signals, user_id=user, current=preferred(deps.preferences, user)
-    )
-    if proposal is None:
-        console.print("Nothing to accept or decline.")
-        return
-
-    if accepted:
-        deps.preferences.set(user_id=user, **{proposal.field: proposal.value})
-        console.print(f"Set [bold]{proposal.field}[/bold] to {proposal.value}.")
-    else:
-        deps.signals.decline(
-            user_id=user, field=proposal.field, value=proposal.value
-        )
-        console.print("Left as it was.")
-    deps.signals.clear(user_id=user, field=proposal.field)
-
-
-def _offer_proposal(console, deps, user) -> None:
-    """Ask, once there is enough evidence. Never change anything unasked: a
-    personalisation the reader cannot account for is worse than none."""
-    from retail_agent.store.learning import next_proposal
-    from retail_agent.store.preferences import preferred
-
-    proposal = next_proposal(
-        deps.signals, user_id=user, current=preferred(deps.preferences, user)
-    )
-    if proposal is not None:
-        console.print(f"\n[dim]{proposal.question()}[/dim]")
 
 
 def _definitions(console, deps, user, command) -> None:
@@ -377,6 +332,10 @@ def _answer(console, deps, saver, user, session_id, question):
 
     answer = final_text(result)
     render_answer(console, answer, capture, prefs=preferred(deps.preferences, user))
+    for field, value in capture.preference_changes:
+        # Said by the CLI rather than left to the model: a setting that changed
+        # without the reader being told is the failure this design cares about.
+        console.print(f"[dim]Saved {field} = {value} as your default. /prefs to change it.[/dim]")
     # The trace was written by the recorder middleware, on every path out. This
     # is the same record, kept so `/trace` needs no round trip to storage.
     return capture.to_trace(answer)

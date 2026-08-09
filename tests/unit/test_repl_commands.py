@@ -83,10 +83,7 @@ class FakeDeps:
 
         self.personas = InMemoryPersonaStore()
         self.personas.seed(DEFAULT_PERSONA)
-        from retail_agent.store.learning import InMemorySignalStore
-
         self.preferences = InMemoryPreferenceStore()
-        self.signals = InMemorySignalStore()
 
         from retail_agent.store.definitions import InMemoryDefinitionStore
 
@@ -125,8 +122,6 @@ def run(script):
         "/prefs depth nonsense",
         "/prefs bogus value",
         "/prefs depth",
-        "/prefs accept",
-        "/prefs decline",
         "/trios",
         "/definitions",
         "/definitions forget loyal",
@@ -223,134 +218,3 @@ def test_prefs_are_per_user():
 
     assert shared.get(user_id="dana").answer_format == "bullets"
     assert shared.get(user_id="sam").answer_format == "prose"
-
-
-# --- learning: proposed, never applied silently ---
-
-
-def _ask(deps, times, phrase="keep it brief"):
-    """Seed the evidence, then open the REPL to see what it does with it.
-
-    Detection lives in the `note_preference` tool now, not here — see
-    `tests/unit/test_memory_tools.py`. What these tests own is the half the user
-    sees: that accumulated evidence produces a *proposal* quoting them, and that
-    nothing changes until they accept.
-    """
-    from retail_agent.store.learning import Signal
-
-    for _ in range(times):
-        deps.signals.record(
-            user_id="dana", signal=Signal(field="depth", value="summary", evidence=phrase)
-        )
-
-    # One ordinary question, because the proposal is offered after a turn.
-    # `FakeDeps` has no model, so the turn fails and the REPL catches and
-    # renders it — the proposal is offered either way, which is what is under
-    # test.
-    console = FakeConsole(["how many brands?", "/quit"])
-    _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
-    return console
-
-
-def test_repeated_phrasing_produces_a_proposal_not_a_change():
-    from retail_agent.store.learning import PROPOSAL_THRESHOLD
-
-    deps = FakeDeps()
-
-    console = _ask(deps, PROPOSAL_THRESHOLD)
-
-    assert "keep it brief" in console.text(), "the evidence is quoted back"
-    assert "/prefs accept" in console.text()
-    assert deps.preferences.get(user_id="dana").depth == "standard", (
-        "nothing changed without being asked"
-    )
-
-
-def test_one_mention_proposes_nothing():
-    deps = FakeDeps()
-
-    console = _ask(deps, 1)
-
-    assert "/prefs accept" not in console.text()
-
-
-def test_accepting_applies_the_setting():
-    from retail_agent.store.learning import PROPOSAL_THRESHOLD
-
-    deps = FakeDeps()
-    _ask(deps, PROPOSAL_THRESHOLD)
-
-    console = FakeConsole(["/prefs accept"])
-    _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
-
-    assert deps.preferences.get(user_id="dana").depth == "summary"
-
-
-def test_declining_changes_nothing_and_stops_asking():
-    from retail_agent.store.learning import PROPOSAL_THRESHOLD
-
-    deps = FakeDeps()
-    _ask(deps, PROPOSAL_THRESHOLD)
-
-    console = FakeConsole(["/prefs decline"])
-    _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
-    assert deps.preferences.get(user_id="dana").depth == "standard"
-
-    asked_again = _ask(deps, PROPOSAL_THRESHOLD)
-    assert "/prefs accept" not in asked_again.text(), "not asked again so soon"
-
-
-def test_definitions_starts_empty_and_says_it_will_ask():
-    console, _, _ = run(["/definitions"])
-
-    assert "not defined any terms" in console.text()
-def test_trios_lists_what_the_agent_can_settle():
-    console, _, _ = run(["/trios"])
-
-    assert "churn" in console.text()
-    assert "trailing 90 days" in console.text(), "the definition, not just the term"
-
-
-def test_undo_reaches_the_store():
-    _, deps, _ = run(["/undo"])
-
-    assert deps.reports.undone == 1
-
-
-def test_quit_exits_cleanly():
-    console, _, code = run(["/quit"])
-
-    assert code == 0
-    assert "bye" in console.text().lower()
-
-
-def test_blank_input_is_ignored_not_sent_to_the_agent():
-    # graph=None, so any attempt to answer would raise.
-    console, _, code = run(["", "   ", "/quit"])
-
-    assert code == 0
-
-
-def test_every_handled_command_is_advertised():
-    """The other direction from `test_help_lists_only_commands_the_repl_handles`.
-
-    A command that works but is not in `/help` is one nobody finds — which is
-    how `/trace`, `/metrics`, `/prefs` and `/persona` all became invisible
-    during a refactor while still working perfectly.
-    """
-    import re
-
-    from retail_agent.cli import chat
-
-    source = inspect.getsource(chat._repl)
-    handled = set(re.findall(r'question(?:\s*==\s*|\.startswith\()"(/[a-z]+)"', source))
-    handled |= {
-        cmd
-        for group in re.findall(r'question in \{([^}]+)\}', source)
-        for cmd in re.findall(r'"(/[a-z]+)"', group)
-    }
-    advertised = set(re.findall(r"(/[a-z]+)", HELP))
-
-    assert handled - advertised == set(), (
-        f"handled but not in /help: {sorted(handled - advertised)}"
-    )

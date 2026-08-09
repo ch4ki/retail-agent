@@ -28,7 +28,7 @@ def test_every_dependency_is_wired():
     deps = build_deps(_settings(), llm=object(), source=object())
 
     assert isinstance(deps, AgentDeps)
-    for field in ("traces", "personas", "preferences", "signals", "reports", "policy"):
+    for field in ("traces", "personas", "preferences", "reports", "policy"):
         assert getattr(deps, field) is not None, f"{field} was not wired"
 
 

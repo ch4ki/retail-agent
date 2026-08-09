@@ -1,17 +1,22 @@
 """What the agent remembers about the person it is talking to.
 
-Two tools, both write-only from the model's side and neither of them able to
-change an answer on its own. `remember_definition` fills a gap the Golden Bucket
-does not cover; `note_preference` files evidence that a proposal is later built
-from. Nothing here is applied silently — a personalisation the reader cannot
-account for is worse than none.
+Two tools, both write-only from the model's side. `remember_definition` fills a
+gap the Golden Bucket does not cover; `note_preference` records how this
+executive wants answers laid out.
 
-`route_node` used to detect a style preference for free, folded into a routing
-call the graph was already making. There is no such call now, so detection
-became a tool the model elects to call. That is a real loss of guarantee, and
-the mitigation is the one rule that made the old detector trustworthy: the
-evidence must be a phrase the user actually typed, checked here rather than
-believed.
+There used to be a proposal engine behind the second one: signals accumulated in
+Postgres, and at three sightings the agent asked whether to make it the default.
+That machinery answered a question this design no longer asks. It existed
+because *inference* might be wrong — a regex, and later a classifier, guessing
+at intent from phrasing — and the honest response to a guess is to propose it
+rather than act on it.
+
+The tool is not a guess. It fires only when the model has quoted words the user
+actually typed, checked here against the recorded question, so "apply it" and
+"ask whether to apply it" collapse into the same thing: the user already said
+it. What replaced the proposal is the requirement that the change is *announced*
+— see `TurnCapture.preference_changes`, which the CLI reports after the answer.
+Silent is the failure mode worth avoiding, not immediate.
 """
 
 from __future__ import annotations
@@ -22,13 +27,12 @@ from collections.abc import Callable
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.store.definitions import MAX_DEFINITION_CHARS
-from retail_agent.store.learning import Signal
 from retail_agent.store.preferences import FORMATS
 
 log = logging.getLogger(__name__)
 
-# `standard` is missing from `depth` on purpose: it is the default, and
-# proposing a setting someone already has is noise.
+# `standard` is missing from `depth` on purpose: it is the default, and there is
+# nothing to record when someone asks for what they already have.
 STYLE_VALUES: dict[str, frozenset[str]] = {
     "depth": frozenset({"summary", "deep"}),
     "answer_format": frozenset(FORMATS),
@@ -48,7 +52,10 @@ def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
         with capture.step("remember_definition") as step:
             if deps.definitions is None:
                 step.detail = "no store"
-                return "I cannot remember definitions right now, but I will use that for this question."
+                return (
+                    "I cannot remember definitions right now, but I will use "
+                    "that for this question."
+                )
 
             try:
                 deps.definitions.remember(
@@ -81,30 +88,30 @@ def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 step.detail = f"rejected {field}={value}"
                 return f"'{value}' is not a value {field} accepts. Nothing recorded."
 
-            # The proposal this evidence eventually produces quotes it back —
-            # "you asked for this three times, most recently '<span>'" — and a
-            # span the user never typed would make that a fabrication rather
-            # than a citation. This is the check that keeps it honest.
+            # The check that makes acting on this safe rather than presumptuous.
+            # A span the user never typed would mean the model inferred a
+            # preference and this tool wrote it down as though they had asked.
             quoted = evidence.strip()
             if not quoted or quoted.lower() not in capture.question.lower():
                 step.detail = "evidence not quotable"
                 return "Nothing recorded — the evidence must be their exact words."
 
-            if deps.signals is None:
+            if deps.preferences is None:
                 step.detail = "no store"
-                return "Noted for this answer."
+                return "Noted for this answer; I cannot save it as a default."
 
-            count = deps.signals.record(
-                user_id=capture.user_id,
-                signal=Signal(field=field, value=value, evidence=quoted),
-            )
-            step.detail = f"{field}={value} ({count})"
-            # Deliberately not applied here. The setting changes only when the
-            # user accepts a proposal, so an answer's layout is never something
-            # they cannot account for.
-            return (
-                f"Noted. Apply it to this answer; it becomes their default only "
-                f"once they accept the suggestion."
-            )
+            try:
+                deps.preferences.set(user_id=capture.user_id, **{field: value})
+            except Exception as err:
+                log.warning("could not save %s=%s (%s)", field, value, err)
+                step.detail = f"failed: {err}"
+                return "Noted for this answer; I could not save it as a default."
+
+            # Recorded on the capture, not just described in the reply: the CLI
+            # announces the change itself, so the user is told whether or not
+            # the model mentions it.
+            capture.preference_changes.append((field, value))
+            step.detail = f"{field}={value}"
+            return f"Set {field} to {value} for this executive. Apply it now."
 
     return [remember_definition, note_preference]

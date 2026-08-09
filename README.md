@@ -274,13 +274,13 @@ metric definitions that connect them — with hybrid lexical/dense retrieval, a
 measured relevance floor, a clarifying question when a term is undefined that is
 remembered per user.
 
-Partial: the agent learns preferences from how you phrase questions and proposes
-them rather than applying them — it asks before changing anything, and refuses to
-quote you on anything you did not literally type. It now notices those phrases
-with a tool it may decline to call, where it used to notice them inside a
-classification it always made. Under-detection is the failure mode, not a
-fabricated preference, and §5.4 of the design says what restoring the guarantee
-would take.
+The agent also picks up how you want answers laid out. Say "keep it brief" and
+it saves that as your default and tells you it did — by the CLI, not by the
+model, so you are told whether or not it mentions it. It will only do that on
+words you actually typed: the evidence is checked against your message, so it
+cannot decide on your behalf that you prefer brevity. Noticing is a tool it may
+decline to call, which is the one weakness; §5.4 of the design says what
+restoring the guarantee would take.
 
 Not yet built: the LLM judge for narrative quality, a numeric-provenance check,
 and system-level learning. All three are designed in
