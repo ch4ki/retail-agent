@@ -171,9 +171,13 @@ def test_the_report_writer_runs_through_the_provider_chain(make_deps):
     object.__setattr__(deps, "llm_fallbacks", [deps.llm])
     writer, _ = subagents_for(deps)
 
-    assert "Revenue rose" in writer["report_writer"](
-        "Revenue rose 4% in Q1.", title="Q1 Revenue"
-    )
+    receipt = writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue")
+
+    # The receipt itself carries no report text (see test_report_tools.py) —
+    # what this test needs is proof the tool-less compile path produced a
+    # report at all, so it checks the store rather than the return value.
+    assert "written" in receipt
+    assert "Revenue rose" in deps.reports.list_reports(owner_id="exec")[0].body
 
 
 def test_the_report_writer_cannot_reach_the_data(make_deps):
@@ -181,7 +185,7 @@ def test_the_report_writer_cannot_reach_the_data(make_deps):
     deps = make_deps(script=["## Summary\nRevenue rose."])
     writer, _ = subagents_for(deps)
 
-    body = writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue")
+    writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue")
 
-    assert "Revenue rose" in body
+    assert "Revenue rose" in deps.reports.list_reports(owner_id="exec")[0].body
     assert deps.llm.bound_tools == []

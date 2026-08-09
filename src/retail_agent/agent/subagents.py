@@ -145,8 +145,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
             )
             return (
                 f"Report {report.id} '{report.title}' written "
-                f"({len(report.body)} chars).\n"
-                f"Headline: {_headline(report.body)}\n{shown}"
+                f"({len(report.body)} chars).\n{shown}"
             )
 
     return [analyst, report_writer]
@@ -178,19 +177,6 @@ def report_writer_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
         examples=style_examples(consulted),
         style=preference_block(notes_for(deps.preferences, capture.user_id)),
     ).strip()
-
-
-def _headline(body: str) -> str:
-    """The report's first line of substance, for the supervisor's covering line.
-
-    Headings are skipped: the supervisor no longer holds the report and has to
-    say something about it, and "## Summary" is not something to say.
-    """
-    for line in body.splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            return stripped[:200]
-    return ""
 
 
 def _definitions(found: list, known: dict[str, str], assumed: list[str]) -> str:

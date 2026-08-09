@@ -182,16 +182,16 @@ def test_the_show_flag_is_carried_to_the_cli(make_deps):
     assert capture.reports_written[0].show is False
 
 
-def test_the_receipt_carries_a_headline_the_supervisor_can_use(make_deps):
-    """The supervisor still has to write a covering line, and it no longer has
-    the report to write it from. Markdown headings say nothing usable."""
-    deps = make_deps(script=["## Summary\nDenim revenue fell 11.8% in Q1."])
+def test_a_short_headerless_report_still_leaks_nothing(make_deps):
+    """The adversarial shape. An excerpt-based receipt returned this whole body
+    verbatim — a report short enough to fit in the receipt is still a report."""
+    deps = make_deps(script=["Denim fell 11.8% in Q1. Texas drove it."])
     capture = TurnCapture(user_id="exec", session_id="s1")
 
     receipt = writer(deps, capture)(brief="b", title="T")
 
-    assert "Denim revenue fell 11.8% in Q1." in receipt
-    assert "## Summary" not in receipt
+    assert "Denim fell" not in receipt
+    assert "Texas" not in receipt
 
 
 def test_there_is_no_save_report_tool(make_deps):
