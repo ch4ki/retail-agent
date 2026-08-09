@@ -135,8 +135,8 @@ def test_dense_retrieval_finds_a_synonym_the_lexical_ranker_misses():
 # the agent quietly deciding every analyst wants essays.
 
 
-def _note_preference_calls(source, question):
-    """Run one real turn and report which steps the model chose.
+def _tools_called(source, question, tool):
+    """Run one real turn and report where `tool` fell among the steps taken.
 
     Detection used to be folded into the router's structured output, where it
     cost nothing and could not be skipped. It is a tool now, so whether the
@@ -157,7 +157,30 @@ def _note_preference_calls(source, question):
         {"messages": [{"role": "user", "content": question}]},
         {"configurable": {"thread_id": "live"}},
     )
-    return [name for name, _, _ in capture.events if name == "note_preference"]
+    return [name for name, _, _ in capture.events if name == tool]
+
+
+def _note_preference_calls(source, question):
+    return _tools_called(source, question, "note_preference")
+
+
+def _step_order(source, question):
+    """Every step in order, so a test can assert that one preceded another."""
+    from retail_agent.agent.capture import TurnCapture
+    from retail_agent.agent.supervisor import build_agent
+    from retail_agent.bootstrap import build_deps
+    from retail_agent.config import Settings
+
+    from langgraph.checkpoint.memory import MemorySaver
+
+    deps = build_deps(Settings(), llm=_llm(), source=source)
+    capture = TurnCapture(user_id="live", session_id="live", question=question)
+    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+    agent.invoke(
+        {"messages": [{"role": "user", "content": question}]},
+        {"configurable": {"thread_id": "live"}},
+    )
+    return [name for name, _, _ in capture.events]
 
 
 @pytest.mark.parametrize(
@@ -186,3 +209,42 @@ def test_a_stated_preference_is_noticed(source):
     )
 
     assert called, "the model did not record a preference the user stated outright"
+
+
+# The measurement that replaced a guarantee. A regex over nineteen words could
+# not fail to fire; a tool can simply not be called, so whether the model calls
+# it is a property of the live provider and can only be checked against one.
+# `evals.runner.ask_rate` is the same question asked over the whole suite.
+
+
+def test_an_in_house_term_makes_the_agent_ask_before_it_queries(source):
+    """The bug this replaced the word list for.
+
+    "LGB" is in no dictionary the agent ships with, which is the point: the
+    detector it replaced could only recognise words somebody had added, and
+    this question came back with a confident number built on an invented
+    meaning. Asserting on the order, not the call — asking after the query has
+    already spent the money on the guess.
+    """
+    from retail_agent.evals.runner import asked_before_querying
+
+    steps = _step_order(source, "make me a report on 10 LGB customers")
+
+    assert asked_before_querying(steps), (
+        f"the agent never asked what LGB meant before querying: {steps}"
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "what was total revenue in March 2024?",
+        "how many orders shipped last week?",
+        "what is the average order value by state?",
+    ],
+)
+def test_a_question_the_columns_answer_is_not_interrupted(source, question):
+    """The other direction, and the one that decides whether this survives
+    contact with users. A gate that asks about "revenue" gets clicked through,
+    and then it is not a gate at all."""
+    assert _tools_called(source, question, "ask_for_definitions") == []

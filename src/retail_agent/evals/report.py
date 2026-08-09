@@ -33,6 +33,21 @@ def render_report(gate: Gate) -> str:
         f"{len(wrong)} wrong, {len(errored)} error",
     ]
 
+    # Reported beside accuracy, not folded into it. A case can return the right
+    # number off a definition the agent invented, and a suite that scored only
+    # correctness would call that a pass — which is exactly the failure the
+    # asking exists to prevent.
+    should_have_asked = [r for r in gate.results if r.asked_first is not None]
+    if should_have_asked:
+        asked = sum(1 for r in should_have_asked if r.asked_first)
+        lines.append(
+            f"asked before querying: {asked} of {len(should_have_asked)} "
+            f"case(s) that turned on an undefined term"
+        )
+        missed = [r.case_id for r in should_have_asked if not r.asked_first]
+        if missed:
+            lines.append(f"  did not ask: {', '.join(missed)}")
+
     if leaked:
         lines += [
             "",

@@ -73,3 +73,18 @@ def test_tool_calls_are_counted_for_the_cost_column():
             pass
 
     assert answer_from_capture("...", capture).calls == 3
+
+
+def test_the_tools_are_reported_in_the_order_they_ran():
+    """The suite scores the ordering — asked before queried — so the sequence
+    is the part that has to survive, not the set."""
+    capture = TurnCapture()
+    for name in ("ask_for_definitions", "analyst", "run_sql"):
+        with capture.step(name):
+            pass
+
+    assert answer_from_capture("...", capture).tools == (
+        "ask_for_definitions",
+        "analyst",
+        "run_sql",
+    )

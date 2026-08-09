@@ -206,3 +206,41 @@ def test_a_definition_store_failure_costs_the_memory_not_the_turn():
     answer = tools["remember_definition"]("loyal", "three orders")
 
     assert "could not save" in answer.lower()
+
+
+# --- asking what a term means ---
+
+
+def test_asking_reads_back_the_definition_the_executive_just_gave():
+    """The pause happens before the tool body runs, and the CLI writes the
+    answer to the store. So `approve` needs no rewritten arguments: the tool
+    reads back what was just settled."""
+    tools, deps, _ = tools_for("report on 10 LGB customers")
+    deps.definitions.remember(user_id="dana", term="lgb", definition="low gross basket")
+
+    answer = tools["ask_for_definitions"](["LGB"])
+
+    assert "low gross basket" in answer
+
+
+def test_with_nobody_to_ask_the_agent_is_told_to_choose_and_disclose():
+    """Headless — no interrupt armed, so the body runs against an empty store.
+    Refusing here would fail the brief's own eval questions, so the bargain is
+    the same one `assumption_note` makes: answer, and say what you assumed."""
+    tools, _, capture = tools_for("report on 10 LGB customers")
+
+    answer = tools["ask_for_definitions"](["LGB"])
+
+    assert "LGB" in answer
+    assert "state" in answer.lower(), "the disclosure is demanded, not optional"
+    assert capture.assumed_terms == ["LGB"], "and the trace records it"
+
+
+def test_a_term_still_open_is_reported_next_to_one_already_settled():
+    tools, deps, capture = tools_for("top LGB customers")
+    deps.definitions.remember(user_id="dana", term="lgb", definition="low gross basket")
+
+    answer = tools["ask_for_definitions"](["LGB", "top"])
+
+    assert "low gross basket" in answer
+    assert capture.assumed_terms == ["top"], "only the unsettled one is assumed"

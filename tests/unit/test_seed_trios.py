@@ -6,7 +6,6 @@ import pytest
 
 from retail_agent.knowledge.retrieval import retrieve
 from retail_agent.knowledge.seeds import SEED_TRIOS
-from retail_agent.knowledge.trios import UNDEFINED_TERMS, undefined_terms, unresolved
 
 
 def test_every_trio_is_complete():
@@ -22,20 +21,6 @@ def test_ids_are_unique():
     assert len(ids) == len(set(ids))
 
 
-def test_every_defined_term_is_one_the_agent_actually_flags():
-    """A definition for a term nothing detects can never be applied. This is
-    the seam where the corpus and the detector silently drift apart."""
-    defined = {term.lower() for t in SEED_TRIOS for term in t.metric_definitions}
-    detectable = set(UNDEFINED_TERMS)
-
-    orphans = {
-        term for term in defined
-        if term not in detectable and term not in {"margin"}
-    }
-
-    assert not orphans, f"defined but never detected: {orphans}"
-
-
 @pytest.mark.parametrize(
     "question",
     [
@@ -46,14 +31,21 @@ def test_every_defined_term_is_one_the_agent_actually_flags():
     ],
 )
 def test_the_briefs_questions_are_answered_by_the_corpus(question):
-    """These are the brief's own examples. Every one raises a term the schema
-    cannot settle, and the corpus exists to settle them."""
-    assert undefined_terms(question), "the question should raise a term"
+    """These are the brief's own examples. Every one turns on a term the schema
+    cannot settle, and the corpus exists to settle them.
 
+    What this can no longer assert is that a detector flags the term — there is
+    no detector, and the test that checked the corpus and the word list had not
+    drifted apart went with it. What still matters, and is what actually
+    reaches the model, is that retrieval finds a trio and the trio brings a
+    definition with it.
+    """
     found = retrieve(question, list(SEED_TRIOS))
 
     assert found, f"nothing retrieved for {question!r}"
-    assert unresolved(question, found) == [], f"{question!r} left a term undefined"
+    assert any(t.metric_definitions for t in found), (
+        f"{question!r} retrieved nothing that defines anything"
+    )
 
 
 def test_the_sql_in_each_trio_passes_the_safety_guard():

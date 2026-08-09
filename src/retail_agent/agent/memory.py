@@ -1,8 +1,16 @@
-"""What the agent remembers about the person it is talking to.
+"""What the agent asks the person it is talking to, and what it keeps.
 
-Two tools, both write-only from the model's side. `remember_definition` fills a
-gap the Golden Bucket does not cover; `note_preference` records, in the user's
-own words, how this executive wants answers written.
+`ask_for_definitions` is the one tool here that reads rather than writes, and
+the only one that can stop a turn. It replaced a regex over nineteen hardcoded
+words, which could only ever pause on a term somebody had thought of in advance
+— see the LGB case in
+`docs/superpowers/specs/2026-08-09-model-driven-term-detection-design.md`.
+The model now decides what it does not understand, which is the one judgement it
+is better placed to make than a list is.
+
+The rest are write-only from the model's side. `remember_definition` keeps what
+this executive answers, so the question is asked once; `note_preference` records,
+in the user's own words, how they want answers written.
 
 There used to be a proposal engine behind the second one: signals accumulated in
 Postgres, and at three sightings the agent asked whether to make it the default.
@@ -26,7 +34,7 @@ from collections.abc import Callable
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
-from retail_agent.store.definitions import MAX_DEFINITION_CHARS
+from retail_agent.store.definitions import MAX_DEFINITION_CHARS, all_definitions
 from retail_agent.store.preferences import (
     MAX_NOTE_CHARS,
     MAX_NOTES,
@@ -35,6 +43,20 @@ from retail_agent.store.preferences import (
 )
 
 log = logging.getLogger(__name__)
+
+# What `ask_for_definitions` returns when its body actually runs with the term
+# still unsettled — meaning nobody was there to be asked. Armed with the
+# interrupt, the body is only reached *after* a person answered.
+#
+# Not a refusal. The brief's own example questions turn on undefined terms, and
+# an agent that declines to answer them is not safe, it is useless. Same bargain
+# `assumption_note` makes on the way out: decide, and disclose the decision.
+NOBODY_TO_ASK = (
+    "Nobody is available to settle: {terms}. Do not ask again and do not "
+    "refuse. Choose one concrete, defensible rule for each — a threshold, a "
+    "window or a ranking — use it, and state the rule you applied in your "
+    "answer."
+)
 
 # What to say when the store accepted the call but not the note. Keyed by what
 # `add_note` returns, so a new outcome there is a KeyError here rather than a
@@ -88,6 +110,40 @@ def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 f"Recorded: {term} means {definition}. I will use that from now "
                 f"on. Now answer the original question."
             )
+
+    def ask_for_definitions(terms: list[str]) -> str:
+        """Ask the executive what a business term means, before querying.
+
+        Use this when the question turns on a word whose meaning is a business
+        decision rather than a column — an in-house label, a segment name, a
+        threshold, a ranking — and neither the agreed definitions nor this
+        executive's own cover it. Pass the words exactly as they wrote them.
+
+        Call it before `analyst`, not after. A query written against a guessed
+        definition has already spent the money and produced a number nobody can
+        trace to a decision.
+        """
+        with capture.step("ask_for_definitions") as step:
+            wanted = [term.strip() for term in terms if term and term.strip()]
+            known = all_definitions(deps.definitions, capture.user_id)
+            settled = {t: known[t.lower()] for t in wanted if t.lower() in known}
+            still_open = [t for t in wanted if t.lower() not in known]
+
+            # Recorded here rather than by the caller: this is the one place
+            # that knows a term went unanswered, and `assumption_note` on the
+            # way out reads it to force the disclosure into the answer.
+            capture.record_assumptions(still_open)
+            step.detail = _describe_settled(settled, still_open)
+
+            parts = []
+            if settled:
+                lines = "\n".join(f"- {t}: {d}" for t, d in settled.items())
+                parts.append(
+                    f"The executive defines these. Use them exactly:\n{lines}"
+                )
+            if still_open:
+                parts.append(NOBODY_TO_ASK.format(terms=", ".join(still_open)))
+            return "\n\n".join(parts) or "There was nothing to settle."
 
     def note_preference(preference: str, evidence: str) -> str:
         """Record how this executive wants answers written.
@@ -173,4 +229,18 @@ def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
             step.detail = f"removed {stored}"
             return f"Removed: {stored}."
 
-    return [remember_definition, note_preference, forget_preference]
+    return [
+        ask_for_definitions,
+        remember_definition,
+        note_preference,
+        forget_preference,
+    ]
+
+
+def _describe_settled(settled: dict[str, str], still_open: list[str]) -> str:
+    parts = []
+    if settled:
+        parts.append(f"settled: {', '.join(settled)}")
+    if still_open:
+        parts.append(f"unanswered: {', '.join(still_open)}")
+    return "; ".join(parts) or "nothing asked"

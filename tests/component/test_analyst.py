@@ -1,9 +1,13 @@
-"""The analyst subagent: what it refuses to do, and what it discloses.
+"""The analyst subagent: what it is given, and what it discloses.
 
-`recall_node` ran unconditionally on every analyze turn and the graph branched
-on what it found. Both of those properties now live in this wrapper, before the
-subagent is built — which is the point. A model that elected not to look a term
-up could not lose them here even if it wanted to.
+`recall_node` ran unconditionally on every analyze turn, and that still holds:
+retrieval happens in this wrapper, before the subagent is built, so a model
+that elected not to look a term up cannot lose the corpus.
+
+What this no longer does is *decide* whether a term is unsettled. That was a
+regex over nineteen words, and it is gone — `ask_for_definitions` asks and
+records, and the analyst reads what it recorded. The disclosure is still forced
+here rather than requested in a prompt, which is the property worth keeping.
 """
 
 import pandas as pd
@@ -29,21 +33,24 @@ def subagents_for(deps, question="who are our loyal customers?"):
     return {fn.__name__: fn for fn in build_subagents(deps, capture)}, capture
 
 
-def test_an_unsettled_term_stops_the_turn_before_anything_is_queried(make_deps, source):
-    """The property the graph got from a breakpoint: no spend before meaning.
+def test_the_executives_own_definitions_reach_the_model(make_deps):
+    """All of them, not the ones a regex picked out of the question. The
+    filtering step that needed a term list is gone, and the whole set costs one
+    read — so a word the old detector never recognised is now in front of the
+    model anyway."""
+    definitions = InMemoryDefinitionStore()
+    definitions.remember(user_id="exec", term="LGB", definition="low gross basket")
+    source = FakeSource(frames={"default": pd.DataFrame({"n": [9]})})
+    deps = make_deps(
+        script=[[("run_sql", {"sql": "SELECT COUNT(*) AS n FROM users"})], "9."],
+        src=source,
+        definitions=definitions,
+    )
+    analyst, _ = subagents_for(deps)
 
-    Asserting on `source.executed` rather than on the returned text — a wrapper
-    that queried first and then asked would return the same sentence.
-    """
-    deps = make_deps(src=source, definitions=InMemoryDefinitionStore())
-    analyst, capture = subagents_for(deps)
+    analyst["analyst"]("how many LGB customers?")
 
-    answer = analyst["analyst"]("who are our loyal customers?")
-
-    assert source.executed == []
-    assert "loyal" in answer
-    assert "assume_undefined" in answer
-    assert capture.attempts == []
+    assert any("low gross basket" in prompt for prompt in deps.llm.prompts)
 
 
 def test_a_trio_settles_the_term_and_the_query_runs(make_deps):
@@ -80,11 +87,13 @@ def test_the_agreed_definition_reaches_the_model(make_deps):
     )
 
 
-def test_assuming_a_definition_forces_the_assumption_into_the_answer(make_deps):
+def test_a_recorded_assumption_is_forced_into_the_answer(make_deps):
     """The number is only trustworthy if the reader knows which judgement made it.
 
     The note is appended by the wrapper rather than requested in the prompt, so
     a model that ignores the instruction still cannot return the figure alone.
+    The terms come from the capture — written earlier in the turn by
+    `ask_for_definitions` when nobody was there to answer it.
     """
     source = FakeSource(frames={"default": pd.DataFrame({"n": [9]})})
     deps = make_deps(
@@ -93,30 +102,29 @@ def test_assuming_a_definition_forces_the_assumption_into_the_answer(make_deps):
         definitions=InMemoryDefinitionStore(),
     )
     analyst, capture = subagents_for(deps)
+    capture.record_assumptions(["LGB"])
 
-    answer = analyst["analyst"]("who are our loyal customers?", assume_undefined=True)
+    answer = analyst["analyst"]("how many LGB customers?")
 
     assert "no agreed definition" in answer.lower()
-    assert capture.assumed_terms == ["loyal"]
+    assert "LGB" in answer
 
 
-def test_without_a_definition_store_the_agent_assumes_rather_than_asks(make_deps):
-    """Asking is only worth it if the answer can be kept.
-
-    Without somewhere to remember it the agent would ask the same person the
-    same question every turn, which is worse than assuming and saying so.
-    """
+def test_nothing_assumed_means_no_disclosure(make_deps):
+    """A caveat on a question that did not need one is noise, and noise is how
+    a warning stops being read."""
     source = FakeSource(frames={"default": pd.DataFrame({"n": [3]})})
     deps = make_deps(
         script=[[("run_sql", {"sql": "SELECT COUNT(*) AS n FROM users"})], "3."],
         src=source,
+        definitions=InMemoryDefinitionStore(),
     )
-    analyst, capture = subagents_for(deps)
+    analyst, _ = subagents_for(deps)
 
-    answer = analyst["analyst"]("who are our loyal customers?")
+    answer = analyst["analyst"]("how much revenue did we make in March?")
 
     assert "3" in answer
-    assert capture.assumed_terms == ["loyal"]
+    assert "no agreed definition" not in answer.lower()
 
 
 def test_the_report_writer_is_shown_how_analysts_here_write(make_deps):

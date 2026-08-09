@@ -47,7 +47,7 @@ def render_confirmation(console: Console, description: str) -> None:
 
 
 def render_definition_prompt(
-    console: Console, term: str, hint: str, options: list[str]
+    console: Console, term: str, options: list[str]
 ) -> None:
     """The choice offered when a question turns on a term nobody has settled.
 
@@ -57,7 +57,7 @@ def render_definition_prompt(
     empty — a model call is allowed to fail here — and a prompt with no way out
     would be a worse failure than the assumption it exists to prevent.
     """
-    console.print(f"\n[bold]{term}[/bold] needs a definition — [dim]{hint}[/dim]\n")
+    console.print(f"\n[bold]{term}[/bold] needs a definition\n")
     for index, option in enumerate(options, 1):
         console.print(f"  [bold cyan]{index}[/bold cyan]  {option}")
     console.print(f"  [bold cyan]{len(options) + 1}[/bold cyan]  [dim]something else — I'll type it[/dim]")

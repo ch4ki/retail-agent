@@ -34,31 +34,18 @@ from retail_agent.agent.prompts import (
 from retail_agent.agent.schema import render_schema_for_sql
 from retail_agent.agent.tools import build_analyst_tools, recall
 from retail_agent.knowledge.trios import (
-    UNDEFINED_TERMS,
     assumption_note,
     definitions_block,
     live_trios,
     sql_assumption_note,
     style_examples,
-    unresolved,
 )
 from retail_agent.llm.messages import message_text
-from retail_agent.store.definitions import personal_definitions_block, remembered
+from retail_agent.store.definitions import all_definitions, personal_definitions_block
 from retail_agent.store.personas import active_body
 from retail_agent.store.preferences import notes_for, preference_block
 
 log = logging.getLogger(__name__)
-
-# What the analyst returns instead of querying when a term is unsettled. The
-# supervisor is told what to do with it by its own prompt; the property that
-# matters — no spend before the term is settled — is enforced here, by
-# returning before the subagent is built, rather than by asking a model nicely.
-NEEDS_DEFINITION = (
-    "I did not query anything. This question turns on **{term}**, and there is "
-    "no agreed definition for it: {hint}. Ask the executive what it should "
-    "mean, or call me again with assume_undefined=true to have me choose and "
-    "say what I assumed."
-)
 
 
 def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
@@ -71,33 +58,27 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
     a column being added.
     """
 
-    def analyst(question: str, assume_undefined: bool = False) -> str:
+    def analyst(question: str) -> str:
         """Query the retail data and report what it found.
 
         Pass the executive's question in full, keeping every business term
-        exactly as they wrote it. Set assume_undefined only after being told to
-        decide for yourself about a term this tool said it needed defined.
+        exactly as they wrote it. If the question turns on a term nobody has
+        defined, call `ask_for_definitions` before this, not after — a query
+        written against a guess has already been paid for.
         """
         with capture.step("analyst") as step:
             found = recall(deps, question)
             capture.record_definitions([trio.id for trio in found])
 
-            open_terms = unresolved(question, found)
-            known = remembered(deps.definitions, capture.user_id, open_terms)
-            still_open = [term for term in open_terms if term not in known]
-
-            # Only ask if the answer can be kept. Without somewhere to remember
-            # it, the agent would ask the same person the same question every
-            # turn — which is worse than assuming and saying so.
-            if still_open and not assume_undefined and deps.definitions is not None:
-                term = still_open[0]
-                step.detail = f"needs a definition of {term}"
-                return NEEDS_DEFINITION.format(
-                    term=term, hint=UNDEFINED_TERMS.get(term, "it is undefined")
-                )
-
-            assumed = still_open if still_open else []
-            capture.record_assumptions(assumed)
+            # Everything this executive has ever defined, not a lookup of terms
+            # picked out of the question. Nothing picks terms out of a question
+            # any more, and the whole set costs one read.
+            known = all_definitions(deps.definitions, capture.user_id)
+            # Written by `ask_for_definitions` when nobody was there to answer.
+            # Read rather than recomputed: this subagent no longer decides what
+            # is unsettled, so the only honest source is what actually happened
+            # earlier in the turn.
+            assumed = list(capture.assumed_terms)
             step.detail = _describe(found, known, assumed)
 
             agent = create_agent(

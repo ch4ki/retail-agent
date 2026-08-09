@@ -38,12 +38,11 @@ from retail_agent.agent.prompts import (
     SUPERVISOR_PROMPT,
 )
 from retail_agent.agent.reports import render_manifest, resolve_delete
-from retail_agent.agent.tools import GuardRejection, recall
+from retail_agent.agent.tools import GuardRejection
 from retail_agent.config import Settings
 from retail_agent.datasources.base import DataSourceError
-from retail_agent.knowledge.trios import UNDEFINED_TERMS, unresolved
 from retail_agent.llm.messages import message_text
-from retail_agent.store.definitions import remembered
+from retail_agent.store.definitions import all_definitions
 from retail_agent.store.personas import active_body
 from retail_agent.store.preferences import notes_for, preference_block
 
@@ -82,20 +81,21 @@ def analyst_middleware(settings: Settings) -> list[AgentMiddleware]:
 
 
 def supervisor_middleware(
-    deps: AgentDeps, capture: TurnCapture, *, ask_for_definitions: bool = False
+    deps: AgentDeps, capture: TurnCapture, *, pause_for_definitions: bool = False
 ) -> list[AgentMiddleware]:
     """The stack that bounds the turn.
 
-    `ask_for_definitions` arms the pause on an unsettled term. Off by default
-    because a pause needs somebody there to answer it: `seams.ask_once` scores a
-    paused turn as unanswered, and the eval cases that turn on an undefined term
-    are the brief's own examples. Headless callers keep the analyst's early
-    return and the disclosure `assumption_note` forces into the answer.
+    `pause_for_definitions` arms the pause on the `ask_for_definitions` tool.
+    Off by default because a pause needs somebody there to answer it:
+    `seams.ask_once` scores a paused turn as unanswered, and the eval cases that
+    turn on an undefined term are the brief's own examples. Unarmed, the tool
+    still runs — it finds nothing in the store, records the assumption and tells
+    the model to choose and disclose.
     """
     return [
         _prompt(deps, capture),
         *_pii(),
-        _approval_gate(deps, capture, ask_for_definitions=ask_for_definitions),
+        _approval_gate(deps, capture, pause_for_definitions=pause_for_definitions),
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS, exit_behavior="end"),
         ToolErrorMiddleware(on_error=describe_failure),
         _recorder(deps, capture),
@@ -167,15 +167,20 @@ def _prompt(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
 
 
 def _approval_gate(
-    deps: AgentDeps, capture: TurnCapture, *, ask_for_definitions: bool = False
+    deps: AgentDeps, capture: TurnCapture, *, pause_for_definitions: bool = False
 ) -> AgentMiddleware:
     """The two places a turn stops for a person, as interrupts before the tool.
 
     Both `when` predicates resolve read-only, without a model call, and park
     what they found on the capture. That is what makes each one a gate rather
-    than advice: a delete that matches nothing never raises a prompt, a question
-    whose terms are settled is never paused, and in both cases what the user is
-    shown is exactly what the predicate found.
+    than advice: a delete that matches nothing never raises a prompt, a term
+    this executive has already defined never raises one either, and in both
+    cases what the user is shown is exactly what the predicate found.
+
+    What changed with `ask_for_definitions` is which half is deterministic.
+    *Whether* a word needs settling is now the model's judgement, made by
+    calling the tool at all. What survives here is the narrower check that does
+    not need one: whether the answer is already on file.
     """
 
     def has_targets(request) -> bool:
@@ -195,16 +200,16 @@ def _approval_gate(
             else "Delete saved reports?"
         )
 
-    def needs_definition(request) -> bool:
-        args = request.tool_call.get("args", {})
-        # Only ask if the answer can be kept. Without a store the agent would
+    def still_unsettled(request) -> bool:
+        # Only pause if the answer can be kept. Without a store the agent would
         # ask the same person the same question every turn, which is worse than
-        # assuming and saying so — the rule the analyst's early return follows.
-        if deps.definitions is None or args.get("assume_undefined"):
+        # assuming and saying so — the bargain the tool's own body makes.
+        if deps.definitions is None:
             return False
 
+        args = request.tool_call.get("args", {})
         capture.pending_definition = open_terms(
-            deps, capture, args.get("question", "") or ""
+            deps, capture, args.get("terms") or []
         )
         return capture.pending_definition is not None
 
@@ -219,45 +224,50 @@ def _approval_gate(
             when=has_targets,
         )
     }
-    if ask_for_definitions:
-        interrupt_on["analyst"] = InterruptOnConfig(
-            # `edit` is how "decide for me" resolves: the tool call is rewritten
-            # with assume_undefined, which is the path that already exists.
-            allowed_decisions=["approve", "edit", "reject"],
+    if pause_for_definitions:
+        interrupt_on["ask_for_definitions"] = InterruptOnConfig(
+            # `approve` runs the tool body, which reads the answers back out of
+            # the store the CLI just wrote them to. "Decide for me" and "cancel"
+            # are both `reject` with different messages: the body never runs, so
+            # nothing has to rewrite the call's arguments to mean either.
+            allowed_decisions=["approve", "reject"],
             description=describe_definition,
-            when=needs_definition,
+            when=still_unsettled,
         )
 
     return HumanInTheLoopMiddleware(interrupt_on=interrupt_on, description_prefix="")
 
 
 def open_terms(
-    deps: AgentDeps, capture: TurnCapture, question: str
+    deps: AgentDeps, capture: TurnCapture, terms: Sequence[str]
 ) -> PendingDefinition | None:
-    """The terms this question turns on that nothing has settled yet.
+    """Of the words the model asked about, the ones still worth a question.
 
-    The corpus first, then what this user has already been asked, in that order
-    — a trio is a reviewed decision by the people who own the numbers and a
-    remembered definition is one person's answer, so neither should produce a
-    question that has already been answered.
+    The model decides what it does not understand; this decides what has
+    already been answered. Both matter, and only the second can be settled
+    without a model: a term this executive defined last week must not produce
+    the same prompt again, however reasonable the model was to ask.
 
-    Never raises: `recall` swallows a retrieval failure, and `remembered`
-    returns what it managed to read. An unreachable store costs a question that
-    did not need asking, never the turn.
+    Never raises — `all_definitions` returns what it managed to read, so an
+    unreachable store costs a question that did not need asking, never the turn.
     """
-    found = recall(deps, question)
-    unsettled = unresolved(question, found)
-    known = remembered(deps.definitions, capture.user_id, unsettled)
-    still_open = tuple(term for term in unsettled if term not in known)
+    known = all_definitions(deps.definitions, capture.user_id)
+    still_open = tuple(
+        term.strip()
+        for term in terms
+        if term and term.strip() and term.strip().lower() not in known
+    )
     return PendingDefinition(terms=still_open) if still_open else None
 
 
 def describe_open_terms(terms: Sequence[str]) -> str:
-    """What the pause is about, in the words `UNDEFINED_TERMS` already uses."""
-    return "\n".join(
-        f"{term!r} has no agreed definition — {UNDEFINED_TERMS.get(term, 'it is undefined')}"
-        for term in terms
-    )
+    """What the pause is about.
+
+    The term alone. There is no gloss to add any more: the words are the
+    executive's own rather than keys of a dict that shipped a description with
+    each one, and `propose` puts concrete candidate meanings under this anyway.
+    """
+    return "\n".join(f"{term!r} has no agreed definition yet" for term in terms)
 
 
 def _recorder(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:

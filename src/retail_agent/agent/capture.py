@@ -51,12 +51,17 @@ class PendingDelete:
 
 @dataclass(frozen=True)
 class PendingDefinition:
-    """Terms this question turns on that nothing has settled, awaiting an answer.
+    """Terms the model asked about that this user has not already answered.
 
     Resolved by the interrupt's `when` predicate — read-only, and without a
     model call — and read back by the CLI, which asks about them in order. The
     same discipline as `PendingDelete`: what stops the turn is decided once, and
     what the user is then shown is exactly what stopped it.
+
+    Which words are worth asking about is the model's judgement, made by calling
+    `ask_for_definitions` at all. The filtering this holds is the other half:
+    whichever of those words are already on file, dropped before anyone is
+    interrupted, so a definition given last week is never asked for twice.
     """
 
     terms: tuple[str, ...]

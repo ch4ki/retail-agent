@@ -63,6 +63,11 @@ class CaseResult:
     tokens_in: int = 0
     tokens_out: int = 0
     calls: int = 0
+    # Whether the agent called `ask_for_definitions` before spending a query.
+    # `None` when the case named no `required_definitions`, so there was
+    # nothing it should have asked about — that is not the same as False, and
+    # collapsing the two would score a correct silence as a miss.
+    asked_first: bool | None = None
 
 
 @dataclass(frozen=True)

@@ -299,7 +299,7 @@ def _answer(console, deps, saver, user, session_id, question):
         # Armed here and nowhere else: a pause needs somebody who can answer it,
         # and this is the only caller with a person at a keyboard.
         agent = build_agent(
-            deps, capture, checkpointer=saver, ask_for_definitions=True
+            deps, capture, checkpointer=saver, pause_for_definitions=True
         )
         with console.status("thinking…"):
             result = agent.invoke(
@@ -377,7 +377,7 @@ def _decide(console, deps, result, capture, user) -> dict:
     the request itself is the only honest source of which one it was.
     """
     request = _first_request(result)
-    if request.get("name") == "analyst":
+    if request.get("name") == "ask_for_definitions":
         return _settle_definitions(console, deps, capture, user, request)
 
     if _confirm(console, request.get("description", ""), capture):
@@ -428,7 +428,6 @@ def _settle_definitions(console, deps, capture, user, request) -> dict:
     """
     from retail_agent.agent.schema import render_schema_outline
     from retail_agent.knowledge.proposals import propose
-    from retail_agent.knowledge.trios import UNDEFINED_TERMS
 
     pending = capture.pending_definition
     settled: dict[str, str] = {}
@@ -438,26 +437,33 @@ def _settle_definitions(console, deps, capture, user, request) -> dict:
     schema = render_schema_outline(deps)
 
     for term in pending.terms if pending else ():
-        hint = UNDEFINED_TERMS.get(term, "it is undefined")
         options = propose(
             deps.llm,
             question=capture.question,
             term=term,
-            hint=hint,
             schema=schema,
             settled=settled,
         )
-        chosen = _ask_definition(console, term, hint, options)
+        chosen = _ask_definition(console, term, options)
 
         if chosen is _HAND_BACK:
             # Applies to everything still open, not just this term: "you decide"
             # is not an answer that gets asked again for the next word.
+            #
+            # A reject rather than an edit. The tool body never runs, so this is
+            # the only place that knows the terms went unanswered — hence the
+            # recording here, which `assumption_note` reads on the way out to
+            # force the disclosure into the answer.
+            remaining = [t for t in pending.terms if t not in settled]
+            capture.record_assumptions(remaining)
             return {
-                "type": "edit",
-                "edited_action": {
-                    "name": request.get("name", "analyst"),
-                    "args": {**request.get("args", {}), "assume_undefined": True},
-                },
+                "type": "reject",
+                "message": (
+                    "The executive asked you to decide. Do not ask again. "
+                    f"Choose one concrete, defensible rule for: {', '.join(remaining)} "
+                    "— a threshold, a window or a ranking — use it, and state "
+                    "the rule you applied in your answer."
+                ),
             }
         if not chosen:
             return {
@@ -474,7 +480,7 @@ def _settle_definitions(console, deps, capture, user, request) -> dict:
     return {"type": "approve"}
 
 
-def _ask_definition(console, term, hint, options):
+def _ask_definition(console, term, options):
     """One term's answer: a definition, `_HAND_BACK`, or "" to cancel.
 
     A number outside the list is re-asked rather than taken literally — someone
@@ -485,7 +491,7 @@ def _ask_definition(console, term, hint, options):
 
     own, hand_back = len(options) + 1, len(options) + 2
     while True:
-        render_definition_prompt(console, term, hint, options)
+        render_definition_prompt(console, term, options)
         typed = console.input("\n[bold yellow]›[/bold yellow] ").strip()
 
         if not typed:

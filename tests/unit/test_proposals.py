@@ -16,7 +16,6 @@ def suggest(replies, **overrides):
     kwargs = dict(
         question="who are my loyal customers?",
         term="loyal",
-        hint="what makes a customer loyal",
         schema=SCHEMA,
     )
     kwargs.update(overrides)
@@ -40,7 +39,7 @@ def test_a_model_failure_costs_the_options_and_not_the_turn():
             raise RuntimeError("the provider is down")
 
     assert propose(
-        Broken([]), question="q", term="loyal", hint="h", schema=SCHEMA
+        Broken([]), question="q", term="loyal", schema=SCHEMA
     ) == []
 
 
@@ -50,14 +49,17 @@ def test_a_reply_the_schema_rejects_yields_no_options():
     assert options == []
 
 
-def test_the_model_is_told_the_term_the_hint_and_the_question():
+def test_the_model_is_told_the_term_and_the_question():
     """Without the question the options describe the term in the abstract, and
-    the point is to fit what was actually asked."""
+    the point is to fit what was actually asked.
+
+    No hint any more: the words come from the executive rather than from a dict
+    that shipped a gloss with each one, so the model works out what has to be
+    decided from the term and the schema."""
     _, llm = suggest([{"definitions": ["3 or more orders"]}])
 
     prompt = llm.prompts[0]
     assert "loyal" in prompt
-    assert "what makes a customer loyal" in prompt
     assert "who are my loyal customers?" in prompt
 
 
@@ -73,7 +75,6 @@ def test_terms_already_settled_this_turn_are_shown():
     _, llm = suggest(
         [{"definitions": ["the 10 highest by revenue"]}],
         term="top",
-        hint="how many, and ranked by which measure",
         settled={"loyal": "2 or more orders in the last 12 months"},
     )
 

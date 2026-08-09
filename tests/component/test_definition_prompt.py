@@ -25,11 +25,12 @@ OPTIONS = {
 }
 
 
-def script(question=QUESTION, options=OPTIONS):
-    """Supervisor reaches for the analyst; the pause interrupts; then the query."""
+def script(question=QUESTION, options=OPTIONS, terms=("loyal",)):
+    """Supervisor asks what the term means; the pause interrupts; then the query."""
     return [
-        [("analyst", {"question": question})],
+        [("ask_for_definitions", {"terms": list(terms)})],
         options,  # consumed by `propose` while the turn is paused
+        [("analyst", {"question": question})],
         [("run_sql", {"sql": "SELECT id FROM users"})],
         "Nine of them.",
         "Nine of them.",
@@ -47,12 +48,14 @@ def run(make_deps, typed, turns=None, definitions=None):
     return console, deps, definitions, source, trace
 
 
-def test_the_options_are_offered_with_the_term_and_what_it_turns_on(make_deps):
+def test_the_options_are_offered_under_the_term(make_deps):
+    """No gloss on what the term turns on: that used to be a dict value keyed
+    by the word, and the words are the executive's own now. The options say
+    what the gloss said, concretely."""
     console, *_ = run(make_deps, ["1"])
 
     printed = console.text()
     assert "loyal" in printed
-    assert "what makes a customer loyal" in printed
     assert "3 or more completed orders, ever" in printed
     assert "2 or more orders in the last 12 months" in printed
 
@@ -101,7 +104,7 @@ def test_an_empty_answer_cancels_without_querying(make_deps):
     """Someone who does not want to settle it now must not be billed for a
     query against a meaning nobody agreed."""
     turns = [
-        [("analyst", {"question": QUESTION})],
+        [("ask_for_definitions", {"terms": ["loyal"]})],
         OPTIONS,
         "I need a definition of loyal before I can answer that.",
     ]
@@ -120,6 +123,7 @@ def test_a_term_already_defined_is_never_asked_about_again(make_deps):
     definitions = InMemoryDefinitionStore()
     definitions.remember(user_id="dana", term="loyal", definition="3 or more orders")
     turns = [
+        [("ask_for_definitions", {"terms": ["loyal"]})],
         [("analyst", {"question": QUESTION})],
         [("run_sql", {"sql": "SELECT id FROM users"})],
         "Nine of them.",
@@ -131,14 +135,15 @@ def test_a_term_already_defined_is_never_asked_about_again(make_deps):
     assert source.executed
 
 
-def test_two_open_terms_are_asked_about_one_at_a_time_in_question_order(make_deps):
+def test_two_open_terms_are_asked_about_one_at_a_time_in_order(make_deps):
     """Each prompt stays a simple choice, and the second is generated knowing
     how the first was settled."""
     question = "who are my top loyal customers?"
     turns = [
-        [("analyst", {"question": question})],
+        [("ask_for_definitions", {"terms": ["top", "loyal"]})],
         {"definitions": ["the 10 highest by revenue"]},  # top
         {"definitions": ["3 or more orders, ever"]},  # loyal
+        [("analyst", {"question": question})],
         [("run_sql", {"sql": "SELECT id FROM users"})],
         "Nine of them.",
         "Nine of them.",
@@ -204,8 +209,9 @@ def test_losing_the_options_still_leaves_a_question_that_can_be_answered(make_de
     """A model failure costs the menu, not the pause. `propose` returns nothing
     and the executive types their own."""
     turns = [
-        [("analyst", {"question": QUESTION})],
+        [("ask_for_definitions", {"terms": ["loyal"]})],
         {"wrong_field": []},  # the schema rejects it; propose returns []
+        [("analyst", {"question": QUESTION})],
         [("run_sql", {"sql": "SELECT id FROM users"})],
         "Nine of them.",
         "Nine of them.",

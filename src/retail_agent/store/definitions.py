@@ -73,23 +73,27 @@ class InMemoryDefinitionStore:
         return self._by_user.get(user_id, {}).pop(term.lower().strip(), None) is not None
 
 
-def remembered(store: DefinitionStore | None, user_id: str, terms: list[str]) -> dict[str, str]:
-    """The user's own definitions for these terms, if any.
+def all_definitions(store: DefinitionStore | None, user_id: str) -> dict[str, str]:
+    """Every definition this user has given, as term → meaning.
 
-    Never fails a turn: a store that is down costs a question the user has
-    already answered, not the answer.
+    Everything rather than a lookup of named terms. Nothing computes a list of
+    candidate terms before the analyst runs any more — the executive's words
+    reach the model directly — so the question "which of these do I need?" has
+    no asker, and the whole set is both cheaper to fetch and more use to the
+    model than a subset chosen by something that already guessed wrong once.
+
+    Never fails a turn: a store that is down costs a definition the user
+    already gave, not the answer.
     """
-    if store is None or not terms:
+    if store is None:
         return {}
-    found: dict[str, str] = {}
-    for term in terms:
-        try:
-            entry = store.lookup(user_id=user_id, term=term)
-        except Exception:
-            return found
-        if entry is not None:
-            found[term] = entry.definition
-    return found
+    try:
+        return {
+            entry.term: entry.definition
+            for entry in store.list_definitions(user_id=user_id)
+        }
+    except Exception:
+        return {}
 
 
 def personal_definitions_block(definitions: dict[str, str]) -> str:

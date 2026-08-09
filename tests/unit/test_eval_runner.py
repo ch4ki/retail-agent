@@ -9,9 +9,14 @@ from __future__ import annotations
 
 import pytest
 
-from retail_agent.evals.runner import AgentAnswer, run_case
+from retail_agent.evals.runner import (
+    AgentAnswer,
+    ask_rate,
+    asked_before_querying,
+    run_case,
+)
 from retail_agent.evals.scoring import Outcome
-from retail_agent.evals.types import EvalCase
+from retail_agent.evals.types import CaseResult, EvalCase
 
 CASE = EvalCase(
     id="loyal-count",
@@ -471,3 +476,80 @@ def test_an_agent_that_raised_still_reports_no_cost_rather_than_crashing():
 
     assert result.outcome is Outcome.ERROR
     assert result.tokens_in == 0
+
+
+# --- did the agent ask before it spent a query? ---
+
+
+def test_asking_before_the_first_query_counts_as_asked():
+    """The property worth measuring is the ordering, not the call. A turn that
+    queried against a guess and then asked has already spent the money."""
+    assert asked_before_querying(("ask_for_definitions", "analyst", "run_sql"))
+
+
+def test_asking_after_the_query_does_not_count():
+    assert not asked_before_querying(
+        ("analyst", "run_sql", "ask_for_definitions")
+    )
+
+
+def test_never_asking_does_not_count():
+    assert not asked_before_querying(("analyst", "run_sql"))
+
+
+def test_asking_without_ever_querying_still_counts():
+    """The executive cancelled, so nothing ran. The agent still did its part."""
+    assert asked_before_querying(("ask_for_definitions",))
+
+
+def test_the_ask_rate_is_measured_only_over_cases_that_needed_a_definition():
+    """A case the corpus settles has nothing to ask about, and counting it
+    would dilute the number that matters towards 100%."""
+    results = [
+        CaseResult(case_id="a", outcome=Outcome.PASS, asked_first=True),
+        CaseResult(case_id="b", outcome=Outcome.PASS, asked_first=False),
+        CaseResult(case_id="c", outcome=Outcome.PASS, asked_first=None),
+    ]
+
+    assert ask_rate(results) == 0.5
+
+
+def test_no_case_needed_a_definition_so_there_is_no_rate():
+    assert ask_rate([CaseResult(case_id="a", outcome=Outcome.PASS)]) is None
+
+
+def test_a_case_needing_a_definition_records_whether_the_agent_asked():
+    result = run_case(
+        CASE,
+        ask=lambda _q: answer(5746, tools=("ask_for_definitions", "run_sql")),
+        execute=lambda _sql: [[5746]],
+    )
+
+    assert result.asked_first is True
+
+
+def test_a_case_needing_a_definition_records_when_it_did_not():
+    """Right answer, wrong route. Scored separately from correctness because a
+    lucky guess at what "loyal" means is still a guess."""
+    result = run_case(
+        CASE,
+        ask=lambda _q: answer(5746, tools=("run_sql",)),
+        execute=lambda _sql: [[5746]],
+    )
+
+    assert result.outcome is Outcome.PASS
+    assert result.asked_first is False
+
+
+def test_a_case_with_nothing_to_define_is_left_out_of_the_rate():
+    case = EvalCase(
+        id="revenue", question="revenue in March?", reference_sql="SELECT 1 AS n"
+    )
+
+    result = run_case(
+        case,
+        ask=lambda _q: answer(1, tools=("run_sql",)),
+        execute=lambda _sql: [[1]],
+    )
+
+    assert result.asked_first is None

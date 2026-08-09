@@ -19,43 +19,18 @@ analyst's judgement and lets the agent write fresh SQL.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-# Words that look like columns and are not. Each one is a business judgement
-# somebody has to have made; the agent must never quietly make it alone.
-#
-# Deliberately conservative. A term here that is actually unambiguous costs an
-# unnecessary caveat; a term missing from here costs a confident wrong number.
-UNDEFINED_TERMS: dict[str, str] = {
-    "churn": "which customers count as churned, and over what window",
-    "churned": "which customers count as churned, and over what window",
-    "underspending": "what spend level counts as low, and compared to whom",
-    "overspending": "what spend level counts as high, and compared to whom",
-    "top": "how many, and ranked by which measure",
-    "best": "ranked by which measure",
-    "worst": "ranked by which measure",
-    "healthy": "what threshold makes a figure healthy",
-    "unhealthy": "what threshold makes a figure unhealthy",
-    "performing well": "what counts as performing well",
-    "underperforming": "what counts as underperforming",
-    "at risk": "what puts a customer at risk, and over what window",
-    "loyal": "what makes a customer loyal",
-    "engaged": "what makes a customer engaged",
-    "active": "what recency makes a customer active",
-    "inactive": "what recency makes a customer inactive",
-    "high value": "what makes a customer high value",
-    "recently": "how many days counts as recent",
-    "lately": "how many days counts as recent",
-}
-
-_TERM_PATTERNS = tuple(
-    (term, re.compile(rf"\b{re.escape(term)}\b", re.IGNORECASE))
-    for term in UNDEFINED_TERMS
-)
+# There used to be a dict of nineteen words here, matched by regex, and it was
+# how the agent decided a question needed a definition before it could be
+# answered. It could only ever recognise a word somebody had thought of in
+# advance: "make me a report on 10 LGB customers" raised nothing and came back
+# with a confident number. The model asks now, by calling `ask_for_definitions`
+# — see the spec in
+# `docs/superpowers/specs/2026-08-09-model-driven-term-detection-design.md`.
 
 
 @dataclass(frozen=True)
@@ -76,49 +51,6 @@ class Trio:
     # Definitions change. Superseding rather than editing means a report from
     # last quarter can still be read against the definition that produced it.
     superseded_by: str | None = None
-
-    def defines(self, term: str) -> bool:
-        return term.lower() in {k.lower() for k in self.metric_definitions}
-
-
-def undefined_terms(question: str) -> list[str]:
-    """Business terms in the question that the schema cannot settle.
-
-    Longer phrases win over the words inside them, so "performing well" is one
-    finding rather than also matching nothing else. Order follows the question,
-    so the caveat reads in the order the user wrote.
-    """
-    found: list[tuple[int, str]] = []
-    for term, pattern in _TERM_PATTERNS:
-        match = pattern.search(question)
-        if match:
-            found.append((match.start(), term))
-
-    found.sort()
-    kept: list[str] = []
-    for _, term in found:
-        # "top" inside "performing well" would be nonsense, but "at risk"
-        # contains "risk" and "high value" contains "value" — drop any term
-        # that is a substring of one already kept.
-        if any(term in other and term != other for other in kept):
-            continue
-        kept = [k for k in kept if not (k in term and k != term)]
-        kept.append(term)
-    return kept
-
-
-def unresolved(question: str, trios: list[Trio]) -> list[str]:
-    """Terms the question raises that no retrieved trio defines.
-
-    This is what the graph branches on. A term with a definition behind it is
-    answered from the analyst's judgement; a term without one has to be
-    surfaced, because the alternative is inventing it silently.
-    """
-    return [
-        term
-        for term in undefined_terms(question)
-        if not any(trio.defines(term) for trio in trios)
-    ]
 
 
 def definitions_block(trios: list[Trio]) -> str:
@@ -161,10 +93,15 @@ def assumption_note(terms: list[str]) -> str:
 
     Stated in the answer rather than logged, because the number is only
     trustworthy if the reader knows which judgement produced it.
+
+    The term alone, with no gloss on what was undecided. The terms are the
+    executive's own words now rather than keys of a dict that shipped a
+    description alongside each one, and the sentence this asks for — the rule
+    the query actually applied — says more than the gloss ever did.
     """
     if not terms:
         return ""
-    described = "; ".join(f"**{term}** — {UNDEFINED_TERMS[term]}" for term in terms)
+    described = "; ".join(f"**{term}**" for term in terms)
     return (
         "Before the answer, state in one sentence that no agreed definition "
         f"exists for: {described}. Then give the concrete rule your query "
@@ -186,7 +123,7 @@ def sql_assumption_note(terms: list[str]) -> str:
     """
     if not terms:
         return ""
-    described = "; ".join(f"{term} ({UNDEFINED_TERMS[term]})" for term in terms)
+    described = ", ".join(terms)
     return (
         f"No agreed definition exists for: {described}. Choose one concrete, "
         "defensible value and write it as a LITERAL in the query — never a "

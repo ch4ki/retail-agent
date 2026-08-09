@@ -112,8 +112,9 @@ def build_analyst_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]
         """Look up how the business defines the terms in a question.
 
         Use this when a term's meaning is a business decision rather than a
-        column — loyal, churn, top, engaged, at risk, high value, underspending,
-        performing well — and it is not already covered above.
+        column, and it is not already covered above. No list of examples on
+        purpose: one used to be here, and it taught the model to recognise
+        exactly those words and nothing else.
         """
         with capture.step("lookup_definitions") as step:
             found = recall(deps, question)

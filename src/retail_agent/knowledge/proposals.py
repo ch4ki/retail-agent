@@ -1,9 +1,9 @@
 """Candidate definitions for a term nobody has settled.
 
-The agent already refuses to invent a definition silently: `unresolved` finds
-the term, and the analyst stops before spending a query on it. What was missing
-was a way to *answer* that question without ending the turn. This produces the
-options the CLI offers.
+The agent already refuses to invent a definition silently: it calls
+`ask_for_definitions`, and the interrupt stops the turn before a query is spent
+on a guess. What was missing was a way to *answer* that question without ending
+the turn. This produces the options the CLI offers.
 
 The options are a convenience, not the mechanism. The user is asked either way,
 and can always type their own or hand the decision back. So every failure here
@@ -11,9 +11,13 @@ returns an empty list — the same bargain `recall` makes about retrieval, for
 the same reason: a question the agent is right to ask must not depend on a
 model call succeeding.
 
-Deliberately not part of the interrupt predicate. What decides whether to stop
-the turn stays deterministic; only what is *offered* once it has stopped comes
-from a model.
+This module used to end by saying the interrupt predicate stayed deterministic
+— that only what is *offered* once the turn has stopped came from a model. That
+held while a regex over nineteen hardcoded words decided what stopped it, and
+it is what let "10 LGB customers" through: a word nobody had thought to add did
+not exist. The model now decides, by calling `ask_for_definitions`, and this
+module generates the options for whatever it names. What is left deterministic
+is narrower and better chosen — whether the executive has already answered.
 """
 
 from __future__ import annotations
@@ -33,7 +37,8 @@ PROMPT = """\
 An executive asked: {question}
 
 Their question turns on the term "{term}", and nobody has agreed what it means
-here — specifically, {hint}.
+here. Work out for yourself what has to be decided about it — a threshold, a
+window, a ranking, a boundary — and then propose the answers.
 
 Propose {count} different, concrete definitions they could pick from. Each one:
 
@@ -67,7 +72,6 @@ def propose(
     *,
     question: str,
     term: str,
-    hint: str,
     schema: str,
     settled: dict[str, str] | None = None,
 ) -> list[str]:
@@ -75,7 +79,6 @@ def propose(
     prompt = PROMPT.format(
         question=question,
         term=term,
-        hint=hint,
         count=MAX_OPTIONS,
         schema=schema,
         settled=_settled_block(settled or {}),

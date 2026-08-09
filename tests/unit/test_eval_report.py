@@ -11,7 +11,7 @@ import json
 from retail_agent.evals.gate import evaluate_gate
 from retail_agent.evals.report import render_report, to_json
 from retail_agent.evals.scoring import Outcome
-from retail_agent.evals.types import CaseResult
+from retail_agent.evals.types import CaseResult, Gate
 
 
 def results():
@@ -98,3 +98,30 @@ def test_numbers_are_rendered_plainly_not_as_library_reprs():
 
     assert "np.int64" not in text
     assert "5746" in text and "expected 5746" in text
+
+
+def test_the_report_says_how_often_the_agent_asked_before_querying():
+    """The number that replaced a guarantee. Reported next to accuracy because
+    a suite that scores only correctness would call a lucky guess a pass."""
+    gate = Gate(
+        passed=True,
+        accuracy=1.0,
+        reason="ok",
+        results=(
+            CaseResult(case_id="a", outcome=Outcome.PASS, asked_first=True),
+            CaseResult(case_id="b", outcome=Outcome.PASS, asked_first=False),
+        ),
+    )
+
+    assert "asked before querying: 1 of 2" in render_report(gate)
+
+
+def test_a_suite_with_nothing_to_define_does_not_report_a_rate():
+    gate = Gate(
+        passed=True,
+        accuracy=1.0,
+        reason="ok",
+        results=(CaseResult(case_id="a", outcome=Outcome.PASS),),
+    )
+
+    assert "asked before querying" not in render_report(gate)

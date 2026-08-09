@@ -49,6 +49,10 @@ def answer_from_capture(
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         calls=capture.calls,
+        # In order, not as a set: the suite scores whether the agent asked what
+        # a term meant *before* it spent a query, and the sequence is the only
+        # place that shows.
+        tools=tuple(name for name, _, _ in capture.events),
     )
 
 

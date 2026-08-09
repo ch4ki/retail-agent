@@ -1,19 +1,17 @@
-"""The undefined-term rule.
+"""What a trio carries into the prompt, and what the answer has to disclose.
 
-This is the mechanism the design argues is the whole point of the Golden
-Bucket: without it the agent picks a definition, writes clean SQL, and returns a
-confident number nobody can trace back to a decision.
+Detecting the undefined term used to live here too — a regex over nineteen
+words, with tests pinning which ones it found. Both are gone: the model decides
+what it cannot settle by calling `ask_for_definitions`, so there is no word list
+to assert against. What survives is everything downstream of that decision.
 """
-
-import pytest
 
 from retail_agent.knowledge.trios import (
     Trio,
     assumption_note,
     definitions_block,
+    sql_assumption_note,
     style_examples,
-    undefined_terms,
-    unresolved,
 )
 
 
@@ -30,79 +28,6 @@ def trio(**overrides):
     )
     base.update(overrides)
     return Trio(**base)
-
-
-# --- detecting what the schema cannot settle ---
-
-
-@pytest.mark.parametrize(
-    ("question", "expected"),
-    [
-        ("why did our churn rate spike last month?", ["churn"]),
-        ("why are users in state X underspending?", ["underspending"]),
-        ("who are our top customers?", ["top"]),
-        ("which brands are performing well?", ["performing well"]),
-        ("which customers are at risk?", ["at risk"]),
-    ],
-)
-def test_the_briefs_own_questions_raise_a_term(question, expected):
-    assert undefined_terms(question) == expected
-
-
-@pytest.mark.parametrize(
-    "question",
-    [
-        "what was total revenue in March 2024?",
-        "how many orders shipped last week?",
-        "compare revenue for brand X and brand Y",
-        "what is the average order value by state?",
-    ],
-)
-def test_a_question_the_schema_can_settle_raises_nothing(question):
-    """A caveat on a question that did not need one is noise, and noise is how
-    a warning stops being read."""
-    assert undefined_terms(question) == []
-
-
-def test_a_longer_phrase_wins_over_the_word_inside_it():
-    assert undefined_terms("which brands are performing well?") == ["performing well"]
-
-
-def test_terms_are_reported_in_the_order_they_were_asked():
-    found = undefined_terms("show me top customers who are at risk")
-
-    assert found == ["top", "at risk"]
-
-
-def test_detection_is_case_insensitive():
-    assert undefined_terms("Why did CHURN spike?") == ["churn"]
-
-
-def test_a_term_inside_another_word_is_not_a_match():
-    """"topic" is not "top"; "active" is, but "radioactive" is not."""
-    assert undefined_terms("what topics do customers ask about?") == []
-    assert undefined_terms("radioactive materials") == []
-
-
-# --- resolving against retrieved trios ---
-
-
-def test_a_term_a_trio_defines_is_resolved():
-    assert unresolved("why did churn spike?", [trio()]) == []
-
-
-def test_a_term_no_trio_defines_stays_unresolved():
-    assert unresolved("who are our top customers?", [trio()]) == ["top"]
-
-
-def test_no_trios_at_all_leaves_every_term_unresolved():
-    assert unresolved("why did churn spike?", []) == ["churn"]
-
-
-def test_resolution_is_case_insensitive():
-    defined = trio(metric_definitions={"CHURN": "..."})
-
-    assert unresolved("why did churn spike?", [defined]) == []
 
 
 # --- what reaches the model ---
@@ -143,11 +68,11 @@ def test_style_examples_are_capped():
 # --- what the user is told ---
 
 
-def test_the_assumption_note_names_the_term_and_the_judgement():
+def test_the_assumption_note_names_the_term_and_demands_the_rule():
     note = assumption_note(["churn"])
 
     assert "churn" in note
-    assert "window" in note, "says what specifically was undecided"
+    assert "concrete rule" in note, "the rule applied, not a gloss on the term"
 
 
 def test_the_note_asks_for_a_statement_not_a_refusal():
@@ -160,3 +85,19 @@ def test_the_note_asks_for_a_statement_not_a_refusal():
 
 def test_no_terms_means_no_note():
     assert assumption_note([]) == ""
+
+
+def test_a_term_from_outside_the_old_word_list_still_gets_a_note():
+    """The terms come from the executive's own question now rather than from a
+    fixed dict, so any word has to produce a note instead of a KeyError."""
+    note = assumption_note(["LGB"])
+
+    assert "LGB" in note
+    assert "do not refuse" in note.lower()
+
+
+def test_the_sql_note_names_a_term_from_outside_the_old_word_list():
+    note = sql_assumption_note(["LGB"])
+
+    assert "LGB" in note
+    assert "literal" in note.lower(), "still warns off bind parameters"

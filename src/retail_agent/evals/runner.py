@@ -47,10 +47,50 @@ class AgentAnswer:
     # arm. Not the same unit, and the report says so — it is here to catch an
     # arm that wins on accuracy by doing far more work.
     calls: int = 0
+    # Tool names in the order they ran. Carried so the suite can score *how*
+    # an answer was reached and not only whether it was right — specifically
+    # whether the agent asked what a term meant before querying against a guess.
+    tools: tuple[str, ...] = field(default_factory=tuple)
 
 
 Ask = Callable[[str], AgentAnswer]
 Execute = Callable[[str], Sequence[Sequence[Any]]]
+
+# The tool the agent calls when it does not understand a word, and the tool
+# that spends money. The order between them is the whole measurement.
+ASK_TOOL = "ask_for_definitions"
+QUERY_TOOL = "run_sql"
+
+
+def asked_before_querying(tools: Sequence[str]) -> bool:
+    """Did the agent ask what a term meant before it spent a query?
+
+    The ordering, not the call. An agent that queried against an invented
+    definition and asked afterwards has already paid for the wrong number, and
+    counting that as asking would report the bug as the fix.
+
+    Asking and never querying counts: the executive cancelled, or handed the
+    decision back and the turn ended some other way. The agent did its part.
+    """
+    if ASK_TOOL not in tools:
+        return False
+    if QUERY_TOOL not in tools:
+        return True
+    return tools.index(ASK_TOOL) < tools.index(QUERY_TOOL)
+
+
+def ask_rate(results: Sequence[CaseResult]) -> float | None:
+    """How often the agent asked, over the cases that had something to ask about.
+
+    `None` when no case did. This is the number that replaced a guarantee: the
+    old detector could not fail to fire, and a tool can simply not be called.
+    Nothing enforces it any more, so it is measured instead — a rate that slips
+    is the signal to put a deterministic backstop back in front of the analyst.
+    """
+    relevant = [r for r in results if r.asked_first is not None]
+    if not relevant:
+        return None
+    return round(sum(1 for r in relevant if r.asked_first) / len(relevant), 4)
 
 
 def run_case(case: EvalCase, *, ask: Ask, execute: Execute) -> CaseResult:
@@ -80,6 +120,7 @@ def run_case(case: EvalCase, *, ask: Ask, execute: Execute) -> CaseResult:
             sql=answer.sql,
             seconds=time.monotonic() - started,
             **_cost(answer),
+        **_route(case, answer),
         )
 
     if not reference:
@@ -91,6 +132,7 @@ def run_case(case: EvalCase, *, ask: Ask, execute: Execute) -> CaseResult:
             sql=answer.sql,
             seconds=time.monotonic() - started,
             **_cost(answer),
+        **_route(case, answer),
         )
 
     expected = _extract(reference, ranked=case.ranked)
@@ -153,7 +195,20 @@ def run_case(case: EvalCase, *, ask: Ask, execute: Execute) -> CaseResult:
         used_trios=tuple(answer.trios),
         seconds=time.monotonic() - started,
         **_cost(answer),
+        **_route(case, answer),
     )
+
+
+def _route(case: EvalCase, answer: AgentAnswer) -> dict:
+    """Whether the agent asked before it queried, for the cases where it should.
+
+    Separate from `_cost` because it needs the case: only a case naming
+    `required_definitions` had anything to ask about, and scoring the rest would
+    dilute the rate towards 100% with turns that were right to stay quiet.
+    """
+    if not case.required_definitions:
+        return {"asked_first": None}
+    return {"asked_first": asked_before_querying(answer.tools)}
 
 
 def _cost(answer: AgentAnswer) -> dict:
