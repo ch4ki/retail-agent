@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from retail_agent.agent.capture import TurnCapture
-from retail_agent.agent.middleware import _summarization, supervisor_middleware
+from retail_agent.agent.middleware import _recorder, _summarization, supervisor_middleware
 from retail_agent.agent.prompts import CONVERSATION_SUMMARY_PROMPT
 
 
@@ -87,10 +87,7 @@ def test_the_recorder_measures_the_thread_it_just_finished(make_deps):
     This is that number."""
     deps = make_deps()
     capture = TurnCapture(user_id="exec")
-    # `_resilience` appends after the recorder, and with no fallbacks
-    # configured it still appends `ModelRetryMiddleware` — so the recorder is
-    # second-to-last, not last.
-    recorder = supervisor_middleware(deps, capture)[-2]
+    recorder = _recorder(deps, capture)
     state = {
         "messages": [
             HumanMessage(content="How did denim do in Q1?"),
