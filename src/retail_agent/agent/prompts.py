@@ -129,11 +129,3 @@ Explain what data is available and what kinds of question it can answer. Do not
 list every column unless asked; group them into what they let you do. Mention
 that customer contact details exist but are masked and cannot be shown.
 """.strip()
-
-# Shown when the input guard refuses. Naming what the agent *is* for turns a
-# refusal into an offer, which is the difference between a guard and a wall.
-REFUSAL = (
-    "I can only help with questions about the retail data — sales, orders, "
-    "products, customers and the reports built from them. Ask me about any of "
-    "those and I'll dig in."
-)
