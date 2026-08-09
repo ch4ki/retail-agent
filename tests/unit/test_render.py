@@ -81,16 +81,6 @@ def test_the_footnote_can_be_turned_off():
     assert "masked" not in text(console)
 
 
-def test_a_degraded_turn_says_so():
-    console = recorder()
-    capture = TurnCapture()
-    capture.status = "degraded"
-
-    render_answer(console, "Partial.", capture)
-
-    assert "partial answer" in text(console)
-
-
 def test_the_confirmation_shows_the_manifest_verbatim():
     console = recorder()
     render_confirmation(console, "This will delete 2 report(s):\n  - Acme Q1\n  - Beta Q1")
@@ -191,7 +181,6 @@ def test_metrics_name_the_window_they_are_over():
         console,
         {
             "turns": 7,
-            "degraded_rate": 0.0,
             "first_pass_validity": 0.5,
             "self_correction_rate": 1.0,
             "redactions": 3,

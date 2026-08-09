@@ -19,7 +19,7 @@ from retail_agent.config import Settings
 from retail_agent.obs.traces import InMemoryTraceStore
 from retail_agent.safety.pii import PiiPolicy
 from retail_agent.store.definitions import InMemoryDefinitionStore
-from retail_agent.store.memory_reports import InMemoryReportStore
+from retail_agent.store.reports import InMemoryReportStore
 from retail_agent.store.preferences import InMemoryPreferenceStore
 
 

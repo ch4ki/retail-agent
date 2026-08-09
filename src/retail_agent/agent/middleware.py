@@ -43,7 +43,6 @@ from retail_agent.config import Settings
 from retail_agent.datasources.base import DataSourceError
 from retail_agent.knowledge.trios import UNDEFINED_TERMS, unresolved
 from retail_agent.llm.messages import message_text
-from retail_agent.safety.egress import scan_text
 from retail_agent.store.definitions import remembered
 from retail_agent.store.personas import active_body
 from retail_agent.store.preferences import notes_for, preference_block
@@ -262,35 +261,27 @@ def describe_open_terms(terms: Sequence[str]) -> str:
 
 
 def _recorder(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
-    """The last sweep and the trace, in one hook.
+    """The trace, written on every path out of the turn.
 
-    Both, rather than two hooks, because their order matters and `after_agent`
-    hooks run in the reverse of the list they were declared in — an ordering
-    that is easy to get right once and easy to break silently later. The stored
-    trace must carry the text the user saw, so the scan happens first, here.
+    No output sweep here any more. Personal data is stopped where it enters
+    rather than where it leaves: the SQL guard drops restricted columns,
+    `mask_dataframe` masks what survives, and `_pii()` redacts the tool result
+    before the model reads it. A final-answer regex could only catch what those
+    three missed, and what reaches this hook is the text the user saw.
     """
 
     @after_agent
-    def record(state, runtime) -> dict | None:
+    def record(state, runtime) -> None:
         message = _last_ai_message(state)
         answer = message_text(message).strip() if message is not None else ""
 
-        scanned = scan_text(answer)
-        if scanned.findings:
-            log.warning("egress scan redacted %s", ", ".join(scanned.findings))
-            capture.status = "degraded"
-
         try:
-            deps.traces.record(capture.to_trace(scanned.text))
+            deps.traces.record(capture.to_trace(answer))
         except Exception as err:
             # Losing a trace should not lose the answer it describes.
             log.warning("could not record the trace (%s)", err)
 
-        if not scanned.findings or message is None:
-            return None
-        # Same id, so the reducer replaces the message rather than appending a
-        # second copy of the answer.
-        return {"messages": [AIMessage(content=scanned.text, id=message.id)]}
+        return None
 
     return record
 

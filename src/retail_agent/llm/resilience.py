@@ -6,9 +6,9 @@ setting: transient failures are retried on the current provider, permanent ones
 move straight to the next, and a provider that keeps failing is skipped
 entirely until a cooldown elapses.
 
-The whole chain sits behind the three methods a caller actually uses —
-`invoke`, `with_structured_output` and `bind_tools` — so nothing in `agent/`
-knows this exists.
+The whole chain sits behind the four methods a caller actually uses —
+`invoke`, `with_structured_output`, `bind_tools` and `bind` — so nothing in
+`agent/` knows this exists.
 """
 
 from __future__ import annotations
@@ -146,8 +146,22 @@ class ResilientChatModel:
         cannot call anything. The breaker is shared, so an outage is not
         forgotten each time the agent rebinds.
         """
+        return self._rebind(lambda model: model.bind_tools(tools, **kwargs))
+
+    def bind(self, **kwargs):
+        """The compile path for an agent with no tools.
+
+        `create_agent` calls `bind_tools` only when it has tools to bind and
+        `bind` otherwise, so the report writer — the one subagent that queries
+        nothing — reaches this instead. Same rule as above: every provider gets
+        the settings, or a fallback answers under a different configuration than
+        the primary it replaced.
+        """
+        return self._rebind(lambda model: model.bind(**kwargs))
+
+    def _rebind(self, bind):
         return ResilientChatModel(
-            [(name, model.bind_tools(tools, **kwargs)) for name, model in self._providers],
+            [(name, bind(model)) for name, model in self._providers],
             attempts=self._attempts,
             breaker=self._breaker,
             sleep=self._sleep,

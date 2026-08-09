@@ -17,7 +17,7 @@ class ValueSource:
     dialect = "bigquery"
 
     def __init__(self, values=None, fail=False):
-        self.values = values or {"gender__n": 2, "gender__v": [{"value": "F"}, {"value": "M"}]}
+        self.values = values or {"gender": [{"value": "F"}, {"value": "M"}]}
         self.fail = fail
         self.queries: list[str] = []
 
@@ -39,7 +39,7 @@ class ValueSource:
         return [self.describe("users")]
 
     def column_values(self, table, columns):
-        from retail_agent.datasources.column_values import (
+        from retail_agent.datasources.bigquery import (
             build_discovery_query,
             read_discovery_row,
         )

@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from google.api_core import exceptions as gexc
 from google.cloud import bigquery
 
 from retail_agent.config import Settings
-from retail_agent.datasources.column_values import (
-    build_discovery_query,
-    read_discovery_row,
-)
 from retail_agent.datasources.base import (
     ColumnSchema,
     DataSourceError,
@@ -24,6 +20,12 @@ from retail_agent.datasources.base import (
 )
 
 log = logging.getLogger(__name__)
+
+# Measured on theLook, where the gap is clean: the columns worth listing top out
+# at 26 distinct values (product category, order status, traffic source, country,
+# gender, department) and the next one up is state at 230. Listing 230 states
+# would cost more prompt than the mistakes it prevents.
+MAX_DISTINCT = 30
 
 _SYNTAX_MARKERS = (
     "syntax error",
@@ -171,3 +173,58 @@ class BigQuerySource:
         if isinstance(err, gexc.BadRequest):
             return QuerySyntaxError(message)
         return DataSourceError(message)
+
+
+# --- value discovery ---
+#
+# Which columns may be enumerated is a policy every warehouse shares and lives
+# in `column_values`. Asking for the values is dialect-specific, so it lives
+# here with the dialect that answers it.
+
+
+def build_discovery_query(
+    table: str, columns: Sequence[str], *, dataset: str
+) -> str:
+    """One query per table rather than one per column.
+
+    `APPROX_TOP_COUNT` answers both questions in a single aggregate: it brings
+    back the values, and how many it brings back says whether the column is an
+    enumeration at all. So a table costs one scan rather than one per candidate
+    column, and there is no second count to keep in step with the values.
+
+    Two slots more than the ceiling, because that makes the reading exact at
+    the boundary: NULL occupies a slot here though it is not a value worth
+    offering, so a column holding exactly `MAX_DISTINCT` values still fits, and
+    one holding a single value more cannot be mistaken for fitting.
+    """
+    if not columns:
+        return ""
+
+    selections = ", ".join(
+        f"APPROX_TOP_COUNT(`{column}`, {MAX_DISTINCT + 2}) AS `{column}`"
+        for column in columns
+    )
+    return f"SELECT {selections} FROM `{dataset}.{table}`"
+
+
+def read_discovery_row(
+    row: Mapping[str, object], columns: Sequence[str]
+) -> dict[str, tuple[str, ...]]:
+    """Turn one discovery row into {column: values}, dropping what does not fit."""
+    found: dict[str, tuple[str, ...]] = {}
+
+    for column in columns:
+        values = sorted(
+            str(entry["value"])
+            for entry in row.get(column) or []
+            # NULL is not a literal worth offering: `WHERE status = 'None'`
+            # matches nothing and reads as a real filter.
+            if entry["value"] is not None
+        )
+        # Sorted, not frequency-ordered: this text goes into every prompt, and
+        # an order that shifts with the data would invalidate prompt caches and
+        # make two runs hard to diff.
+        if values and len(values) <= MAX_DISTINCT:
+            found[column] = tuple(values)
+
+    return found

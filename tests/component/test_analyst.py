@@ -145,6 +145,25 @@ def test_a_report_with_no_trio_behind_it_still_writes(make_deps):
     assert writer["report_writer"]("Revenue rose 4%.")
 
 
+def test_the_report_writer_runs_through_the_provider_chain(make_deps):
+    """The tool-less subagent compiles down a different path, and it was broken.
+
+    Every other agent here has tools, so every other agent compiled through
+    `bind_tools`, which the chain implements. `create_agent` binds a tool-less
+    agent with `bind` instead — so the first live report died on
+    `AttributeError` while the whole offline suite stayed green, because the
+    doubles are handed to `create_agent` directly rather than through a chain.
+    """
+    from retail_agent.llm.resilience import ResilientChatModel
+
+    deps = make_deps(script=["## Summary\nRevenue rose."])
+    chain = ResilientChatModel([("primary", deps.llm), ("fallback", deps.llm)])
+    object.__setattr__(deps, "llm", chain)
+    writer, _ = subagents_for(deps)
+
+    assert "Revenue rose" in writer["report_writer"]("Revenue rose 4% in Q1.")
+
+
 def test_the_report_writer_cannot_reach_the_data(make_deps):
     """No tools, so a number missing from the brief cannot appear in the report."""
     deps = make_deps(script=["## Summary\nRevenue rose."])

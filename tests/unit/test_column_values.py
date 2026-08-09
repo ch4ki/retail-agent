@@ -18,11 +18,7 @@ to list" would be luck, not a rule.
 from __future__ import annotations
 
 from retail_agent.datasources.base import ColumnSchema, TableSchema
-from retail_agent.datasources.column_values import (
-    MAX_DISTINCT,
-    enumerable_columns,
-    with_values,
-)
+from retail_agent.datasources.column_values import enumerable_columns, with_values
 
 
 def table(*columns: ColumnSchema) -> TableSchema:
@@ -96,92 +92,8 @@ def test_an_existing_description_survives_alongside_the_values():
     assert "'F'" in ddl
 
 
-def test_the_cardinality_ceiling_sits_above_category_and_below_state():
-    """Measured on theLook, where there is a clean gap: the useful columns top
-    out at 26 distinct values (product category) and the next one up is 230
-    (state). Listing 230 states would cost more prompt than it saves."""
-    assert 26 <= MAX_DISTINCT < 230
-
-
-# --- discovering the values ---
-
-
-def test_the_discovery_query_asks_for_count_and_values_per_column():
-    from retail_agent.datasources.column_values import build_discovery_query
-
-    sql = build_discovery_query("users", ("gender", "country"), dataset="ds")
-
-    assert "APPROX_COUNT_DISTINCT(`gender`)" in sql
-    assert "APPROX_TOP_COUNT(`gender`, 31)" in sql
-    assert "APPROX_COUNT_DISTINCT(`country`)" in sql
-    assert "`ds.users`" in sql
-
-
-def test_the_discovery_query_asks_for_one_more_than_the_ceiling():
-    """So a column sitting exactly at the ceiling is distinguishable from one
-    just over it, rather than silently truncated to look small."""
-    from retail_agent.datasources.column_values import build_discovery_query
-
-    assert f"APPROX_TOP_COUNT(`gender`, {MAX_DISTINCT + 1})" in build_discovery_query(
-        "users", ("gender",), dataset="ds"
-    )
-
-
-def test_no_columns_means_no_query():
-    """A table of nothing but ids and timestamps must not be queried at all."""
-    from retail_agent.datasources.column_values import build_discovery_query
-
-    assert build_discovery_query("users", (), dataset="ds") == ""
-
-
-def test_a_low_cardinality_column_yields_its_values():
-    from retail_agent.datasources.column_values import read_discovery_row
-
-    row = {"gender__n": 2, "gender__v": [{"value": "F", "count": 9}, {"value": "M", "count": 8}]}
-
-    assert read_discovery_row(row, ("gender",)) == {"gender": ("F", "M")}
-
-
-def test_a_high_cardinality_column_is_dropped():
-    """230 states is more prompt than the mistakes it would prevent."""
-    from retail_agent.datasources.column_values import read_discovery_row
-
-    row = {"state__n": 230, "state__v": [{"value": "Texas", "count": 1}]}
-
-    assert read_discovery_row(row, ("state",)) == {}
-
-
-def test_values_come_back_in_a_stable_order():
-    """The schema goes into every prompt. Reordering it between runs would
-    invalidate prompt caches and make two runs hard to diff."""
-    from retail_agent.datasources.column_values import read_discovery_row
-
-    row = {
-        "s__n": 3,
-        "s__v": [
-            {"value": "Shipped", "count": 5},
-            {"value": "Complete", "count": 9},
-            {"value": "Cancelled", "count": 7},
-        ],
-    }
-
-    assert read_discovery_row(row, ("s",)) == {"s": ("Cancelled", "Complete", "Shipped")}
-
-
-def test_nulls_are_not_offered_as_a_literal():
-    """`WHERE status = 'None'` matches nothing. A NULL is not a value the model
-    should be told to compare against."""
-    from retail_agent.datasources.column_values import read_discovery_row
-
-    row = {"s__n": 2, "s__v": [{"value": "F", "count": 5}, {"value": None, "count": 2}]}
-
-    assert read_discovery_row(row, ("s",)) == {"s": ("F",)}
-
-
-def test_a_column_missing_from_the_row_is_skipped_not_an_error():
-    from retail_agent.datasources.column_values import read_discovery_row
-
-    assert read_discovery_row({}, ("gender",)) == {}
+# Reading the values out of the warehouse takes BigQuery SQL and is tested
+# beside the adapter that writes it, in `test_bigquery_source.py`.
 
 
 # --- business conventions, beside the values they qualify ---

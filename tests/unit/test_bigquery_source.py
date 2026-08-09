@@ -3,7 +3,12 @@ import pytest
 
 from retail_agent.config import Settings
 from retail_agent.datasources.base import DataSource, QueryCostError, QuerySyntaxError
-from retail_agent.datasources.bigquery import BigQuerySource
+from retail_agent.datasources.bigquery import (
+    MAX_DISTINCT,
+    BigQuerySource,
+    build_discovery_query,
+    read_discovery_row,
+)
 
 
 class FakeField:
@@ -198,7 +203,7 @@ def test_column_values_are_read_once_per_table():
             calls.append(sql)
             return super().query(sql, job_config)
 
-    job = FakeJob(df=pd.DataFrame([{"gender__n": 2, "gender__v": [{"value": "F"}]}]))
+    job = FakeJob(df=pd.DataFrame([{"gender": [{"value": "F"}]}]))
     source = BigQuerySource(
         Settings(_env_file=None, google_cloud_project="p"), client=CountingClient(job)
     )
@@ -208,3 +213,81 @@ def test_column_values_are_read_once_per_table():
 
     assert first == second == {"gender": ("F",)}
     assert len(calls) == 1, f"queried {len(calls)} times for one table"
+
+
+# --- value discovery ---
+#
+# Which columns are safe to ask about is warehouse-agnostic policy, tested in
+# `test_column_values.py`. Asking is BigQuery SQL, so it is tested here.
+
+
+def entries(*values):
+    """What `APPROX_TOP_COUNT` hands back: one struct per distinct value."""
+    return [{"value": value, "count": 1} for value in values]
+
+
+def test_the_discovery_query_asks_for_the_values_of_every_candidate_column():
+    sql = build_discovery_query("users", ("gender", "country"), dataset="ds")
+
+    assert f"APPROX_TOP_COUNT(`gender`, {MAX_DISTINCT + 2})" in sql
+    assert f"APPROX_TOP_COUNT(`country`, {MAX_DISTINCT + 2})" in sql
+    assert "`ds.users`" in sql
+
+
+def test_the_values_alone_say_whether_the_column_is_an_enumeration():
+    """One aggregate per column, not two: the number of values that come back
+    is the cardinality answer, so a separate count would be a second thing to
+    keep in step with the first."""
+    assert "APPROX_COUNT_DISTINCT" not in build_discovery_query(
+        "users", ("gender",), dataset="ds"
+    )
+
+
+def test_no_columns_means_no_query():
+    """A table of nothing but ids and timestamps must not be queried at all."""
+    assert build_discovery_query("users", (), dataset="ds") == ""
+
+
+def test_a_low_cardinality_column_yields_its_values():
+    row = {"gender": entries("F", "M")}
+
+    assert read_discovery_row(row, ("gender",)) == {"gender": ("F", "M")}
+
+
+def test_a_high_cardinality_column_is_dropped():
+    """230 states is more prompt than the mistakes it would prevent. The query
+    asks for more slots than the ceiling precisely so that "over" is visible
+    here rather than truncated into looking small enough."""
+    row = {"state": entries(*(f"state-{i}" for i in range(MAX_DISTINCT + 1)))}
+
+    assert read_discovery_row(row, ("state",)) == {}
+
+
+def test_a_column_at_the_ceiling_survives_a_null_taking_a_slot():
+    """Why the query asks for two slots more than the ceiling rather than one:
+    NULL occupies a slot without being a value, so a column holding exactly
+    `MAX_DISTINCT` values would otherwise look like one over."""
+    values = tuple(f"value-{i:02d}" for i in range(MAX_DISTINCT))
+    row = {"s": entries(*values, None)}
+
+    assert read_discovery_row(row, ("s",)) == {"s": values}
+
+
+def test_values_come_back_in_a_stable_order():
+    """The schema goes into every prompt. Reordering it between runs would
+    invalidate prompt caches and make two runs hard to diff."""
+    row = {"s": entries("Shipped", "Complete", "Cancelled")}
+
+    assert read_discovery_row(row, ("s",)) == {"s": ("Cancelled", "Complete", "Shipped")}
+
+
+def test_nulls_are_not_offered_as_a_literal():
+    """`WHERE status = 'None'` matches nothing. A NULL is not a value the model
+    should be told to compare against."""
+    row = {"s": entries("F", None)}
+
+    assert read_discovery_row(row, ("s",)) == {"s": ("F",)}
+
+
+def test_a_column_missing_from_the_row_is_skipped_not_an_error():
+    assert read_discovery_row({}, ("gender",)) == {}

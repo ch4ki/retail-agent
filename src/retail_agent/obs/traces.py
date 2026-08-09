@@ -64,7 +64,6 @@ def compute_metrics(traces: list[TraceRecord]) -> dict:
     if not traces:
         return {
             "turns": 0,
-            "degraded_rate": 0.0,
             "first_pass_validity": 0.0,
             "self_correction_rate": 0.0,
             "redactions": 0,
@@ -88,9 +87,6 @@ def compute_metrics(traces: list[TraceRecord]) -> dict:
 
     return {
         "turns": len(traces),
-        "degraded_rate": _ratio(
-            len([t for t in traces if t.status == "degraded"]), len(traces)
-        ),
         "first_pass_validity": _ratio(len(first_clean), len(with_sql)),
         "self_correction_rate": _ratio(len(recovered), len(needed_repair)),
         "redactions": sum(t.redactions for t in traces),

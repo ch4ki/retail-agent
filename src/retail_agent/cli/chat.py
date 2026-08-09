@@ -350,10 +350,10 @@ def _answer(console, deps, saver, user, session_id, question):
 def _record_failure(deps, capture):
     """The trace for a turn that died. Never raises.
 
-    `failed` rather than `degraded`: degraded means an answer came back with
-    something taken out of it, and `/metrics` divides by that distinction. A
-    turn that repaired its SQL and then died must not count as a self-correction
-    that worked.
+    `failed` rather than left at `ok`: `self_correction_rate` counts a repaired
+    turn as recovered only when it ended `ok`, so a turn that fixed its SQL and
+    then died must not count as a self-correction that worked. That ratio is the
+    only thing reading `status` now, and it is why the field survived `degraded`.
     """
     capture.status = "failed"
     trace = capture.to_trace("")

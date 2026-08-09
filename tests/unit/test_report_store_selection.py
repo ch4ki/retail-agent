@@ -1,6 +1,5 @@
 from retail_agent.config import Settings
-from retail_agent.store.memory_reports import InMemoryReportStore
-from retail_agent.store.reports import build_report_store
+from retail_agent.store.reports import InMemoryReportStore, build_report_store
 
 UNREACHABLE = "postgresql://nobody@127.0.0.1:1/nothing"
 

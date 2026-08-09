@@ -111,15 +111,21 @@ def test_a_trace_carries_no_row_values(make_deps, traces):
     assert "a@b.com" not in str(stored)
 
 
-def test_the_final_answer_is_swept_for_leaked_contact_details(make_deps):
-    """The second line of defence: a model inventing something that looks real."""
+def test_the_final_answer_is_not_swept_for_contact_details(make_deps):
+    """The output sweep is gone: PII is stopped where it enters, not where it leaves.
+
+    Asserted rather than deleted, because this test used to claim the opposite
+    and a reader deserves to see which way the decision went. The three inbound
+    layers — SQL guard, `mask_dataframe`, `_pii()` — mean the model is never
+    shown personal data, so the only thing a final-answer regex could still
+    match is something the model made up.
+    """
     deps = make_deps(script=["Contact them at dana@example.com."])
 
     answer, capture = run(deps, "who should I call?")
 
-    assert "dana@example.com" not in answer
-    assert "[redacted:email]" in answer
-    assert capture.status == "degraded"
+    assert "dana@example.com" in answer
+    assert capture.status == "ok"
 
 
 def test_describe_schema_costs_no_query_and_says_what_it_found(make_deps, source):

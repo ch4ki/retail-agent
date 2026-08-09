@@ -228,11 +228,18 @@ class ToolBindable(FlakyModel):
     def __init__(self, name, errors=(), answer="ok"):
         super().__init__(name, errors=errors, answer=answer)
         self.bound = None
+        self.settings = None
 
     def bind_tools(self, tools, **kwargs):
         bound = ToolBindable(f"{self.name}+tools", errors=self.errors, answer=self.answer)
         bound.bound = list(tools)
         self.bound = list(tools)
+        return bound
+
+    def bind(self, **kwargs):
+        bound = ToolBindable(f"{self.name}+bound", errors=self.errors, answer=self.answer)
+        bound.settings = dict(kwargs)
+        self.settings = dict(kwargs)
         return bound
 
 
@@ -263,6 +270,34 @@ def test_a_bound_chain_still_falls_back():
     assert chain.bind_tools([print]).invoke("hi") == "b+tools:ok"
 
 
+def test_binding_settings_keeps_the_whole_chain():
+    """A subagent with no tools compiles through `bind`, not `bind_tools`.
+
+    `create_agent` only calls `bind_tools` when it has tools to bind; with an
+    empty tool list it calls `bind` instead. The report writer is exactly that
+    agent, so it was the one caller the chain had no method for, and it raised
+    `AttributeError` on the first live report.
+    """
+    primary, fallback = ToolBindable("a"), ToolBindable("b")
+    chain = ResilientChatModel([("a", primary), ("b", fallback)], sleep=lambda _: None)
+
+    bound = chain.bind(temperature=0)
+
+    assert isinstance(bound, ResilientChatModel)
+    assert primary.settings == {"temperature": 0}
+    assert fallback.settings == {"temperature": 0}, (
+        "a fallback bound differently from the primary answers differently"
+    )
+
+
+def test_a_settings_bound_chain_still_falls_back():
+    primary = ToolBindable("a", errors=[RuntimeError("503 unavailable")] * 3)
+    fallback = ToolBindable("b")
+    chain = ResilientChatModel([("a", primary), ("b", fallback)], sleep=lambda _: None)
+
+    assert chain.bind(temperature=0).invoke("hi") == "b+bound:ok"
+
+
 def test_the_breaker_survives_binding():
     """A fresh breaker per binding would forget an outage on every turn, and the
     agent rebuilds its model binding once per turn."""
@@ -284,9 +319,8 @@ def test_an_unknown_attribute_raises_rather_than_reaching_the_primary():
     One existed briefly, forwarding anything it did not implement to the primary
     provider — which would have let a langchain that calls `stream()` silently
     skip the fallback chain while the resilience claim stayed in the README.
-    Instrumenting a real compiled agent showed langchain reads nothing off the
-    chain but `invoke` and `bind_tools`, so the delegator was covering a case
-    that does not occur and hiding one that would matter.
+    Raising is what surfaced the missing `bind`: a delegator would have compiled
+    the report writer onto the primary alone and reported no error at all.
     """
     chain = ResilientChatModel([("a", ToolBindable("a"))])
 

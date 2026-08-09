@@ -27,8 +27,6 @@ def render_answer(console: Console, answer: str, capture=None, prefs=None) -> No
         return
 
     footnotes = []
-    if capture.status == "degraded":
-        footnotes.append("partial answer — see the explanation above")
     if capture.redactions:
         footnotes.append(f"{capture.redactions} personal-data values masked")
     if len(capture.attempts) > 1:
@@ -200,7 +198,6 @@ def render_metrics(console: Console, metrics: dict) -> None:
     table.add_column("metric", style="dim")
     table.add_column("value")
     table.add_row("turns", str(turns))
-    table.add_row("degraded", f"{metrics['degraded_rate']:.0%}")
     table.add_row("SQL valid first pass", f"{metrics['first_pass_validity']:.0%}")
     table.add_row("self-correction succeeded", f"{metrics['self_correction_rate']:.0%}")
     table.add_row("personal-data values masked", str(metrics["redactions"]))

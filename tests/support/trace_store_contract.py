@@ -118,21 +118,20 @@ class TraceStoreContract:
         """A resumed turn is persisted once completed; a retry must not double
         it, or every metric computed per turn is wrong."""
         store.record(_record("abc123", status="ok"))
-        store.record(_record("abc123", status="degraded"))
+        store.record(_record("abc123", status="failed"))
 
         recent = store.recent(owner_id="dana", limit=10)
 
         assert len(recent) == 1
-        assert recent[0].status == "degraded", "the later record wins"
+        assert recent[0].status == "failed", "the later record wins"
 
     def test_metrics_over_recorded_turns(self, store):
         store.record(_record("t1", status="ok", redactions=2, bytes_billed=1000))
-        store.record(_record("t2", status="degraded", redactions=0, bytes_billed=3000))
+        store.record(_record("t2", status="failed", redactions=0, bytes_billed=3000))
 
         metrics = store.metrics(owner_id="dana")
 
         assert metrics["turns"] == 2
-        assert metrics["degraded_rate"] == 0.5
         assert metrics["bytes_billed"] == 4000
         assert metrics["redactions"] == 2
 
@@ -140,7 +139,7 @@ class TraceStoreContract:
         metrics = store.metrics(owner_id="dana")
 
         assert metrics["turns"] == 0
-        assert metrics["degraded_rate"] == 0.0
+        assert metrics["first_pass_validity"] == 0.0
 
     def test_first_pass_validity_counts_turns_whose_first_draft_survived(self, store):
         clean = [{"step_id": "step_1", "violations": [], "error": None}]

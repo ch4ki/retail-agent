@@ -2,8 +2,8 @@
 
 Deliberately separate from the `Report` and `AuditEntry` dataclasses in
 `reports.py`. Those are the domain types the whole application passes around,
-and `InMemoryReportStore` must be able to produce them without importing
-SQLAlchemy or holding a session. Rows are converted at the boundary.
+and `InMemoryReportStore` must be able to produce them without a database
+session. Rows are converted at the boundary.
 """
 
 from __future__ import annotations

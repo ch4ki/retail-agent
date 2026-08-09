@@ -50,7 +50,7 @@ def test_an_unreachable_database_degrades_rather_than_raising():
     deps = build_deps(_settings(), llm=object(), source=object())
 
     from retail_agent.obs.traces import InMemoryTraceStore
-    from retail_agent.store.memory_reports import InMemoryReportStore
+    from retail_agent.store.reports import InMemoryReportStore
 
     assert isinstance(deps.traces, InMemoryTraceStore)
     assert isinstance(deps.reports, InMemoryReportStore)
