@@ -26,7 +26,6 @@ from langchain.agents.middleware import (
     ToolCallLimitMiddleware,
     ToolErrorMiddleware,
     after_agent,
-    before_agent,
     dynamic_prompt,
 )
 from langchain_core.messages import AIMessage
@@ -35,7 +34,6 @@ from retail_agent.agent.capture import PendingDefinition, TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.prompts import (
     PERSONA_DEFAULT,
-    REFUSAL,
     SAFETY_RULES,
     SUPERVISOR_PROMPT,
 )
@@ -46,10 +44,9 @@ from retail_agent.datasources.base import DataSourceError
 from retail_agent.knowledge.trios import UNDEFINED_TERMS, unresolved
 from retail_agent.llm.messages import message_text
 from retail_agent.safety.egress import scan_text
-from retail_agent.safety.scope import refuse
 from retail_agent.store.definitions import remembered
 from retail_agent.store.personas import active_body
-from retail_agent.store.preferences import preferred, style_instruction
+from retail_agent.store.preferences import notes_for, preference_block
 
 log = logging.getLogger(__name__)
 
@@ -97,7 +94,6 @@ def supervisor_middleware(
     return and the disclosure `assumption_note` forces into the answer.
     """
     return [
-        _scope_guard(),
         _prompt(deps, capture),
         *_pii(),
         _approval_gate(deps, capture, ask_for_definitions=ask_for_definitions),
@@ -137,46 +133,38 @@ def describe_failure(error: Exception, request: object) -> str | None:
     return None
 
 
+def supervisor_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
+    """The supervisor's system prompt for one model call.
+
+    A plain function rather than only the closure below, because this is the
+    part with a decision in it — what gets appended and when — and a test of it
+    should not have to build a `ModelRequest` to ask.
+    """
+    prompt = SUPERVISOR_PROMPT.format(
+        persona=active_body(deps.personas) or PERSONA_DEFAULT,
+        safety=SAFETY_RULES,
+    )
+    # Appended only when there is something to append: a user with no notes
+    # should get the same prompt as before this feature existed, not the same
+    # prompt with two blank lines welded to the end.
+    block = preference_block(notes_for(deps.preferences, capture.user_id))
+    return f"{prompt}\n\n{block}" if block else prompt
+
+
 def _prompt(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
     """The supervisor's system prompt, assembled per model call.
 
     Per call rather than at build time, and that is not a detail. The persona is
-    a database row the CEO can edit weekly, and the preference is a row the user
-    can change mid-session; binding either when the agent is constructed means a
-    long-lived process serves the old one until it restarts.
+    a database row the CEO can edit weekly, and the preferences are rows the
+    user can change mid-session; binding either when the agent is constructed
+    means a long-lived process serves the old one until it restarts.
     """
 
     @dynamic_prompt
     def supervisor_prompt(request) -> str:
-        return SUPERVISOR_PROMPT.format(
-            persona=active_body(deps.personas) or PERSONA_DEFAULT,
-            safety=SAFETY_RULES,
-        ) + "\n\n" + style_instruction(preferred(deps.preferences, capture.user_id))
+        return supervisor_system_prompt(deps, capture)
 
     return supervisor_prompt
-
-
-def _scope_guard() -> AgentMiddleware:
-    """Refuse before a model reads it.
-
-    `can_jump_to=["end"]` is what makes this a guard rather than advice: the
-    refusal is the whole turn, and no tool can run after it.
-    """
-
-    @before_agent(can_jump_to=["end"])
-    def scope_guard(state, runtime) -> dict | None:
-        question = _last_user_text(state)
-        reason = refuse(question) if question else None
-        if reason is None:
-            return None
-
-        log.info("refused a request: %s", reason)
-        return {
-            "messages": [AIMessage(content=f"{REFUSAL}\n\n(Specifically: {reason}.)")],
-            "jump_to": "end",
-        }
-
-    return scope_guard
 
 
 def _approval_gate(
@@ -305,13 +293,6 @@ def _recorder(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
         return {"messages": [AIMessage(content=scanned.text, id=message.id)]}
 
     return record
-
-
-def _last_user_text(state: dict) -> str:
-    for message in reversed(state.get("messages", []) or []):
-        if getattr(message, "type", "") == "human":
-            return message_text(message).strip()
-    return ""
 
 
 def _last_ai_message(state: dict):

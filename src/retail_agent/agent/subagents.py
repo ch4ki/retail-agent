@@ -45,7 +45,7 @@ from retail_agent.knowledge.trios import (
 from retail_agent.llm.messages import message_text
 from retail_agent.store.definitions import personal_definitions_block, remembered
 from retail_agent.store.personas import active_body
-from retail_agent.store.preferences import preferred, style_instruction
+from retail_agent.store.preferences import notes_for, preference_block
 
 log = logging.getLogger(__name__)
 
@@ -142,8 +142,8 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                     persona=active_body(deps.personas) or PERSONA_DEFAULT,
                     safety=SAFETY_RULES,
                     examples=style_examples(consulted),
-                    style=style_instruction(
-                        preferred(deps.preferences, capture.user_id)
+                    style=preference_block(
+                        notes_for(deps.preferences, capture.user_id)
                     ),
                 ),
             )
