@@ -144,20 +144,33 @@ def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
 
             note = " ".join(preference.split())
             try:
-                removed = remove_note(
-                    deps.preferences, user_id=capture.user_id, note=note
+                # Found before it is removed, so what gets announced is the
+                # stored wording rather than the caller's casing of it —
+                # `remove_note` matches case-insensitively, so the two can
+                # differ, and the CLI must quote back what the user actually
+                # saved, not the model's paraphrase of its case.
+                stored = next(
+                    (
+                        existing
+                        for existing in deps.preferences.list_notes(
+                            user_id=capture.user_id
+                        )
+                        if " ".join(existing.split()).lower() == note.lower()
+                    ),
+                    None,
                 )
+                if stored is None:
+                    step.detail = "no match"
+                    return f"Nothing saved matching {note!r}; nothing changed."
+
+                remove_note(deps.preferences, user_id=capture.user_id, note=stored)
             except Exception as err:
                 log.warning("could not forget the preference %r (%s)", note, err)
                 step.detail = f"failed: {err}"
                 return "I could not change your saved preferences just now."
 
-            if not removed:
-                step.detail = "no match"
-                return f"Nothing saved matching {note!r}; nothing changed."
-
-            capture.preference_changes.append(("removed", note))
-            step.detail = f"removed {note}"
-            return f"Removed: {note}."
+            capture.preference_changes.append(("removed", stored))
+            step.detail = f"removed {stored}"
+            return f"Removed: {stored}."
 
     return [remember_definition, note_preference, forget_preference]

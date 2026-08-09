@@ -141,6 +141,20 @@ def test_forgetting_removes_the_note_and_announces_it():
     assert capture.preference_changes[-1] == ("removed", "show prices in euros")
 
 
+def test_forgetting_announces_the_stored_wording_not_the_callers_casing():
+    """`remove_note` matches case-insensitively, so the model can ask to forget
+    a note using different casing than what was actually saved. What gets
+    announced — and eventually shown to the user — has to be what they wrote,
+    not the model's paraphrase of its own case."""
+    tools, deps, capture = tools_for("stop calling me Manager, my name is Dana")
+    deps.preferences.replace_notes(user_id="dana", notes=["Keep answers brief"])
+
+    tools["forget_preference"]("keep answers brief")
+
+    assert deps.preferences.list_notes(user_id="dana") == []
+    assert capture.preference_changes == [("removed", "Keep answers brief")]
+
+
 def test_forgetting_something_that_was_never_saved_says_so():
     tools, deps, capture = tools_for("stop showing prices in euros")
 
