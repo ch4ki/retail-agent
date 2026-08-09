@@ -67,6 +67,22 @@ class PendingDefinition:
     terms: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class WrittenReport:
+    """A report this turn produced, held so the CLI can print it.
+
+    The body is here rather than left to the model because the CLI prints this
+    copy: it is the same text that was scanned and stored, so what the
+    executive reads and what the library holds cannot drift apart. Everything
+    the model receives about a report is an id and a headline.
+    """
+
+    report_id: str
+    title: str
+    body: str
+    show: bool
+
+
 @dataclass
 class TurnCapture:
     """Mutable for the length of one turn, then read-only in practice.
@@ -93,6 +109,12 @@ class TurnCapture:
     # action is "added" or "removed". Held here so the CLI reports them itself
     # rather than trusting the model to mention it.
     preference_changes: list[tuple[str, str]] = field(default_factory=list)
+    # Reports written this turn. The CLI prints those with `show`; the trace
+    # keeps their ids so "what did this turn produce" is one lookup.
+    reports_written: list[WrittenReport] = field(default_factory=list)
+    # What this turn's thread will cost every later turn. Written by the
+    # recorder middleware; a turn that died before it never has a figure.
+    context_tokens: int = 0
     status: str = "ok"
     pending: PendingDelete | None = None
     pending_definition: PendingDefinition | None = None
@@ -162,6 +184,11 @@ class TurnCapture:
             if term not in self.assumed_terms:
                 self.assumed_terms.append(term)
 
+    def record_report(
+        self, report_id: str, title: str, body: str, *, show: bool
+    ) -> None:
+        self.reports_written.append(WrittenReport(report_id, title, body, show))
+
     @property
     def intent(self) -> str:
         """Derived rather than classified.
@@ -173,7 +200,7 @@ class TurnCapture:
         ran = {name for name, _, _ in self.events}
         if "analyst" in ran or "run_sql" in ran:
             return "analyze"
-        if ran & {"save_report", "list_reports", "delete_reports"}:
+        if ran & {"report_writer", "ask_about_report", "list_reports", "delete_reports"}:
             return "report_op"
         if "describe_schema" in ran:
             return "schema"
