@@ -272,7 +272,7 @@ reach the safety rules — and per-user answer preferences.
 Also built: the Golden Bucket of analyst Trios — question, SQL, report and the
 metric definitions that connect them — with hybrid lexical/dense retrieval, a
 measured relevance floor, a clarifying question when a term is undefined that is
-remembered per user, and promotion of an answered definition into the corpus.
+remembered per user.
 
 Partial: the agent learns preferences from how you phrase questions and proposes
 them rather than applying them — it asks before changing anything, and refuses to

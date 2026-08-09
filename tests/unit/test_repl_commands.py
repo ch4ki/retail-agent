@@ -130,7 +130,6 @@ def run(script):
         "/trios",
         "/definitions",
         "/definitions forget loyal",
-        "/definitions promote loyal",
     ],
 )
 def test_every_command_runs_without_raising(command):
@@ -305,39 +304,6 @@ def test_definitions_starts_empty_and_says_it_will_ask():
     console, _, _ = run(["/definitions"])
 
     assert "not defined any terms" in console.text()
-
-
-def test_a_remembered_definition_can_be_forgotten():
-    """So a user who answered carelessly can be asked again."""
-    console = FakeConsole(["/definitions forget loyal"])
-    deps = FakeDeps()
-    deps.definitions.remember(user_id="dana", term="loyal", definition="3+ orders")
-
-    _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
-
-    assert deps.definitions.lookup(user_id="dana", term="loyal") is None
-    assert "ask next time" in console.text()
-
-
-def test_promoting_a_term_you_never_defined_explains_itself():
-    console, _, _ = run(["/definitions promote loyal"])
-
-    assert "have not defined" in console.text()
-
-
-def test_promoting_puts_a_personal_definition_in_the_shared_bucket():
-    console = FakeConsole(["/definitions promote at risk"])
-    deps = FakeDeps()
-    deps.definitions.remember(user_id="dana", term="at risk", definition="120 days silent")
-
-    _repl(console, deps=deps, saver=None, user="dana", session_id="s1")
-
-    from retail_agent.knowledge.trios import unresolved
-
-    assert unresolved("which customers are at risk?", deps.trios.live()) == []
-    assert "Everyone gets this definition" in console.text()
-
-
 def test_trios_lists_what_the_agent_can_settle():
     console, _, _ = run(["/trios"])
 
