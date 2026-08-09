@@ -127,25 +127,10 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
         in the report.
         """
         with capture.step("report_writer") as step:
-            # The other half of what a trio carries. `metric_definitions` says
-            # what to measure and reaches the analyst; `report` shows how
-            # analysts here write a finding — split by cohort, compare against a
-            # baseline, close with numbered actions — and that is a property of
-            # the writing, so it belongs here rather than in the SQL loop.
-            consulted = [
-                trio for trio in live_trios(deps.trios) if trio.id in capture.trio_ids
-            ]
             agent = create_agent(
                 model=deps.llm,
                 tools=[],
-                system_prompt=REPORT_WRITER_PROMPT.format(
-                    persona=active_body(deps.personas) or PERSONA_DEFAULT,
-                    safety=SAFETY_RULES,
-                    examples=style_examples(consulted),
-                    style=preference_block(
-                        notes_for(deps.preferences, capture.user_id)
-                    ),
-                ),
+                system_prompt=report_writer_system_prompt(deps, capture),
             )
             result = agent.invoke({"messages": [{"role": "user", "content": brief}]})
             body = final_text(result)
@@ -153,6 +138,34 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
             return body
 
     return [analyst, report_writer]
+
+
+def report_writer_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
+    """The report writer's system prompt for one call.
+
+    A plain function rather than only a literal inside the tool closure, for
+    the same reason `supervisor_system_prompt` exists in `middleware.py`: so a
+    test can ask what reaches the model without building a model call.
+
+    `.strip()` on the result, not just on the template — `REPORT_WRITER_PROMPT`
+    ends `{examples}\n\n{style}`, and `style_examples` and `preference_block`
+    both return `""` when there is nothing to say. Stripping the template
+    trims the literal, but `.format()` runs after that, so a user with no
+    notes and a question no trio covers would still get the blank lines the
+    empty slots leave behind welded onto the end of the prompt.
+    """
+    # The other half of what a trio carries. `metric_definitions` says what to
+    # measure and reaches the analyst; `report` shows how analysts here write a
+    # finding — split by cohort, compare against a baseline, close with
+    # numbered actions — and that is a property of the writing, so it belongs
+    # here rather than in the SQL loop.
+    consulted = [trio for trio in live_trios(deps.trios) if trio.id in capture.trio_ids]
+    return REPORT_WRITER_PROMPT.format(
+        persona=active_body(deps.personas) or PERSONA_DEFAULT,
+        safety=SAFETY_RULES,
+        examples=style_examples(consulted),
+        style=preference_block(notes_for(deps.preferences, capture.user_id)),
+    ).strip()
 
 
 def _definitions(found: list, known: dict[str, str], assumed: list[str]) -> str:

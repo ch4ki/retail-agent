@@ -9,6 +9,7 @@ it worth testing.
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.middleware import supervisor_system_prompt
+from retail_agent.agent.subagents import report_writer_system_prompt
 from retail_agent.config import Settings
 from retail_agent.obs.traces import InMemoryTraceStore
 from retail_agent.safety.pii import PiiPolicy
@@ -72,3 +73,25 @@ def test_a_broken_store_still_produces_a_prompt():
     prompt = supervisor_system_prompt(deps_with(Broken()), capture_for())
 
     assert prompt, "the turn goes ahead without the notes"
+
+
+def test_the_report_writer_prompt_carries_the_users_notes():
+    """Same seam as the supervisor's, for the same reason: read per call."""
+    preferences = InMemoryPreferenceStore()
+    add_note(preferences, user_id="dana", note="show prices in euros")
+
+    prompt = report_writer_system_prompt(deps_with(preferences), capture_for())
+
+    assert "show prices in euros" in prompt
+
+
+def test_a_user_with_no_notes_gets_a_report_writer_prompt_with_no_dangling_tail():
+    """`REPORT_WRITER_PROMPT` ends `{examples}\\n\\n{style}` — an empty `style`
+    (and here, an empty `examples`, since no trio was consulted) must not leave
+    the blank lines they'd otherwise weld onto the end of the prompt."""
+    prompt = report_writer_system_prompt(
+        deps_with(InMemoryPreferenceStore()), capture_for()
+    )
+
+    assert not prompt.endswith("\n"), "no dangling separator where the block was"
+    assert not prompt.endswith(" "), "no dangling separator where the block was"
