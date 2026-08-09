@@ -128,6 +128,17 @@ class ScriptedChatModel(BaseChatModel):
         )
         return self
 
+    def with_structured_output(self, schema, **kwargs):
+        """Queue a dict for these calls, as `ScriptedLLM` does.
+
+        `BaseChatModel` would otherwise route this through `bind_tools` and
+        parse a tool call back out, so a script entry meant for a structured
+        call would have to be written as a tool-call pair. Validation stays
+        real: a reply the schema rejects fails the test rather than reaching
+        the caller.
+        """
+        return _ScriptedStructuredChat(self, schema)
+
     def _generate(
         self,
         messages: list[BaseMessage],
@@ -151,6 +162,23 @@ class ScriptedChatModel(BaseChatModel):
                 ],
             )
         return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+class _ScriptedStructuredChat:
+    def __init__(self, model: "ScriptedChatModel", schema):
+        self._model = model
+        self._schema = schema
+
+    def invoke(self, messages, **kwargs):
+        self._model.prompts.append(_as_text(messages))
+        if not self._model.script:
+            raise ScriptExhausted("ScriptedChatModel ran out of turns")
+        reply = self._model.script.pop(0)
+        if isinstance(reply, self._schema):
+            return reply
+        if isinstance(reply, dict):
+            return self._schema(**reply)
+        return self._schema.model_validate_json(reply)
 
 
 @dataclass

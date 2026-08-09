@@ -67,6 +67,35 @@ class TraceStoreContract:
         assert found.attempts[0]["step_id"] == "step_1"
         assert found.attempts[0]["row_count"] == 3
 
+    def test_the_reasons_behind_the_answer_survive_the_round_trip(self, store):
+        """Which definitions were consulted and which terms were assumed is the
+        part of a trace a disputed number is actually read for."""
+        store.record(
+            _record(
+                "abc123",
+                trios=["trio-loyalty"],
+                assumptions=["loyal", "top"],
+                preference_changes=[("answer_format", "bullets")],
+            )
+        )
+
+        found = store.get(owner_id="dana", turn_id="abc123")
+
+        assert found.trios == ["trio-loyalty"]
+        assert found.assumptions == ["loyal", "top"]
+        assert found.preference_changes == [("answer_format", "bullets")]
+
+    def test_a_trace_with_no_reasons_reads_back_empty_rather_than_null(self, store):
+        """Rows written before these columns existed, and turns that consulted
+        nothing, must not come back as None and break the renderer."""
+        store.record(_record("abc123"))
+
+        found = store.get(owner_id="dana", turn_id="abc123")
+
+        assert found.trios == []
+        assert found.assumptions == []
+        assert found.preference_changes == []
+
     def test_a_trace_is_scoped_to_its_owner(self, store):
         """Turn ids are short. Another user's trace holds their question text."""
         store.record(_record("abc123"))

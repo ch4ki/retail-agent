@@ -48,6 +48,28 @@ def render_confirmation(console: Console, description: str) -> None:
     console.print(Panel(description, title="Confirm deletion", style="yellow"))
 
 
+def render_definition_prompt(
+    console: Console, term: str, hint: str, options: list[str]
+) -> None:
+    """The choice offered when a question turns on a term nobody has settled.
+
+    The two fixed choices are numbered after the generated ones rather than at
+    fixed positions, so their numbers move with the list instead of being
+    something to memorise. Both are always present: the generated options can be
+    empty — a model call is allowed to fail here — and a prompt with no way out
+    would be a worse failure than the assumption it exists to prevent.
+    """
+    console.print(f"\n[bold]{term}[/bold] needs a definition — [dim]{hint}[/dim]\n")
+    for index, option in enumerate(options, 1):
+        console.print(f"  [bold cyan]{index}[/bold cyan]  {option}")
+    console.print(f"  [bold cyan]{len(options) + 1}[/bold cyan]  [dim]something else — I'll type it[/dim]")
+    console.print(
+        f"  [bold cyan]{len(options) + 2}[/bold cyan]  "
+        f"[dim]decide for me, and say what you assumed[/dim]"
+    )
+    console.print("\n[dim]Pick a number, or just type what it means. Empty to cancel.[/dim]")
+
+
 def render_error(console: Console, message: str, turn_id: str = "") -> None:
     suffix = f"\n\n[dim]turn {turn_id}[/dim]" if turn_id else ""
     console.print(Panel(f"{message}{suffix}", title="Something went wrong", style="red"))
@@ -95,12 +117,40 @@ def render_trace(console: Console, trace) -> None:
         f"{trace.bytes_billed} bytes[/dim]"
     )
     console.print(f"[dim]asked:[/dim] {trace.question}")
+    if trace.answer:
+        console.print(f"[dim]answered:[/dim] {trace.answer}")
+    _render_reasons(console, trace)
     _render_events(console, trace.events)
     _render_attempts(console, trace.attempts)
 
 
+def _render_reasons(console: Console, trace) -> None:
+    """What the turn was reasoning from.
+
+    Above the steps rather than below them, because a disputed number is
+    challenged on its definition far more often than on its timings. A term
+    listed as assumed is the single most useful line in a trace: it says the
+    agent chose, and what it chose about.
+    """
+    if trace.trios:
+        console.print(f"[dim]definitions used:[/dim] {', '.join(trace.trios)}")
+    if trace.assumptions:
+        console.print(f"[yellow]assumed:[/yellow] {', '.join(trace.assumptions)}")
+    for field, value in trace.preference_changes:
+        console.print(f"[dim]set as your default:[/dim] {field} = {value}")
+
+
 def _render_events(console: Console, events) -> None:
-    """One row per tool call, from `(step, duration_ms, detail)` triples."""
+    """One row per tool call, from `(step, duration_ms, detail)` triples.
+
+    An empty list is a fact about the turn — the model answered from the
+    conversation without reaching for anything — so it is stated. Printing the
+    headers with nothing under them read as a renderer that had broken.
+    """
+    if not events:
+        console.print("[dim]no tools were called — answered from the conversation[/dim]")
+        return
+
     table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
     table.add_column("step")
     table.add_column("ms", justify="right")

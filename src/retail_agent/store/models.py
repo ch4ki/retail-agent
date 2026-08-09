@@ -109,6 +109,14 @@ class TraceRow(Base):
     # JSONB rather than a table: `/trace` reads them whole, and the shape is
     # owned by `SqlAttempt` rather than by the schema.
     attempts: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    # Why the answer is what it is: the agreed definitions consulted, the terms
+    # the agent had to settle itself, and the preferences it wrote. Lists of
+    # names, so nothing here can carry a row value.
+    trios: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    assumptions: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    preference_changes: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

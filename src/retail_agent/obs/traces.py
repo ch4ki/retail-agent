@@ -36,6 +36,13 @@ class TraceRecord:
     duration_ms: int = 0
     events: list[Event] = field(default_factory=list)
     attempts: list[dict] = field(default_factory=list)
+    # Why the number is what it is. `events` says which tools ran; these say
+    # what the turn was reasoning from — the agreed definitions it consulted,
+    # the terms it had to decide for itself, and the settings it wrote. Term
+    # names and setting names only, so the no-row-values rule above still holds.
+    trios: list[str] = field(default_factory=list)
+    assumptions: list[str] = field(default_factory=list)
+    preference_changes: list[tuple[str, str]] = field(default_factory=list)
 
 
 @runtime_checkable
@@ -160,6 +167,12 @@ class PostgresTraceStore:
             "bytes_billed": trace.bytes_billed,
             "duration_ms": trace.duration_ms,
             "attempts": trace.attempts,
+            "trios": list(trace.trios),
+            "assumptions": list(trace.assumptions),
+            # JSONB has no tuple, so the pairs go down as lists and `_to_record`
+            # puts them back. Writing them as a dict instead would lose the
+            # order two changes to the same field were made in.
+            "preference_changes": [list(pair) for pair in trace.preference_changes],
         }
         with self._sessions.begin() as session:
             session.execute(
@@ -242,6 +255,11 @@ class PostgresTraceStore:
             duration_ms=row.duration_ms,
             events=[(e.node, e.duration_ms, e.detail) for e in events],
             attempts=list(row.attempts or []),
+            trios=list(row.trios or []),
+            assumptions=list(row.assumptions or []),
+            preference_changes=[
+                (pair[0], pair[1]) for pair in (row.preference_changes or [])
+            ],
         )
 
 

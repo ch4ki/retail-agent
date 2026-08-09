@@ -51,7 +51,8 @@ Try:
 › delete all reports mentioning revenue
 › /reports        list what you have saved
 › /undo           reverse the last deletion
-› /trace          explain the last turn: every tool call, timing, SQL attempt
+› /trace          explain the last turn: every tool call, timing, SQL attempt,
+                  the definitions used and any term the agent settled itself
 › /metrics        first-pass SQL validity, self-correction, latency per step
 › /persona list   change the agent's tone without a restart
 › /prefs          your answer format, depth and table size
@@ -110,6 +111,13 @@ every other tool to make sure none of them reaches the warehouse.
 definitions — the shared corpus first, then your own — *before* it builds its
 subagent, and returns without querying if something is left over. There is no
 model in that decision and no tool the model could decline to call.
+
+In the CLI the same check runs one step earlier, as an interrupt before the tool
+is entered, so the turn *pauses* rather than ending: you are offered a few
+candidate meanings, can type your own, or can hand the decision back and be told
+what was assumed. What you pick is remembered, so the question is asked once.
+Headless callers — the eval harness, Studio — cannot answer a pause, so for them
+the analyst's early return and the stated assumption remain the whole behaviour.
 
 ## Viewing the pipeline in LangGraph Studio
 

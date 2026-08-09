@@ -98,6 +98,22 @@ def test_the_trace_carries_the_attempts_and_no_rows():
     assert "a@b.com" not in str(trace)
 
 
+def test_the_trace_carries_what_actually_changed_the_answer():
+    """Which definitions were consulted, which terms the agent decided for
+    itself, and what it wrote down. The turn accumulated all three and `to_trace`
+    dropped them, so `/trace` could not report the reasons for its own number."""
+    capture = TurnCapture(user_id="exec", question="who is loyal?")
+    capture.record_definitions(["trio-loyalty"])
+    capture.record_assumptions(["loyal"])
+    capture.preference_changes.append(("answer_format", "bullets"))
+
+    trace = capture.to_trace("Nine of them.")
+
+    assert trace.trios == ["trio-loyalty"]
+    assert trace.assumptions == ["loyal"]
+    assert trace.preference_changes == [("answer_format", "bullets")]
+
+
 def test_a_long_answer_is_truncated_in_the_trace():
     """A trace is for debugging, not a second copy of every report."""
     trace = TurnCapture().to_trace("x" * 10_000)

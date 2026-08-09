@@ -36,15 +36,27 @@ def build_tools(deps: AgentDeps, capture: TurnCapture) -> list:
     ]
 
 
-def build_agent(deps: AgentDeps, capture: TurnCapture, checkpointer=None):
+def build_agent(
+    deps: AgentDeps,
+    capture: TurnCapture,
+    checkpointer=None,
+    *,
+    ask_for_definitions: bool = False,
+):
     """The compiled agent for one turn.
 
     Bound to a capture because the tools write what they did into it, and a turn
     is the unit the eval scores and the trace records.
+
+    `ask_for_definitions` says there is a person on the other end who can settle
+    an unsettled term. Only the CLI passes it; a headless caller cannot answer a
+    pause, so for those the analyst's early return remains the whole behaviour.
     """
     return create_agent(
         model=deps.llm,
         tools=build_tools(deps, capture),
-        middleware=supervisor_middleware(deps, capture),
+        middleware=supervisor_middleware(
+            deps, capture, ask_for_definitions=ask_for_definitions
+        ),
         checkpointer=checkpointer,
     )

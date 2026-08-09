@@ -98,23 +98,41 @@ def test_a_bulk_delete_needs_the_counted_token(make_deps, saved):
     assert saved.list_reports(owner_id="dana") == []
 
 
-def test_a_failing_turn_is_rendered_rather_than_raised(make_deps):
-    """The REPL must survive anything: an exception here ends the session and
-    loses the conversation.
-
-    A provider-shaped failure rather than `ScriptExhausted`, which is a
+def _failing(make_deps):
+    """A provider-shaped failure rather than `ScriptExhausted`, which is a
     `BaseException` on purpose so an over-broad `except Exception` in the code
-    under test cannot swallow a test's own bug.
-    """
-    console = FakeConsole()
+    under test cannot swallow a test's own bug."""
     deps = make_deps(script=["unused"])
 
     def explode(*_args, **_kwargs):
         raise RuntimeError("the provider is down")
 
     object.__setattr__(deps.llm, "_generate", explode)
+    return deps
 
-    trace = answer(console, deps, "what was revenue?")
 
-    assert trace is None
+def test_a_failing_turn_is_rendered_rather_than_raised(make_deps):
+    """The REPL must survive anything: an exception here ends the session and
+    loses the conversation."""
+    console = FakeConsole()
+
+    answer(console, _failing(make_deps), "what was revenue?")
+
     assert "went wrong" in console.text()
+
+
+def test_a_failing_turn_still_leaves_a_trace(make_deps, traces):
+    """The recorder is an `after_agent` hook, so it never runs when the agent
+    raises. The turn id printed on the error panel then resolved to nothing, and
+    `/trace` went on showing whichever turn last succeeded."""
+    console = FakeConsole()
+
+    trace = answer(console, _failing(make_deps), "what was revenue?")
+
+    assert trace is not None, "/trace must describe the turn that just failed"
+    assert trace.question == "what was revenue?"
+    assert trace.status == "failed"
+
+    printed = console.text()
+    assert trace.turn_id in printed, "the id on the error panel has to resolve"
+    assert traces.get(owner_id="dana", turn_id=trace.turn_id) is not None

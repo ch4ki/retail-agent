@@ -136,6 +136,47 @@ def test_the_trace_shows_every_attempt_and_the_query_that_ran():
     assert "run_sql" in printed
 
 
+def test_the_trace_shows_the_answer_it_stored():
+    """Stored, truncated and read back, then never shown. `/trace <id>` on an
+    older turn could say what ran but not what was said."""
+    console = recorder()
+    capture = TurnCapture(user_id="dana", question="how many?")
+
+    render_trace(console, capture.to_trace("Nine customers."))
+
+    assert "Nine customers." in text(console)
+
+
+def test_a_turn_that_called_no_tool_says_so_rather_than_printing_an_empty_table():
+    """Easy to reach on a follow-up the model answers from the conversation.
+    Headers with nothing under them read as a broken renderer."""
+    console = recorder()
+    capture = TurnCapture(user_id="dana", question="and the month before?")
+
+    render_trace(console, capture.to_trace("It was 11."))
+
+    printed = text(console)
+    assert "no tools" in printed
+    assert "what happened" not in printed, "no empty table"
+
+
+def test_the_trace_names_the_definitions_used_and_the_terms_assumed():
+    console = recorder()
+    capture = TurnCapture(user_id="dana", question="who is loyal?")
+    capture.record_definitions(["trio-loyalty"])
+    capture.record_assumptions(["loyal"])
+    capture.preference_changes.append(("answer_format", "bullets"))
+    with capture.step("analyst") as step:
+        step.detail = "1 trio(s)"
+
+    render_trace(console, capture.to_trace("Nine."))
+
+    printed = text(console)
+    assert "trio-loyalty" in printed
+    assert "loyal" in printed
+    assert "answer_format" in printed and "bullets" in printed
+
+
 def test_metrics_with_no_turns_says_so_rather_than_dividing_by_zero():
     console = recorder()
     render_metrics(console, {"turns": 0})

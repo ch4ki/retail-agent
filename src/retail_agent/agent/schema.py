@@ -1,7 +1,10 @@
 """Rendering the warehouse's shape for a prompt.
 
-Two renderings, because two callers want different things and only one of them
-should pay for the expensive one.
+Two renderings, because callers want different things and only one of them
+should pay for the expensive one. `render_schema_outline` is the tables and
+their columns; `render_schema_for_sql` adds the values each enumerable column
+actually holds, which costs a metadata scan per table and is only worth it to
+something about to write a literal into a WHERE clause.
 """
 
 from __future__ import annotations
@@ -40,6 +43,15 @@ def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
             )
 
     return [describe_schema]
+
+
+def render_schema_outline(deps: AgentDeps) -> str:
+    """Tables and columns, and nothing that costs a round trip.
+
+    Enough to keep a prompt from naming a column that does not exist, which is
+    all a caller writing prose rather than SQL can use.
+    """
+    return "\n\n".join(schema.to_ddl() for schema in deps.source.describe_all())
 
 
 def render_schema_for_sql(deps: AgentDeps) -> str:

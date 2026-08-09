@@ -49,6 +49,19 @@ class PendingDelete:
     token: str  # what the user must type back, verbatim
 
 
+@dataclass(frozen=True)
+class PendingDefinition:
+    """Terms this question turns on that nothing has settled, awaiting an answer.
+
+    Resolved by the interrupt's `when` predicate — read-only, and without a
+    model call — and read back by the CLI, which asks about them in order. The
+    same discipline as `PendingDelete`: what stops the turn is decided once, and
+    what the user is then shown is exactly what stopped it.
+    """
+
+    terms: tuple[str, ...]
+
+
 @dataclass
 class TurnCapture:
     """Mutable for the length of one turn, then read-only in practice.
@@ -76,6 +89,7 @@ class TurnCapture:
     preference_changes: list[tuple[str, str]] = field(default_factory=list)
     status: str = "ok"
     pending: PendingDelete | None = None
+    pending_definition: PendingDefinition | None = None
 
     @contextmanager
     def step(self, name: str) -> Iterator[Step]:
@@ -178,4 +192,7 @@ class TurnCapture:
             duration_ms=sum(duration for _, duration, _ in self.events),
             events=list(self.events),
             attempts=list(self.attempts),
+            trios=list(self.trio_ids),
+            assumptions=list(self.assumed_terms),
+            preference_changes=list(self.preference_changes),
         )

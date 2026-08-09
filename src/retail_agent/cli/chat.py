@@ -28,6 +28,7 @@ from retail_agent.cli.render import (
     render_answer,
     render_banner,
     render_confirmation,
+    render_definition_prompt,
     render_definitions,
     render_error,
     render_metrics,
@@ -179,9 +180,10 @@ def _repl(console, deps, saver, user, session_id) -> int:
             render_metrics(console, deps.traces.metrics(owner_id=user))
             continue
 
-        last_trace = (
-            _answer(console, deps, saver, user, session_id, question) or last_trace
-        )
+        # Unconditional: every path out of `_answer` now produces a trace, and
+        # falling back to the previous one is what made `/trace` describe a
+        # question the user had not asked.
+        last_trace = _answer(console, deps, saver, user, session_id, question)
 
 
 def _prefs(console, deps, user, command) -> None:
@@ -281,7 +283,7 @@ def _undo(console, deps, user) -> None:
 
 
 def _answer(console, deps, saver, user, session_id, question):
-    """Run one turn. Returns its trace so the REPL can `/trace` it.
+    """Run one turn. Always returns its trace, including when it fails.
 
     A fresh agent and a fresh capture per turn: both close over the turn's
     identity, and the persona and preferences are read per model call, so
@@ -294,23 +296,22 @@ def _answer(console, deps, saver, user, session_id, question):
         # Inside the guard, not above it: assembling the agent reads the persona
         # store and the tool list, and a REPL that dies before its own error
         # handler is a REPL that dies.
-        agent = build_agent(deps, capture, checkpointer=saver)
+        # Armed here and nowhere else: a pause needs somebody who can answer it,
+        # and this is the only caller with a person at a keyboard.
+        agent = build_agent(
+            deps, capture, checkpointer=saver, ask_for_definitions=True
+        )
         with console.status("thinking…"):
             result = agent.invoke(
                 {"messages": [{"role": "user", "content": question}]}, config
             )
 
-        # A destructive tool call pauses the agent before it runs. The manifest
-        # was resolved against the store by the approval gate, so what is shown
-        # is what would go — and the typed token means a bulk delete cannot be
-        # approved by reflex.
+        # Two things pause the agent before a tool runs: a destructive call, and
+        # a question whose terms nobody has settled. Both were resolved
+        # read-only by the gate, so what is shown is exactly what stopped it.
         while _pending(result):
-            approved = _confirm(console, result, capture)
+            decision = _decide(console, deps, result, capture, user)
             with console.status("working…"):
-                decision = {"type": "approve"} if approved else {
-                    "type": "reject",
-                    "message": "The executive did not confirm. Nothing was deleted.",
-                }
                 result = agent.invoke(
                     # A dict with `decisions`, not a bare list: the middleware
                     # subscripts the resume value by name, and a list resumes
@@ -328,7 +329,12 @@ def _answer(console, deps, saver, user, session_id, question):
             describe_llm_error(err, provider=deps.settings.llm_provider),
             turn_id=capture.turn_id,
         )
-        return None
+        # The recorder middleware is an `after_agent` hook and never runs when
+        # the agent raises, so this is the only place a failed turn can be
+        # written down. Without it the id above resolved to nothing and `/trace`
+        # went on describing whichever turn last succeeded — the wrong question,
+        # with no sign it was the wrong question.
+        return _record_failure(deps, capture)
 
     answer = final_text(result)
     render_answer(console, answer, capture, prefs=preferred(deps.preferences, user))
@@ -341,19 +347,60 @@ def _answer(console, deps, saver, user, session_id, question):
     return capture.to_trace(answer)
 
 
+def _record_failure(deps, capture):
+    """The trace for a turn that died. Never raises.
+
+    `failed` rather than `degraded`: degraded means an answer came back with
+    something taken out of it, and `/metrics` divides by that distinction. A
+    turn that repaired its SQL and then died must not count as a self-correction
+    that worked.
+    """
+    capture.status = "failed"
+    trace = capture.to_trace("")
+    try:
+        deps.traces.record(trace)
+    except Exception as err:
+        # A failure while recording a failure must not become the failure.
+        logging.getLogger(__name__).warning("could not record the failed turn (%s)", err)
+    return trace
+
+
 def _pending(result) -> bool:
     return bool(result.get("__interrupt__"))
 
 
-def _confirm(console, result, capture) -> bool:
+def _decide(console, deps, result, capture, user) -> dict:
+    """Turn a pause into the decision the middleware resumes with.
+
+    Dispatching on the tool rather than on a mode flag: the two gates are
+    configured in one middleware and either can be the reason a turn stopped, so
+    the request itself is the only honest source of which one it was.
+    """
+    request = _first_request(result)
+    if request.get("name") == "analyst":
+        return _settle_definitions(console, deps, capture, user, request)
+
+    if _confirm(console, request.get("description", ""), capture):
+        return {"type": "approve"}
+    return {
+        "type": "reject",
+        "message": "The executive did not confirm. Nothing was deleted.",
+    }
+
+
+def _first_request(result) -> dict:
+    interrupt = result["__interrupt__"][0]
+    value = interrupt.value if isinstance(interrupt.value, dict) else {}
+    requests = value.get("action_requests", [])
+    return requests[0] if requests else {}
+
+
+def _confirm(console, description, capture) -> bool:
     """Show the manifest and take a typed answer.
 
     The typed token rather than a bare y/n: `DELETE 7` cannot be produced by
     someone who has not read how many reports they are about to lose.
     """
-    interrupt = result["__interrupt__"][0]
-    requests = interrupt.value.get("action_requests", []) if isinstance(interrupt.value, dict) else []
-    description = requests[0].get("description", "") if requests else ""
     render_confirmation(console, description)
 
     typed = console.input("[bold yellow]›[/bold yellow] ").strip()
@@ -363,6 +410,123 @@ def _confirm(console, result, capture) -> bool:
 
     console.print("[dim]Cancelled — nothing was deleted.[/dim]")
     return False
+
+
+# Returned by `_ask_definition` when the executive hands the decision back.
+# A sentinel rather than a magic string, because any string they can type is a
+# definition somebody might mean.
+_HAND_BACK = object()
+
+
+def _settle_definitions(console, deps, capture, user, request) -> dict:
+    """Ask about each open term, then resume once.
+
+    In question order and one at a time: each prompt stays a simple choice, and
+    the options for the second term are generated knowing how the first was
+    settled — otherwise a definition of `top` can quietly contradict the `loyal`
+    just agreed.
+    """
+    from retail_agent.agent.schema import render_schema_outline
+    from retail_agent.knowledge.proposals import propose
+    from retail_agent.knowledge.trios import UNDEFINED_TERMS
+
+    pending = capture.pending_definition
+    settled: dict[str, str] = {}
+    # The outline, not the SQL rendering: the options are plain English, so the
+    # values a column holds buy nothing and would cost a metadata scan per table
+    # every time a term came up.
+    schema = render_schema_outline(deps)
+
+    for term in pending.terms if pending else ():
+        hint = UNDEFINED_TERMS.get(term, "it is undefined")
+        options = propose(
+            deps.llm,
+            question=capture.question,
+            term=term,
+            hint=hint,
+            schema=schema,
+            settled=settled,
+        )
+        chosen = _ask_definition(console, term, hint, options)
+
+        if chosen is _HAND_BACK:
+            # Applies to everything still open, not just this term: "you decide"
+            # is not an answer that gets asked again for the next word.
+            return {
+                "type": "edit",
+                "edited_action": {
+                    "name": request.get("name", "analyst"),
+                    "args": {**request.get("args", {}), "assume_undefined": True},
+                },
+            }
+        if not chosen:
+            return {
+                "type": "reject",
+                "message": (
+                    f"The executive did not define {term!r}, so nothing was "
+                    "queried. Ask them what it should mean."
+                ),
+            }
+
+        _remember(console, deps, user, term, chosen)
+        settled[term] = chosen
+
+    return {"type": "approve"}
+
+
+def _ask_definition(console, term, hint, options):
+    """One term's answer: a definition, `_HAND_BACK`, or "" to cancel.
+
+    A number outside the list is re-asked rather than taken literally — someone
+    who types `9` at five options meant to pick something, and recording
+    "loyal = 9" would be a definition they never gave.
+    """
+    from retail_agent.store.definitions import MAX_DEFINITION_CHARS
+
+    own, hand_back = len(options) + 1, len(options) + 2
+    while True:
+        render_definition_prompt(console, term, hint, options)
+        typed = console.input("\n[bold yellow]›[/bold yellow] ").strip()
+
+        if not typed:
+            return ""
+        if not typed.isdigit():
+            return typed[:MAX_DEFINITION_CHARS]
+
+        picked = int(typed)
+        if 1 <= picked <= len(options):
+            return options[picked - 1]
+        if picked == own:
+            console.print(f"[dim]What should {term!r} mean?[/dim]")
+            return console.input("\n[bold yellow]›[/bold yellow] ").strip()[
+                :MAX_DEFINITION_CHARS
+            ]
+        if picked == hand_back:
+            return _HAND_BACK
+
+        console.print(f"[yellow]Pick a number between 1 and {hand_back}.[/yellow]")
+
+
+def _remember(console, deps, user, term, definition) -> None:
+    """Keep the answer, and say so. Never fails the turn it just unblocked.
+
+    Announced rather than left implicit: the executive has just changed what the
+    agent will do on every future question containing this word, and `/definitions
+    forget` is only a remedy if they know there is something to forget.
+    """
+    try:
+        deps.definitions.remember(user_id=user, term=term, definition=definition)
+    except Exception as err:
+        logging.getLogger(__name__).warning(
+            "could not save the definition of %r (%s)", term, err
+        )
+        console.print(
+            f"[dim]Using {definition!r} for this question; I could not save it.[/dim]"
+        )
+        return
+
+    console.print(f"[dim]Remembered: {term} = {definition}[/dim]")
+    console.print(f"[dim]/definitions forget {term} to be asked again.[/dim]")
 
 
 def _trace(console, deps, user, last_trace, command) -> None:

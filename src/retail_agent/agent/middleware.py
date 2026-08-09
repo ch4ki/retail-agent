@@ -15,6 +15,7 @@ query budget and the repair path.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -30,7 +31,7 @@ from langchain.agents.middleware import (
 )
 from langchain_core.messages import AIMessage
 
-from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.capture import PendingDefinition, TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.prompts import (
     PERSONA_DEFAULT,
@@ -39,12 +40,14 @@ from retail_agent.agent.prompts import (
     SUPERVISOR_PROMPT,
 )
 from retail_agent.agent.reports import render_manifest, resolve_delete
-from retail_agent.agent.tools import GuardRejection
+from retail_agent.agent.tools import GuardRejection, recall
 from retail_agent.config import Settings
 from retail_agent.datasources.base import DataSourceError
+from retail_agent.knowledge.trios import UNDEFINED_TERMS, unresolved
 from retail_agent.llm.messages import message_text
 from retail_agent.safety.egress import scan_text
 from retail_agent.safety.scope import refuse
+from retail_agent.store.definitions import remembered
 from retail_agent.store.personas import active_body
 from retail_agent.store.preferences import preferred, style_instruction
 
@@ -83,14 +86,21 @@ def analyst_middleware(settings: Settings) -> list[AgentMiddleware]:
 
 
 def supervisor_middleware(
-    deps: AgentDeps, capture: TurnCapture
+    deps: AgentDeps, capture: TurnCapture, *, ask_for_definitions: bool = False
 ) -> list[AgentMiddleware]:
-    """The stack that bounds the turn."""
+    """The stack that bounds the turn.
+
+    `ask_for_definitions` arms the pause on an unsettled term. Off by default
+    because a pause needs somebody there to answer it: `seams.ask_once` scores a
+    paused turn as unanswered, and the eval cases that turn on an undefined term
+    are the brief's own examples. Headless callers keep the analyst's early
+    return and the disclosure `assumption_note` forces into the answer.
+    """
     return [
         _scope_guard(),
         _prompt(deps, capture),
         *_pii(),
-        _approval_gate(deps, capture),
+        _approval_gate(deps, capture, ask_for_definitions=ask_for_definitions),
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS, exit_behavior="end"),
         ToolErrorMiddleware(on_error=describe_failure),
         _recorder(deps, capture),
@@ -169,12 +179,16 @@ def _scope_guard() -> AgentMiddleware:
     return scope_guard
 
 
-def _approval_gate(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
-    """The confirmation flow, as an interrupt before the tool runs.
+def _approval_gate(
+    deps: AgentDeps, capture: TurnCapture, *, ask_for_definitions: bool = False
+) -> AgentMiddleware:
+    """The two places a turn stops for a person, as interrupts before the tool.
 
-    `when` resolves the target set read-only and stores it, so two things hold:
-    a delete that matches nothing never raises a prompt at all, and the manifest
-    the user approves is exactly the set the tool then deletes.
+    Both `when` predicates resolve read-only, without a model call, and park
+    what they found on the capture. That is what makes each one a gate rather
+    than advice: a delete that matches nothing never raises a prompt, a question
+    whose terms are settled is never paused, and in both cases what the user is
+    shown is exactly what the predicate found.
     """
 
     def has_targets(request) -> bool:
@@ -194,15 +208,68 @@ def _approval_gate(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
             else "Delete saved reports?"
         )
 
-    return HumanInTheLoopMiddleware(
-        interrupt_on={
-            "delete_reports": InterruptOnConfig(
-                allowed_decisions=["approve", "reject"],
-                description=describe,
-                when=has_targets,
-            )
-        },
-        description_prefix="",
+    def needs_definition(request) -> bool:
+        args = request.tool_call.get("args", {})
+        # Only ask if the answer can be kept. Without a store the agent would
+        # ask the same person the same question every turn, which is worse than
+        # assuming and saying so — the rule the analyst's early return follows.
+        if deps.definitions is None or args.get("assume_undefined"):
+            return False
+
+        capture.pending_definition = open_terms(
+            deps, capture, args.get("question", "") or ""
+        )
+        return capture.pending_definition is not None
+
+    def describe_definition(tool_call, state, runtime) -> str:
+        pending = capture.pending_definition
+        return describe_open_terms(pending.terms) if pending else "A term needs defining."
+
+    interrupt_on: dict[str, InterruptOnConfig] = {
+        "delete_reports": InterruptOnConfig(
+            allowed_decisions=["approve", "reject"],
+            description=describe,
+            when=has_targets,
+        )
+    }
+    if ask_for_definitions:
+        interrupt_on["analyst"] = InterruptOnConfig(
+            # `edit` is how "decide for me" resolves: the tool call is rewritten
+            # with assume_undefined, which is the path that already exists.
+            allowed_decisions=["approve", "edit", "reject"],
+            description=describe_definition,
+            when=needs_definition,
+        )
+
+    return HumanInTheLoopMiddleware(interrupt_on=interrupt_on, description_prefix="")
+
+
+def open_terms(
+    deps: AgentDeps, capture: TurnCapture, question: str
+) -> PendingDefinition | None:
+    """The terms this question turns on that nothing has settled yet.
+
+    The corpus first, then what this user has already been asked, in that order
+    — a trio is a reviewed decision by the people who own the numbers and a
+    remembered definition is one person's answer, so neither should produce a
+    question that has already been answered.
+
+    Never raises: `recall` swallows a retrieval failure, and `remembered`
+    returns what it managed to read. An unreachable store costs a question that
+    did not need asking, never the turn.
+    """
+    found = recall(deps, question)
+    unsettled = unresolved(question, found)
+    known = remembered(deps.definitions, capture.user_id, unsettled)
+    still_open = tuple(term for term in unsettled if term not in known)
+    return PendingDefinition(terms=still_open) if still_open else None
+
+
+def describe_open_terms(terms: Sequence[str]) -> str:
+    """What the pause is about, in the words `UNDEFINED_TERMS` already uses."""
+    return "\n".join(
+        f"{term!r} has no agreed definition — {UNDEFINED_TERMS.get(term, 'it is undefined')}"
+        for term in terms
     )
 
 
