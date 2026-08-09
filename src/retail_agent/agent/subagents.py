@@ -41,6 +41,7 @@ from retail_agent.knowledge.trios import (
     style_examples,
 )
 from retail_agent.llm.messages import message_text
+from retail_agent.safety.egress import scan_text
 from retail_agent.store.definitions import all_definitions, personal_definitions_block
 from retail_agent.store.personas import active_body
 from retail_agent.store.preferences import notes_for, preference_block
@@ -100,12 +101,18 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 answer += f"\n\n{assumption_note(assumed)}"
             return answer or "I could not produce an answer to that."
 
-    def report_writer(brief: str) -> str:
-        """Turn findings into a written report with action items.
+    def report_writer(
+        brief: str, title: str, show_to_executive: bool = True
+    ) -> str:
+        """Write a report from findings, save it, and show it to the executive.
 
         Pass everything the analyst told you, including the figures. This tool
         cannot query anything, so a number missing from the brief cannot appear
-        in the report.
+        in the report. `title` is what the executive will see in their library.
+
+        The executive is shown the report itself, so your answer is one
+        covering sentence — do not repeat the report. Set `show_to_executive`
+        false only for a draft you are about to rework.
         """
         with capture.step("report_writer") as step:
             agent = create_agent(
@@ -114,9 +121,33 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 system_prompt=report_writer_system_prompt(deps, capture),
             )
             result = agent.invoke({"messages": [{"role": "user", "content": brief}]})
-            body = final_text(result)
-            step.detail = f"{len(body)} chars"
-            return body
+
+            # The last sweep before the text is shown or stored, and it happens
+            # here rather than at save time because those are now the same
+            # moment for one copy of the text. A report is read long after the
+            # conversation that produced it, by people who were not in it.
+            scanned = scan_text(final_text(result))
+            report = deps.reports.save(
+                owner_id=capture.user_id,
+                session_id=capture.session_id,
+                title=title or "Untitled report",
+                body=scanned.text,
+            )
+            capture.record_report(
+                report.id, report.title, report.body, show=show_to_executive
+            )
+
+            step.detail = f"{len(report.body)} chars, saved {report.id}"
+            shown = (
+                "The executive has been shown it."
+                if show_to_executive
+                else "It was not shown to the executive."
+            )
+            return (
+                f"Report {report.id} '{report.title}' written "
+                f"({len(report.body)} chars).\n"
+                f"Headline: {_headline(report.body)}\n{shown}"
+            )
 
     return [analyst, report_writer]
 
@@ -147,6 +178,19 @@ def report_writer_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
         examples=style_examples(consulted),
         style=preference_block(notes_for(deps.preferences, capture.user_id)),
     ).strip()
+
+
+def _headline(body: str) -> str:
+    """The report's first line of substance, for the supervisor's covering line.
+
+    Headings are skipped: the supervisor no longer holds the report and has to
+    say something about it, and "## Summary" is not something to say.
+    """
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return stripped[:200]
+    return ""
 
 
 def _definitions(found: list, known: dict[str, str], assumed: list[str]) -> str:

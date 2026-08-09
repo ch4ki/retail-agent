@@ -11,7 +11,12 @@ from langgraph.types import Command
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.reports import build_report_tools, confirmation_token
+from retail_agent.agent.subagents import build_subagents
 from retail_agent.agent.supervisor import build_agent
+
+
+def writer(deps, capture):
+    return {fn.__name__: fn for fn in build_subagents(deps, capture)}["report_writer"]
 
 
 @pytest.fixture
@@ -34,19 +39,6 @@ def run(deps, question, saver=None):
         {"messages": [{"role": "user", "content": question}]}, config
     )
     return agent, capture, config, result
-
-
-def test_saving_scans_the_body_before_it_becomes_durable(make_deps, reports):
-    """A report is read long after the conversation, by people who were not in
-    it. This is the one copy nobody will double-check."""
-    deps = make_deps()
-    tools = {fn.__name__: fn for fn in build_report_tools(deps, TurnCapture(user_id="exec"))}
-
-    tools["save_report"]("Contacts", "Reach Dana at dana@example.com about this.")
-
-    stored = reports.list_reports(owner_id="exec")[0]
-    assert "dana@example.com" not in stored.body
-    assert "[redacted:email]" in stored.body
 
 
 def test_a_delete_matching_nothing_never_raises_a_prompt(make_deps, saved):
@@ -131,3 +123,82 @@ def test_a_delete_cannot_reach_another_owner(make_deps, saved):
 
     assert "no reports" in answer.lower()
     assert len(saved.list_reports(owner_id="exec")) == 2
+
+
+def test_the_model_never_receives_the_report_it_wrote(make_deps):
+    """The whole point: a body in the tool return is a body re-sent on every
+    later model call, and a body the model can retype differently."""
+    body = (
+        "## Summary\nQ1 denim review.\n\n"
+        "## What the data shows\nDenim fell 11.8% in Q1.\n\n"
+        "## Action items\n1. Audit Texas."
+    )
+    deps = make_deps(script=[body])
+    capture = TurnCapture(user_id="exec", session_id="s1")
+
+    receipt = writer(deps, capture)(brief="denim findings", title="Q1 Denim")
+
+    assert "Denim fell 11.8%" not in receipt
+    assert "Audit Texas" not in receipt
+    assert "Q1 Denim" in receipt
+
+
+def test_what_is_stored_is_what_the_writer_produced(make_deps, reports):
+    """No model sits between the two any more, so this is now an identity
+    rather than a hope."""
+    body = "## Summary\nDenim fell in Q1."
+    deps = make_deps(script=[body])
+    capture = TurnCapture(user_id="exec", session_id="s1")
+
+    writer(deps, capture)(brief="denim findings", title="Q1 Denim")
+
+    stored = reports.list_reports(owner_id="exec")[0]
+    assert stored.body == body
+    assert capture.reports_written[0].body == stored.body
+
+
+def test_a_report_is_scanned_when_it_is_written_not_when_it_is_saved(
+    make_deps, reports
+):
+    """A report shown but never saved used to reach the executive unscanned,
+    because the only scan lived inside `save_report`."""
+    deps = make_deps(script=["Reach Dana at dana@example.com about this."])
+    capture = TurnCapture(user_id="exec", session_id="s1")
+
+    writer(deps, capture)(brief="contacts", title="Contacts")
+
+    assert "dana@example.com" not in capture.reports_written[0].body
+    assert "[redacted:email]" in reports.list_reports(owner_id="exec")[0].body
+
+
+def test_the_show_flag_is_carried_to_the_cli(make_deps):
+    """The model decides whether the executive asked to read this; the CLI only
+    obeys."""
+    deps = make_deps(script=["## Summary\nA draft."])
+    capture = TurnCapture(user_id="exec", session_id="s1")
+
+    writer(deps, capture)(brief="b", title="T", show_to_executive=False)
+
+    assert capture.reports_written[0].show is False
+
+
+def test_the_receipt_carries_a_headline_the_supervisor_can_use(make_deps):
+    """The supervisor still has to write a covering line, and it no longer has
+    the report to write it from. Markdown headings say nothing usable."""
+    deps = make_deps(script=["## Summary\nDenim revenue fell 11.8% in Q1."])
+    capture = TurnCapture(user_id="exec", session_id="s1")
+
+    receipt = writer(deps, capture)(brief="b", title="T")
+
+    assert "Denim revenue fell 11.8% in Q1." in receipt
+    assert "## Summary" not in receipt
+
+
+def test_there_is_no_save_report_tool(make_deps):
+    """Its only caller was the supervisor retyping a body it had just read."""
+    from retail_agent.agent.supervisor import build_tools
+
+    names = {fn.__name__ for fn in build_tools(make_deps(), TurnCapture())}
+
+    assert "save_report" not in names
+    assert "report_writer" in names

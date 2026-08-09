@@ -6,9 +6,11 @@ the tool runs — so the write cannot have happened when the user is asked. The
 graph got the same property by putting `apply_delete` on the far side of a
 breakpoint; this gets it with one fewer node and no state to carry across it.
 
-Saving and listing are not gated. The brief asks for a strict confirmation flow
-"without breaking UX", and confirming a read is how a confirmation prompt
-becomes something people click through without looking.
+Listing is not gated. The brief asks for a strict confirmation flow "without
+breaking UX", and confirming a read is how a confirmation prompt becomes
+something people click through without looking. Saving is no longer a tool at
+all — `report_writer` stores what it wrote, so there is no second copy of the
+text for a model to alter on its way to the library.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ from collections.abc import Callable
 
 from retail_agent.agent.capture import PendingDelete, TurnCapture
 from retail_agent.agent.deps import AgentDeps
-from retail_agent.safety.egress import scan_text
 
 log = logging.getLogger(__name__)
 
@@ -71,30 +72,6 @@ def render_manifest(pending: PendingDelete) -> str:
 def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
     """The library tools, bound to one turn's owner and session."""
 
-    def save_report(title: str, body: str) -> str:
-        """Save a written report to the executive's library.
-
-        Pass the report text exactly as `report_writer` returned it. Call
-        `report_writer` first — this tool stores what it is given and does not
-        write anything itself.
-        """
-        with capture.step("save_report") as step:
-            # The last sweep before text becomes durable. A report is read long
-            # after the conversation that produced it, by people who were not
-            # in it, so this is the one copy nobody will double-check.
-            scanned = scan_text(body)
-            report = deps.reports.save(
-                owner_id=capture.user_id,
-                session_id=capture.session_id,
-                title=title or "Untitled report",
-                body=scanned.text,
-            )
-            step.detail = f"saved {report.id}"
-            return (
-                f"Saved as '{report.title}' (id {report.id}). "
-                f"The executive can run /reports to see their library."
-            )
-
     def list_reports() -> str:
         """List the reports this executive has saved."""
         with capture.step("list_reports") as step:
@@ -140,4 +117,4 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 f"/undo to restore them."
             )
 
-    return [save_report, list_reports, delete_reports]
+    return [list_reports, delete_reports]
