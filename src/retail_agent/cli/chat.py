@@ -197,9 +197,15 @@ def _prefs(console, deps, user, command) -> None:
     """`/prefs` shows them; `/prefs <setting> <value>` changes one."""
     from retail_agent.store.preferences import PreferenceError, coerce, preferred
 
+    from retail_agent.store.preferences import notes_for
+
     parts = command.split()
     if len(parts) == 1:
-        render_preferences(console, preferred(deps.preferences, user))
+        render_preferences(
+            console,
+            preferred(deps.preferences, user),
+            notes_for(deps.preferences, user),
+        )
         return
     if len(parts) < 3:
         console.print("Usage: /prefs <setting> <value>  — /prefs lists them.")
@@ -214,7 +220,7 @@ def _prefs(console, deps, user, command) -> None:
 
     updated = deps.preferences.set(user_id=user, **{field: parsed})
     console.print(f"Set [bold]{field}[/bold] to {value}.")
-    render_preferences(console, updated)
+    render_preferences(console, updated, notes_for(deps.preferences, user))
 
 
 def _definitions(console, deps, user, command) -> None:

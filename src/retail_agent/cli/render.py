@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -277,8 +279,22 @@ def render_persona(console: Console, persona) -> None:
     )
 
 
-def render_preferences(console: Console, prefs) -> None:
-    """Current settings, with what each one does and how to change it."""
+def render_preferences(console: Console, prefs, notes: Sequence[str] = ()) -> None:
+    """Current settings and saved notes, with how to change either.
+
+    The notes come first because they are what the agent actually applies now:
+    one typed setting is left, and the rest of what an executive asks for lives
+    in their own words. Omitting them made this screen actively misleading —
+    saving a note ends with "/prefs to change it", and `/prefs` did not show it.
+    """
+    if notes:
+        console.print("[bold]You have asked for[/bold]")
+        for note in notes:
+            console.print(f"  • {note}")
+        console.print(
+            "[dim]Say 'forget that', or name one, to drop it.[/dim]\n"
+        )
+
     from retail_agent.store.preferences import DESCRIPTIONS
 
     table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)

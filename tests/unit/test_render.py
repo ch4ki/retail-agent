@@ -280,3 +280,39 @@ def test_metrics_report_how_large_conversations_actually_get():
     printed = text(console).replace(",", "")
     assert "9000" in printed
     assert "4000" in printed
+
+
+# --- /prefs ---
+
+
+def test_prefs_shows_the_notes_the_agent_saved():
+    """The gap this closes, reported from a live session.
+
+    Told "from now on keep it brief", the agent saves a note and the CLI
+    announces it — ending with "/prefs to change it". `/prefs` then printed one
+    typed setting and no notes, so the thing the user had just changed was the
+    one thing the screen it pointed at did not show. A preference you cannot
+    see is one you cannot withdraw.
+    """
+    from retail_agent.cli.render import render_preferences
+    from retail_agent.store.preferences import Preferences
+
+    console = recorder()
+
+    render_preferences(
+        console, Preferences(), notes=["Keep answers brief and give just the numbers."]
+    )
+
+    assert "Keep answers brief" in text(console)
+    assert "forget" in text(console).lower(), "and how to drop one"
+
+
+def test_prefs_with_no_notes_says_so_rather_than_showing_an_empty_table():
+    from retail_agent.cli.render import render_preferences
+    from retail_agent.store.preferences import Preferences
+
+    console = recorder()
+
+    render_preferences(console, Preferences(), notes=[])
+
+    assert "show_attempt_footnote" in text(console), "the typed settings still render"
