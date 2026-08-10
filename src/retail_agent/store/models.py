@@ -193,15 +193,6 @@ class PreferenceRow(Base):
     __tablename__ = "preferences"
 
     user_id: Mapped[str] = mapped_column(String, primary_key=True)
-    answer_format: Mapped[str] = mapped_column(
-        String, nullable=False, server_default=text("'table'")
-    )
-    depth: Mapped[str] = mapped_column(
-        String, nullable=False, server_default=text("'standard'")
-    )
-    max_table_rows: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("20")
-    )
     show_attempt_footnote: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )

@@ -15,47 +15,34 @@ class PreferenceStoreContract:
     def test_an_unknown_user_gets_the_defaults(self, store):
         prefs = store.get(user_id="nobody")
 
-        assert prefs.answer_format == DEFAULT_PREFERENCES.answer_format
-        assert prefs.depth == DEFAULT_PREFERENCES.depth
+        assert (
+            prefs.show_attempt_footnote == DEFAULT_PREFERENCES.show_attempt_footnote
+        )
 
     def test_a_set_preference_reads_back(self, store):
-        store.set(user_id="dana", answer_format="bullets")
+        store.set(user_id="dana", show_attempt_footnote=False)
 
-        assert store.get(user_id="dana").answer_format == "bullets"
+        assert store.get(user_id="dana").show_attempt_footnote is False
 
     def test_preferences_do_not_leak_between_users(self, store):
-        store.set(user_id="dana", answer_format="bullets")
-        store.set(user_id="sam", answer_format="table")
+        store.set(user_id="dana", show_attempt_footnote=False)
+        store.set(user_id="sam", show_attempt_footnote=True)
 
-        assert store.get(user_id="dana").answer_format == "bullets"
-        assert store.get(user_id="sam").answer_format == "table"
-
-    def test_setting_one_field_leaves_the_others_alone(self, store):
-        store.set(user_id="dana", answer_format="bullets", depth="deep")
-
-        store.set(user_id="dana", depth="summary")
-
-        prefs = store.get(user_id="dana")
-        assert prefs.depth == "summary"
-        assert prefs.answer_format == "bullets", "not reset by an unrelated edit"
+        assert store.get(user_id="dana").show_attempt_footnote is False
+        assert store.get(user_id="sam").show_attempt_footnote is True
 
     def test_setting_nothing_changes_nothing(self, store):
-        store.set(user_id="dana", answer_format="bullets")
+        store.set(user_id="dana", show_attempt_footnote=False)
 
         store.set(user_id="dana")
 
-        assert store.get(user_id="dana").answer_format == "bullets"
-
-    def test_max_table_rows_round_trips(self, store):
-        store.set(user_id="dana", max_table_rows=5)
-
-        assert store.get(user_id="dana").max_table_rows == 5
+        assert store.get(user_id="dana").show_attempt_footnote is False
 
     def test_a_later_edit_wins(self, store):
-        store.set(user_id="dana", depth="deep")
-        store.set(user_id="dana", depth="summary")
+        store.set(user_id="dana", show_attempt_footnote=False)
+        store.set(user_id="dana", show_attempt_footnote=True)
 
-        assert store.get(user_id="dana").depth == "summary"
+        assert store.get(user_id="dana").show_attempt_footnote is True
 
     # --- the free-text notes list ---
 
