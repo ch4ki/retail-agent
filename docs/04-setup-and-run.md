@@ -60,6 +60,28 @@ uv run retail-agent eval   # 47 cases against live BigQuery; exit 0 ships
 The first command is the one that matters for "does this work on another
 machine": it needs no credentials, no database and no network.
 
+**The eval measures a model as much as it measures the agent, so run it against
+whichever model you intend to use.** It scores 45 of 47 on `gemini-3.6-flash`
+and 40 of 47 on a weaker backend, with identical code — a wider spread than
+almost any engineering change in this project produced. A figure carried over
+from someone else's model says nothing about yours, and the release gate's
+threshold should be re-baselined whenever `LLM_PROVIDER` or a `*_MODEL` variable
+changes.
+
+```bash
+LLM_PROVIDER=openrouter OPENROUTER_MODEL=google/gemini-3.6-flash \
+  uv run retail-agent eval --json baseline.json
+
+# then gate later runs against it
+uv run retail-agent eval --baseline baseline.json
+```
+
+Two practical notes. The run costs real BigQuery bytes and real model tokens for
+47 questions, so `--case <id>` and `--limit N` exist for checking one thing
+without paying for the sweep. And an exhausted provider balance surfaces as
+`402` citing `max_tokens`, which reads like a configuration error and is not —
+if most cases suddenly fail with it, check the balance before the code.
+
 ## Run
 
 ```bash
@@ -260,6 +282,25 @@ email addresses changes nothing about which columns leave BigQuery.
 ```
 
 Cached metadata, no SQL spent.
+
+---
+
+## Running as a server
+
+The CLI is the primary interface. The same agent also runs behind the LangGraph
+server, which is what a deployment would use.
+
+```bash
+uv run langgraph dev --no-browser      # local, port 2024, hot reload
+uv run langgraph build -t retail-agent:dev   # build the deployable image
+```
+
+`langgraph.json` points at `agent/studio.py:make_graph`, a factory the server
+calls once per run. It attaches no checkpointer and no store — the server
+supplies both, and passing our own is a hard error under `langgraph dev`.
+
+`langgraph build` requires Docker. It is not covered by the test suite for that
+reason; run it before claiming a change is deployable.
 
 ---
 

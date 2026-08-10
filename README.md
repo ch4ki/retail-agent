@@ -4,8 +4,8 @@ A CLI chat agent that answers questions about the theLook e-commerce dataset in
 BigQuery. It writes SQL, runs it behind a static safety guard, masks personal
 data before the model ever sees it, and explains the results.
 
-- **[Design document](docs/design.md)** — architecture, services, and how each
-  requirement is handled, with what is built vs designed marked per section
+- **[Documentation](docs_to_submit/README.md)** — architecture, data flow, how
+  each requirement is handled, and an annotated example run
 
 ## Requirements
 
@@ -41,6 +41,10 @@ billed.
 uv run retail-agent chat
 ```
 
+The same agent also runs behind the LangGraph server —
+`uv run langgraph dev` — see
+[docs/04-setup-and-run.md](docs/04-setup-and-run.md#running-as-a-server).
+
 Try:
 
 ```
@@ -56,6 +60,9 @@ Try:
 › /metrics        first-pass SQL validity, self-correction, latency per step
 › /persona list   change the agent's tone without a restart
 › /prefs          your answer format, depth and table size
+› /definitions    what you have told it terms mean; `forget <term>` to re-ask
+› /trios          the analyst corpus it answers definitions from
+› /help           all of them
 ```
 
 ## Using a different LLM
@@ -69,34 +76,43 @@ that provider, so switching `LLM_PROVIDER` stays safe. The generic `LLM_MODEL`
 applies to whichever provider is active, and is never sent to a fallback.
 
 For downtime rather than preference, set a chain: `LLM_FALLBACKS=openai,ollama`.
-Transient failures are retried on the current provider with jittered backoff, a
-rejected key moves on immediately, and a provider that keeps failing is skipped
-until a cooldown elapses.
+Transient failures (429s, timeouts, 5xx) are retried on the current provider
+with jittered backoff, then the next provider in the chain takes over. A
+rejected key is not retried at all: it is a permanent failure, and retrying it
+only adds latency before the identical rejection.
+
+There is no circuit breaker. `ModelFallbackMiddleware` always tries the
+configured provider first, so during an outage every turn pays that provider's
+retry budget before falling through.
 
 ## How it works
 
-One ReAct supervisor with seven tools, two of which are subagents. The model
+One ReAct supervisor with ten tools, three of which are subagents. The model
 decides *what* to ask; middleware and tool preconditions decide *what is
 allowed*. No safety property is an instruction in a prompt.
 
 ```
 your question
-  └─ scope guard          lexical, before any model call — refusals end here
-     └─ supervisor        persona + your preferences, read per model call
-        ├─ analyst        ── a subagent with its own loop ──────────────┐
-        │                    resolves what terms mean first;            │
-        │                    returns without querying if one is unsettled│
-        │                    run_sql → guard → dry_run → execute → mask │
-        │                       ↑                    │                  │
-        │                       └──── error back to the model ──────────┘
-        │                            (budget: 14 queries per turn)
-        ├─ report_writer   a subagent with no data tools, so it cannot
-        │                  invent a figure the analyst did not find
-        ├─ describe_schema cached metadata, no SQL
-        ├─ save_report · list_reports
-        ├─ delete_reports  ⟵ interrupts for approval BEFORE it runs
-        └─ remember_definition · note_preference
-     └─ egress scan, then the trace
+  └─ supervisor           persona + your preferences, read per model call
+     ├─ analyst           ── a subagent with its own loop ──────────────┐
+     │                       resolves what terms mean first;            │
+     │                       returns without querying if one is unsettled│
+     │                       run_sql → guard → dry_run → execute → mask │
+     │                          ↑                    │                  │
+     │                          └──── error back to the model ──────────┘
+     │                               (budget: 14 queries per turn)
+     ├─ report_writer      a subagent with no data tools, so it cannot
+     │                     invent a figure the analyst did not find.
+     │                     Saves what it wrote, scanned for PII first,
+     │                     and returns only a receipt
+     ├─ ask_about_report   answers from a saved report without loading
+     │                     its body back into the conversation
+     ├─ describe_schema    cached metadata, no SQL
+     ├─ list_reports
+     ├─ delete_reports     ⟵ interrupts for approval BEFORE it runs
+     ├─ ask_for_definitions ⟵ interrupts to ask, in the CLI
+     └─ remember_definition · note_preference · forget_preference
+     └─ the trace
 ```
 
 Two properties are worth being precise about, because they are what the earlier
@@ -107,17 +123,27 @@ warehouse row, and masking is inside it — before a single row is rendered. Thi
 does not depend on what order anything runs in, and a test reads the source of
 every other tool to make sure none of them reaches the warehouse.
 
-**Nothing runs before a business term is settled.** The `analyst` tool resolves
-definitions — the shared corpus first, then your own — *before* it builds its
-subagent, and returns without querying if something is left over. There is no
-model in that decision and no tool the model could decline to call.
+**A business term is settled, or the answer says who settled it.** The agent
+asks by calling `ask_for_definitions`, and that tool looks the word up in the
+definitions your analytics team agreed first, then in your own. Only a word
+neither covers reaches you. Lookup is on whole words, so "loyal customers"
+finds the agreed meaning of `loyal` while "disloyal customers" does not.
 
-In the CLI the same check runs one step earlier, as an interrupt before the tool
-is entered, so the turn *pauses* rather than ending: you are offered a few
-candidate meanings, can type your own, or can hand the decision back and be told
-what was assumed. What you pick is remembered, so the question is asked once.
-Headless callers — the eval harness, Studio — cannot answer a pause, so for them
-the analyst's early return and the stated assumption remain the whole behaviour.
+In the CLI the tool interrupts before its body runs, so the turn *pauses*: you
+are offered a few candidate meanings, can type your own, or can hand the
+decision back and be told what was assumed. What you pick is remembered, so the
+question is asked once. Headless callers — the eval harness, Studio — cannot
+answer a pause, so for them the tool records the assumption and the answer is
+required to disclose it.
+
+This one is weaker than the PII guarantee, and deliberately so. Deciding which
+words need defining used to be a regex over nineteen hardcoded words, which
+could not be skipped and could not recognise the twentieth — asked about "10
+LGB customers" it found nothing and the agent invented a meaning. The judgement
+moved to the model, which is better placed to make it, and the cost is that a
+tool can be declined where a precondition could not. So it is measured rather
+than assumed: `uv run retail-agent eval` reports how often the agent asked
+before it spent a query.
 
 ## Viewing the pipeline in LangGraph Studio
 
@@ -167,8 +193,11 @@ every call.
   BigQuery, *before* entering model context. The model never receives an email
   address, so no prompt can make it emit one. Rules live in
   `src/retail_agent/safety/policies/thelook.yaml`.
-- **Egress scan** — the final answer is swept for anything resembling contact
-  data. This is the second line of defence, not the first.
+- **Egress scan** — a report body is swept for anything resembling contact data
+  *before* it is saved, and every eval answer is swept too, where one finding
+  fails the release gate outright. This is the second line of defence, not the
+  first: masking is what makes a leak impossible, and a system that relies on
+  scanning output for PII is one clever prompt away from failing.
 - **Cost ceiling** — every query is dry-run first and capped by
   `BQ_MAX_BYTES_BILLED` (2 GB by default). Note that a SQL `LIMIT` is *not* a
   cost control: BigQuery bills bytes scanned, and adding `LIMIT 500` to a real
@@ -181,21 +210,43 @@ every call.
   requires typing the token it asks for (`y` for one, `DELETE <n>` for several).
   Deletes are soft, audited and reversible with `/undo`. Ownership is a SQL
   predicate on every statement, so it holds even if the model is compromised.
-- **Scope guard** — attempts to override the instructions, extract the prompt,
-  read out contact details or write to the warehouse are refused before any
-  model call. It is deliberately not a topic classifier: ordinary scope is held
-  by the fact that every tool reads retail data or your own reports.
+- **Scope** — held by the tool set, not by an input filter. Every tool reads
+  retail data or your own saved reports, so a question about the weather has
+  nothing to answer it with. There is no lexical filter on your input: the properties one would appear to protect are already held at the SQL
+  and column boundaries, which cannot be talked out of them, and the phrasings
+  it would match overlap with real work — "delete all reports mentioning Client
+  X" is a feature and "how many distinct email addresses" is legitimate
+  analysis.
 - **Bounded self-correction** — a failed query comes back to the model as an
   error it can act on, and `run_sql` can be called at most 14 times in a turn.
   The counter is middleware, so the bound holds regardless of what the model
   decides. When it runs out the agent says what it could not retrieve instead of
   looping.
 
-## Semantic search over the analyst corpus (optional)
+## Editing the analyst corpus
 
 The agent answers from a corpus of analyst "trios" — question, SQL, report, and
-the metric definitions that connect them. Matching a question to the right trio
-is lexical by default, which needs nothing installed and no API key.
+the metric definitions that connect them. `src/retail_agent/knowledge/seeds.py`
+is the hand-authored version, copied into Postgres the first time it runs.
+
+**Editing `seeds.py` does not change a database that has already been seeded.**
+Seeding inserts what is absent and leaves what is there, so that an edit made
+through the store survives a restart. The cost is that a `seeds.py` change is
+silently ignored, and the agent keeps answering from the corpus it was first
+given. To see and apply the difference:
+
+```bash
+uv run retail-agent trios           # what differs; changes nothing
+uv run retail-agent trios --force   # overwrite those from seeds.py
+```
+
+Without a database the corpus is read from `seeds.py` directly, so edits take
+effect immediately and this does not arise.
+
+## Semantic search over the corpus (optional)
+
+Matching a question to the right trio is lexical by default, which needs
+nothing installed and no API key.
 
 Set `DENSE_RETRIEVAL=true` to add a semantic ranker fused with it. None of
 these questions share a distinctive word with the trio they find:
@@ -235,10 +286,10 @@ so no floor could be both sensitive and precise.
 ## Tests
 
 ```bash
-uv run pytest              # 773 tests, no credentials or database needed
-uv run pytest -m db        # 94 tests, needs `docker compose up -d postgres`
-uv run pytest -m live      # 10 tests, needs real BigQuery access and an LLM key
-uv run pytest -m vector    # 14 tests, needs DENSE_RETRIEVAL deps; 9 need an OpenAI key
+uv run pytest              # 823 tests, no credentials or database needed
+uv run pytest -m db        # 86 tests, needs `docker compose up -d postgres`
+uv run pytest -m live      # 16 tests, needs real BigQuery access and an LLM key
+uv run pytest -m vector    # 9 tests, needs DENSE_RETRIEVAL deps and an OpenAI key
 uv run retail-agent eval   # 47 cases against live BigQuery; exit 0 ships
 ```
 
@@ -266,12 +317,12 @@ or `ollama`, or set `LLM_FALLBACKS` so the agent moves on by itself.
 
 ## Status
 
-Built: BigQuery access, the scope guard, the SQL guard, PII masking, the egress
-scan, the agent and the CLI; the saved-reports library with its
-delete-confirmation gate, audit trail and `/undo`; turn traces with `/trace`,
-`/trace <id>` and `/metrics`; the eval suite and its release gate; and the full
-resilience story — bounded self-correction, an empty result that says what it
-probably means, and a provider fallback chain with classified retries.
+Built: BigQuery access, the SQL guard, PII masking, the egress scan over saved
+reports and eval answers, the agent and the CLI; the saved-reports library with
+its delete-confirmation gate, audit trail and `/undo`; turn traces with
+`/trace`, `/trace <id>` and `/metrics`; the eval suite and its release gate; and
+the full resilience story — bounded self-correction, an empty result that says
+what it probably means, and a provider fallback chain with classified retries.
 
 Also built: personas, so a non-developer can change the agent's tone without a
 deploy — versioned, attributed, read per model call, and provably unable to
@@ -287,10 +338,10 @@ it saves that as your default and tells you it did — by the CLI, not by the
 model, so you are told whether or not it mentions it. It will only do that on
 words you actually typed: the evidence is checked against your message, so it
 cannot decide on your behalf that you prefer brevity. Noticing is a tool it may
-decline to call, which is the one weakness; §5.4 of the design says what
-restoring the guarantee would take.
+decline to call, which is the one weakness.
 
 Not yet built: the LLM judge for narrative quality, a numeric-provenance check,
 and system-level learning. All three are designed in
-[docs/design.md](docs/design.md), which marks each requirement Built, Partial or
-Designed and names the command or test that demonstrates each Built claim.
+[the documentation](docs_to_submit/03-requirements.md), which marks each
+requirement Built, Partial or Designed and names the command or test that
+demonstrates each Built claim.
