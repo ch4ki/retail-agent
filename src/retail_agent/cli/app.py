@@ -116,11 +116,28 @@ def run_trios(argv, *, console: Console | None = None, store=None) -> int:
     return 0
 
 
-def _migrate() -> int:
-    console = Console()
+def setup_checkpoint_tables(database_url: str) -> None:
+    """Create LangGraph's checkpoint tables. Idempotent.
+
+    Imported inside the function, not at module scope: `app.py` is deliberately
+    thin so `retail-agent migrate` starts immediately, and `PostgresSaver`
+    pulls in langgraph.
+    """
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    with PostgresSaver.from_conn_string(database_url) as saver:
+        saver.setup()
+
+
+def _migrate(*, console: Console | None = None) -> int:
+    console = console or Console()
     settings = get_settings()
     try:
         revision = run_migrations(settings.database_url)
+        # Same command, same transaction boundary as every other table. A
+        # migrate that upgraded the schema but left the checkpointer without
+        # tables would exit 0 and fail on the next turn.
+        setup_checkpoint_tables(settings.database_url)
     except Exception as err:
         render_error(
             console,
