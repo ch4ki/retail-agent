@@ -536,7 +536,7 @@ def _settle_definitions(console, deps, capture, user, request) -> dict:
 
     for term in pending.terms if pending else ():
         options = propose(
-            deps.llm,
+            deps,
             question=capture.question,
             term=term,
             schema=schema,

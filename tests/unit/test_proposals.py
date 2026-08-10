@@ -11,6 +11,18 @@ from retail_agent.knowledge.proposals import propose
 SCHEMA = "orders(id, user_id, created_at)\norder_items(id, sale_price)"
 
 
+def _deps_for(llm):
+    """`propose` takes deps now, so it can retry and fall over the way every
+    other model call does."""
+    from types import SimpleNamespace
+
+    from retail_agent.config import Settings
+
+    return SimpleNamespace(
+        llm=llm, llm_fallbacks=[], settings=Settings(_env_file=None)
+    )
+
+
 def suggest(replies, **overrides):
     llm = ScriptedLLM(replies)
     kwargs = dict(
@@ -19,7 +31,7 @@ def suggest(replies, **overrides):
         schema=SCHEMA,
     )
     kwargs.update(overrides)
-    return propose(llm, **kwargs), llm
+    return propose(_deps_for(llm), **kwargs), llm
 
 
 def test_the_proposed_definitions_come_back_in_order():
@@ -39,7 +51,7 @@ def test_a_model_failure_costs_the_options_and_not_the_turn():
             raise RuntimeError("the provider is down")
 
     assert propose(
-        Broken([]), question="q", term="loyal", schema=SCHEMA
+        _deps_for(Broken([])), question="q", term="loyal", schema=SCHEMA
     ) == []
 
 
