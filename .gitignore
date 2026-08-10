@@ -19,3 +19,5 @@ wheels/
 
 # Milvus Lite index, rebuilt from the corpus on demand
 .milvus/
+# Editor settings, kept local
+.vscode/
