@@ -153,6 +153,19 @@ def test_an_older_migration_version_falls_back_naming_migrate(console, monkeypat
     assert connection.closed, "the connection was left open"
 
 
+def test_a_malformed_database_url_propagates(console):
+    """psycopg raises a bare `ProgrammingError` at conninfo-*parse* time,
+    before any connection is attempted — the same exception type raised for
+    a genuinely missing schema. Deliberately does not monkeypatch
+    `from_conn_string`, so this exercises the real psycopg parse failure: a
+    config typo must keep propagating instead of degrading to `MemorySaver`
+    and telling the user to run `retail-agent migrate`, which cannot fix a
+    typo."""
+    with pytest.raises(psycopg.ProgrammingError):
+        with chat._checkpointer(console, "not-a-url"):
+            pass
+
+
 def test_an_unexpected_failure_propagates(console, monkeypatch):
     """The whole point of narrowing the catch. A NameError in startup must not
     read as a database problem."""
@@ -173,6 +186,21 @@ def test_a_repl_error_is_not_mistaken_for_a_database_error(console, monkeypatch)
     with pytest.raises(ZeroDivisionError):
         with chat._checkpointer(console, "postgresql://x/y"):
             1 / 0
+
+
+def test_the_real_saver_still_exposes_the_private_api_assert_migrated_depends_on():
+    """`_assert_migrated` calls the underscore-prefixed `saver._cursor()` and
+    reads `saver.MIGRATIONS` — private API of `langgraph-checkpoint-postgres`,
+    declared in `pyproject.toml` with no upper bound until now. The eight
+    other unit tests in this file exercise `_FakeSaver`, which defines its own
+    `_cursor`/`MIGRATIONS` and would stay green even if the real package
+    renamed them out from under it, silently turning every `retail-agent
+    chat` startup into an `AttributeError`. This test pins the real
+    `PostgresSaver` instead, so an upgrade that breaks the private API turns
+    red here."""
+    assert callable(PostgresSaver._cursor)
+    assert hasattr(PostgresSaver, "MIGRATIONS")
+    assert len(PostgresSaver.MIGRATIONS) > 0
 
 
 @pytest.mark.db

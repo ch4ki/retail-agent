@@ -144,8 +144,9 @@ def _fake_deps(monkeypatch):
     from an earlier test cannot stand in for this one's doubles; on exit, so
     this test does not leave an `AgentDeps` built from a fake model against an
     unreachable database sitting in the cache for whichever test runs next.
-    `pytest-randomly` is installed, so that staleness is a live ordering
-    hazard, not just untidiness.
+    `pytest-randomly` is not installed here, but test order is not otherwise
+    guaranteed, so that staleness would still be a live ordering hazard, not
+    just untidiness.
     """
     from retail_agent.agent import studio
     from retail_agent.config import Settings

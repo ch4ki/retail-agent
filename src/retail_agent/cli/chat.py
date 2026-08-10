@@ -182,12 +182,27 @@ def _checkpointer(console: Console, database_url: str):
         try:
             saver = stack.enter_context(PostgresSaver.from_conn_string(database_url))
             _assert_migrated(saver)
-        except (psycopg.ProgrammingError, _SchemaOutOfDate):
-            # ProgrammingError covers UndefinedTable (no schema at all),
-            # UndefinedColumn and InsufficientPrivilege — all genuine "the
-            # schema is missing or wrong" states. It is not a broad
-            # `Exception` catch: a NameError from broken startup wiring is not
-            # a ProgrammingError and still propagates.
+        except (
+            psycopg.errors.UndefinedTable,
+            psycopg.errors.UndefinedColumn,
+            psycopg.errors.InsufficientPrivilege,
+            _SchemaOutOfDate,
+        ) as err:
+            # These three are the genuine "the schema is missing or wrong"
+            # states. Deliberately narrower than the base `psycopg.
+            # ProgrammingError`: a malformed `DATABASE_URL` (e.g. a stray
+            # query parameter) also raises a bare `ProgrammingError` at
+            # conninfo-parse time, before any connection is attempted — that
+            # is a config bug, not a schema problem, and "run `retail-agent
+            # migrate`" would not fix it, so it must keep propagating. It is
+            # also not a broad `Exception` catch: a NameError from broken
+            # startup wiring is not a ProgrammingError and still propagates.
+            extra = ""
+            if isinstance(err, _SchemaOutOfDate):
+                extra = f" (applied={err.args[0]}, expected={err.args[1]})"
+            logging.getLogger(__name__).debug(
+                "checkpoint schema missing or out of date: %s%s", err, extra
+            )
             stack.close()
             console.print(
                 "[yellow]The database's checkpoint schema is missing or out "
