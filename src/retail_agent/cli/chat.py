@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import logging
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
+import psycopg
+import psycopg_pool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.types import Command
@@ -123,25 +125,55 @@ def run_chat(args) -> int:
         return _repl(console, deps, saver, args.user, session_id)
 
 
+# Losing the database should cost history, not the session. Losing a *name* —
+# a NameError in startup wiring — must not look the same, which is what
+# `except Exception` made it look like.
+CONNECTION_ERRORS = (psycopg.OperationalError, psycopg_pool.PoolTimeout)
+
+
+def _assert_migrated(saver) -> None:
+    """Read one checkpoint that cannot exist.
+
+    `from_conn_string` opens a connection; it never touches the tables. So a
+    database that was never migrated looks healthy here and fails on the first
+    turn instead — inside `_answer`, where it surfaces as a failed turn rather
+    than as the startup warning it is.
+    """
+    saver.get_tuple({"configurable": {"thread_id": "__migration_probe__"}})
+
+
 @contextmanager
 def _checkpointer(console: Console, database_url: str):
     """Durable conversation state, degrading to in-memory if Postgres is down.
 
-    A missing database should cost you history across restarts, not the
-    ability to use the agent.
+    A missing database should cost you history across restarts, not the ability
+    to use the agent. Anything outside the two named states is a bug and
+    propagates.
     """
-    try:
-        with PostgresSaver.from_conn_string(database_url) as saver:
-            saver.setup()
+    with ExitStack() as stack:
+        try:
+            saver = stack.enter_context(PostgresSaver.from_conn_string(database_url))
+            _assert_migrated(saver)
+        except psycopg.errors.UndefinedTable:
+            stack.close()
+            console.print(
+                "[yellow]The database has no checkpoint tables — this session "
+                "will not be saved. Run `retail-agent migrate` to enable "
+                "history.[/yellow]"
+            )
+        except CONNECTION_ERRORS as err:
+            # Full detail only under --verbose; the console gets one actionable line.
+            logging.getLogger(__name__).debug("postgres unavailable: %s", err)
+            console.print(
+                "[yellow]Postgres unreachable — this session will not be saved. "
+                "Run `docker compose up -d postgres` to enable history.[/yellow]"
+            )
+        else:
+            # Outside the `try`, so an exception from the REPL body propagates
+            # instead of being thrown back in here and read as a database fault.
             yield saver
             return
-    except Exception as err:
-        # Full detail only under --verbose; the console gets one actionable line.
-        logging.getLogger(__name__).debug("postgres unavailable: %s", err)
-        console.print(
-            "[yellow]Postgres unreachable — this session will not be saved. "
-            "Run `docker compose up -d postgres` to enable history.[/yellow]"
-        )
+
     yield MemorySaver()
 
 
