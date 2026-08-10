@@ -81,3 +81,26 @@ def test_the_corpus_covers_the_definition_dependent_questions():
 def test_ranked_cases_exist():
     """Scalar-only coverage would miss ordering bugs entirely."""
     assert any(case.ranked for case in EVAL_CASES)
+
+
+# A question of the form "how much did the biggest X spend" is naturally
+# answered with `(x_id, figure)` — the id is what makes the row meaningful to
+# read. `_extract` takes the first cell, so the ruler scores the id.
+#
+# Live, both of these were answered *correctly* and marked wrong: asked what our
+# biggest customer had spent, the agent said $1,477.56 against a reference of
+# 1477.56 and was scored on user id 72979.
+SCORED_ON_THE_ID = {
+    "top-customer-spend": "the spend, not the customer's id",
+    "max-orders-by-one-customer": "the order count, not the customer's id",
+}
+
+
+@pytest.mark.parametrize("case_id", sorted(SCORED_ON_THE_ID), ids=str)
+def test_a_figure_returned_beside_an_id_names_the_column_holding_it(case_id):
+    case = next(c for c in EVAL_CASES if c.id == case_id)
+
+    assert case.answer_column, (
+        f"{case_id} must name {SCORED_ON_THE_ID[case_id]}, or a correct answer "
+        "scores as a wrong one"
+    )

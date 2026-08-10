@@ -137,6 +137,11 @@ EVAL_CASES: tuple[EvalCase, ...] = (
         """,
         required_definitions=("top",),
         tolerance=0.001,
+        answer_column="total_spent",
+        notes=(
+            "Answered correctly and scored wrong: the agent projected "
+            "(user_id, total_spent) and `_extract` took the id."
+        ),
     ),
     EvalCase(
         id="underspending-states",
@@ -538,6 +543,11 @@ EVAL_CASES: tuple[EvalCase, ...] = (
               GROUP BY user_id
             )
         """,
+        answer_column="completed_orders",
+        notes=(
+            "Answered correctly and scored wrong: the agent projected "
+            "(user_id, completed_orders) and `_extract` took the id."
+        ),
     ),
     EvalCase(
         id="distribution-centre-count",

@@ -305,8 +305,9 @@ def test_the_named_answer_column_is_used_when_the_agent_returns_extras():
     assert result.outcome is Outcome.PASS
 
 
-def test_a_missing_named_column_falls_back_to_the_first():
-    """The name is a hint, not a contract — the agent chooses its own aliases."""
+def test_a_missing_named_column_falls_back_to_the_first_when_unambiguous():
+    """A single-column answer leaves nothing to guess between, whatever the
+    agent called it."""
     case = EvalCase(id="c", question="q", reference_sql="s", answer_column="month")
 
     result = run_case(
@@ -316,6 +317,43 @@ def test_a_missing_named_column_falls_back_to_the_first():
     )
 
     assert result.outcome is Outcome.PASS
+
+
+def test_a_named_column_the_agent_did_not_return_is_a_visible_miss():
+    """An agent that aliases the column must not silently score column 0.
+    "expected 12, got 2023" reads as a confidently wrong agent when the truth
+    is a wrong guess by the harness — the miscoring this annotation exists to
+    prevent, surviving one alias away."""
+    case = EvalCase(id="c", question="q", reference_sql="s", answer_column="month")
+
+    result = run_case(
+        case,
+        ask=lambda _q: AgentAnswer(
+            text="", rows=[[2023, 12]], columns=("year", "mo")
+        ),
+        execute=lambda _sql: [[12]],
+    )
+
+    assert result.outcome is Outcome.ERROR
+    assert "month" in result.detail, "what the case asked for"
+    assert "mo" in result.detail, "and what the agent actually returned"
+
+
+def test_a_multi_column_answer_with_no_named_column_flags_the_case():
+    """Guessing column 0 out of several is how user_id scored as an order
+    count. The case author is told to name the column, once, loudly."""
+    case = EvalCase(id="c", question="q", reference_sql="s")
+
+    result = run_case(
+        case,
+        ask=lambda _q: AgentAnswer(
+            text="", rows=[[2023, 12]], columns=("year", "month")
+        ),
+        execute=lambda _sql: [[12]],
+    )
+
+    assert result.outcome is Outcome.ERROR
+    assert "answer_column" in result.detail
 
 
 def test_the_column_name_match_ignores_case():

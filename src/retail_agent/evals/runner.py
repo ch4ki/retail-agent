@@ -149,7 +149,9 @@ def run_case(case: EvalCase, *, ask: Ask, execute: Execute) -> CaseResult:
         answer_column=case.answer_column,
     )
 
-    if actual is None:
+    if isinstance(actual, _NoAnswerColumn):
+        result = Outcome.ERROR, actual.detail
+    elif actual is None:
         result = Outcome.ERROR, "the agent returned no rows to score"
     elif answer.truncated and not case.ranked:
         # The rows are a sample, so the first one is not the answer — scoring it
@@ -257,6 +259,18 @@ def run_suite(
     return evaluate_gate(results, threshold=threshold, baseline=baseline)
 
 
+@dataclass(frozen=True)
+class _NoAnswerColumn:
+    """A scalar case whose answer could not be picked without guessing.
+
+    Guessing column 0 out of several is how user_id once scored as an order
+    count — silently, with the miss reading as a confidently wrong agent.
+    This scores as a visible extraction error naming both sides instead.
+    """
+
+    detail: str
+
+
 def _extract(
     rows: Sequence[Sequence[Any]],
     *,
@@ -264,7 +278,11 @@ def _extract(
     columns: Sequence[str] = (),
     answer_column: str = "",
 ) -> Any:
-    """The comparable value: a column for a ranked case, one cell otherwise."""
+    """The comparable value: a column for a ranked case, one cell otherwise.
+
+    `columns` is only ever passed for the agent's side. The reference side is
+    the case author's own SQL, where the first column is the contract.
+    """
     if not rows:
         return None
     if ranked:
@@ -276,11 +294,23 @@ def _extract(
 
     # A scalar question answered with several columns: take the one the case
     # named, so extra context the agent chose to return does not score as a
-    # wrong answer.
-    if answer_column and columns:
+    # wrong answer. A single column is unambiguous whatever it is called.
+    if columns and len(first) > 1:
         wanted = answer_column.strip().lower()
         for index, name in enumerate(columns):
             if str(name).strip().lower() == wanted and index < len(first):
                 return first[index]
+        offered = ", ".join(str(name) for name in columns)
+        if wanted:
+            return _NoAnswerColumn(
+                f"the case names answer_column {answer_column!r} but the agent "
+                f"returned columns ({offered}); scoring any of them would be a "
+                "guess"
+            )
+        return _NoAnswerColumn(
+            f"the agent returned several columns ({offered}) and the case "
+            "names no answer_column; add one rather than let the harness "
+            "guess"
+        )
 
     return first[0]
