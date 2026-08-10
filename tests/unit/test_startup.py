@@ -150,3 +150,64 @@ def _schema_only():
             ]
 
     return SchemaOnly()
+
+
+# --- `retail-agent trios` ---
+#
+# The subcommand exists because editing `seeds.py` does nothing to a database
+# that has already been seeded, and nothing in the interface said so.
+
+
+def _trios_cli(argv, store):
+    """Run the subcommand against a store, capturing what it printed."""
+    import io
+
+    from rich.console import Console
+
+    from retail_agent.cli.app import run_trios
+
+    console = Console(record=True, width=100, file=io.StringIO())
+    code = run_trios(argv, console=console, store=store)
+    return code, console.export_text()
+
+
+def test_reporting_drift_changes_nothing_without_force():
+    from dataclasses import replace
+
+    from retail_agent.knowledge.seeds import SEED_TRIOS
+    from retail_agent.knowledge.trios import InMemoryTrioStore
+
+    stale = replace(SEED_TRIOS[0], metric_definitions={"churn": "older"})
+    store = InMemoryTrioStore([stale, *SEED_TRIOS[1:]])
+
+    code, text = _trios_cli([], store)
+
+    assert code == 0
+    assert SEED_TRIOS[0].id in text
+    assert "--force" in text, "the reader is told how to apply it"
+    assert store.get(SEED_TRIOS[0].id) == stale, "nothing was written"
+
+
+def test_force_rewrites_the_drifted_trio():
+    from dataclasses import replace
+
+    from retail_agent.knowledge.seeds import SEED_TRIOS
+    from retail_agent.knowledge.trios import InMemoryTrioStore
+
+    stale = replace(SEED_TRIOS[0], metric_definitions={"churn": "older"})
+    store = InMemoryTrioStore([stale, *SEED_TRIOS[1:]])
+
+    code, _ = _trios_cli(["--force"], store)
+
+    assert code == 0
+    assert store.get(SEED_TRIOS[0].id) == SEED_TRIOS[0]
+
+
+def test_an_up_to_date_corpus_says_so():
+    from retail_agent.knowledge.seeds import SEED_TRIOS
+    from retail_agent.knowledge.trios import InMemoryTrioStore
+
+    code, text = _trios_cli([], InMemoryTrioStore(SEED_TRIOS))
+
+    assert code == 0
+    assert "up to date" in text.lower()

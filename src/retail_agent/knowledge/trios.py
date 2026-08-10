@@ -293,6 +293,48 @@ class InMemoryTrioStore:
             self._trios.setdefault(trio.id, trio)
 
 
+def seed_drift(store, trios: Sequence[Trio]) -> dict[str, str]:
+    """Trio ids where the store disagrees with the hand-authored corpus.
+
+    `"missing"` when the store has never seen it, `"changed"` when it holds a
+    different version. Read-only — this reports, it does not reconcile.
+
+    It exists because `seed` inserts what is absent and leaves what is there,
+    so that an analyst's edit survives a restart. The cost of that promise is
+    that editing `seeds.py` has no effect on a database which has already run
+    once: the agent keeps answering from the corpus it was first given, and
+    nothing in the interface says so. That cost was paid in a live session —
+    two definitions were added, the eval was re-run three times, and the model
+    never saw either of them.
+
+    Which of the two a change is — a stale seed or a deliberate edit — cannot
+    be told apart from here, and that is exactly why this reports rather than
+    reconciles. The caller shows the list and asks.
+    """
+    drift: dict[str, str] = {}
+    for trio in trios:
+        stored = store.get(trio.id)
+        if stored is None:
+            drift[trio.id] = "missing"
+        elif stored != trio:
+            drift[trio.id] = "changed"
+    return drift
+
+
+def reseed(store, trios: Sequence[Trio]) -> list[str]:
+    """Overwrite the drifted trios from the corpus. Returns what it wrote.
+
+    Only what `seed_drift` reports, so a re-seed on an up-to-date store is a
+    read and no writes at all — and the returned list is what the caller
+    reports, rather than a count of everything it looped over.
+    """
+    drifted = seed_drift(store, trios)
+    by_id = {trio.id: trio for trio in trios}
+    for trio_id in drifted:
+        store.add(by_id[trio_id])
+    return sorted(drifted)
+
+
 def live_trios(store) -> list[Trio]:
     """The corpus for this turn, whatever shape the caller holds.
 

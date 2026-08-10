@@ -75,3 +75,24 @@ def test_definitions_exclude_cancelled_and_returned_where_money_is_counted():
     for trio in SEED_TRIOS:
         if "sale_price" in trio.sql:
             assert "Cancelled" in trio.sql and "Returned" in trio.sql, trio.id
+
+
+def test_definitions_state_business_rules_not_query_recipes():
+    """A definition says what the business means; how to build the query is
+    the analyst prompt's job. A recipe keyed to one retrievable term teaches
+    the lesson only when that exact term is asked — "engaged share" would hit
+    the identical trap with no seed to save it — and it renders to the
+    executive via /trios as though it defined something."""
+    for trio in SEED_TRIOS:
+        for term, meaning in trio.metric_definitions.items():
+            assert "COUNTIF" not in meaning, (term, trio.id)
+            assert "subquery" not in meaning.lower(), (term, trio.id)
+
+
+def test_the_share_denominator_rule_reaches_every_share_question():
+    """The numerator/denominator traps are a property of every share question,
+    so the rule lives in the prompt read on every query, not in one seed."""
+    from retail_agent.agent.prompts import ANALYST_PROMPT
+
+    assert "COUNTIF" in ANALYST_PROMPT
+    assert "share" in ANALYST_PROMPT.lower()

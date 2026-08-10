@@ -171,8 +171,14 @@ SEED_TRIOS: tuple[Trio, ...] = (
                 "at least two completed orders in the trailing 180 days. Unlike "
                 "loyal, this is a recency measure, not a lifetime one"
             ),
+            "loyal share": (
+                "the percentage of customers who are loyal, where customers "
+                "means people with at least one completed order — never the "
+                "users table, two thirds of whom have never ordered. A single "
+                "percentage, not a per-customer breakdown"
+            ),
         },
-        tags=("loyal", "engaged", "customers", "retention", "orders"),
+        tags=("loyal", "engaged", "customers", "retention", "orders", "share"),
         author="analytics",
         version=1,
     ),
