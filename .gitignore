@@ -17,6 +17,5 @@ wheels/
 # LangGraph dev server state
 .langgraph_api/
 
-docs/
 # Milvus Lite index, rebuilt from the corpus on demand
 .milvus/
