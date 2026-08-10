@@ -118,10 +118,10 @@ def run(script):
         "/persona activate analyst",
         "/persona activate nosuchpersona",
         "/prefs",
-        "/prefs depth deep",
-        "/prefs depth nonsense",
+        "/prefs show_attempt_footnote false",
+        "/prefs show_attempt_footnote maybe",
         "/prefs bogus value",
-        "/prefs depth",
+        "/prefs show_attempt_footnote",
         "/trios",
         "/definitions",
         "/definitions forget loyal",
@@ -192,29 +192,103 @@ def test_activating_switches_the_voice():
 
 
 def test_prefs_change_is_persisted():
-    console, deps, _ = run(["/prefs depth deep"])
+    console, deps, _ = run(["/prefs show_attempt_footnote false"])
 
-    assert deps.preferences.get(user_id="dana").depth == "deep"
-    assert "deep" in console.text()
+    assert deps.preferences.get(user_id="dana").show_attempt_footnote is False
+    assert "false" in console.text().lower()
 
 
 def test_a_rejected_pref_value_explains_the_options_and_changes_nothing():
-    console, deps, _ = run(["/prefs depth nonsense"])
+    console, deps, _ = run(["/prefs show_attempt_footnote maybe"])
 
-    assert "summary" in console.text(), "the options are named"
-    assert deps.preferences.get(user_id="dana").depth == "standard", "unchanged"
+    assert "true" in console.text().lower(), "the options are named"
+    assert deps.preferences.get(user_id="dana").show_attempt_footnote is True, (
+        "unchanged"
+    )
+
+
+def test_a_retired_setting_is_named_as_unknown():
+    """`answer_format` and friends were stored and read by nothing. Offering
+    them would be a settings screen that silently does nothing."""
+    console, deps, _ = run(["/prefs answer_format bullets"])
+
+    assert "unknown" in console.text().lower()
 
 
 def test_prefs_are_per_user():
-    """Manager A wants tables, Manager B wants bullets."""
+    """Manager A's rendering choice must never leak into Manager B's."""
     from retail_agent.store.preferences import InMemoryPreferenceStore
 
     shared = InMemoryPreferenceStore()
-    for user, fmt in (("dana", "bullets"), ("sam", "prose")):
-        console = FakeConsole([f"/prefs answer_format {fmt}"])
+    for user, value in (("dana", "false"), ("sam", "true")):
+        console = FakeConsole([f"/prefs show_attempt_footnote {value}"])
         deps = FakeDeps()
         deps.preferences = shared
         _repl(console, deps=deps, saver=None, user=user, session_id="s1")
 
-    assert shared.get(user_id="dana").answer_format == "bullets"
-    assert shared.get(user_id="sam").answer_format == "prose"
+    assert shared.get(user_id="dana").show_attempt_footnote is False
+    assert shared.get(user_id="sam").show_attempt_footnote is True
+
+
+# --- the definition prompt ---
+
+
+def _answer(script, term="loyal customers", options=("three or more orders",)):
+    from retail_agent.cli.chat import _ask_definition
+
+    console = FakeConsole(script)
+    return _ask_definition(console, term, list(options)), console
+
+
+def test_a_slash_command_is_not_recorded_as_a_definition():
+    """Observed live. At this prompt the executive typed `/persona`, meaning to
+    run the command, and it was saved as the meaning of "loyal customers".
+
+    Every later turn then read that back: the tool reported the term settled,
+    handed the model "/persona" as its definition, and the model — correctly
+    judging that meaningless — asked all over again. A junk definition is worse
+    than none, because `/definitions forget` is the only way out and nobody
+    knows there is anything to forget.
+
+    The reasoning is the one already in this function's docstring for digits:
+    someone who types a command meant to run it, not to define a word.
+    """
+    chosen, console = _answer(["/persona", "1"])
+
+    assert chosen == "three or more orders", "the re-ask was answered with 1"
+    assert any("command" in line.lower() for line in console.printed), (
+        "the user is told why their command did not take"
+    )
+
+
+def test_a_real_definition_starting_with_a_word_is_still_accepted():
+    chosen, _ = _answer(["customers with three or more completed orders"])
+
+    assert chosen == "customers with three or more completed orders"
+
+
+def test_a_slash_command_in_the_write_your_own_path_is_not_recorded():
+    """The same incident, through the adjacent door. Picking "write my own"
+    and then typing `/persona` must re-ask exactly as the first prompt does —
+    a guard that covers one of two input paths only moves the bug."""
+    chosen, console = _answer(["2", "/persona", "five or more orders"])
+
+    assert chosen == "five or more orders"
+    assert any("command" in line.lower() for line in console.printed)
+
+
+def test_a_command_full_of_brackets_neither_crashes_nor_vanishes():
+    """The warning echoes what was typed. Unescaped, `[/]` parses as a Rich
+    closing tag and raises MarkupError mid-interrupt — killing the resume flow
+    instead of re-asking — and `[loyal]` parses as a style tag and silently
+    disappears from the message."""
+    chosen, console = _answer(["/definitions forget [loyal]", "1"])
+
+    assert chosen == "three or more orders"
+    assert any("[loyal]" in line for line in console.printed), (
+        "the command is echoed back as typed"
+    )
+
+    chosen, _ = _answer(["/x [/]", "1"])
+
+    assert chosen == "three or more orders"

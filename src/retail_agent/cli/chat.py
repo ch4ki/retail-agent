@@ -56,7 +56,7 @@ HELP = """
   /metrics first-pass SQL validity, self-correction, latency per step
   /trios   the analyst definitions the agent answers from
   /definitions what you told it terms mean; forget <term> to be asked again
-  /prefs   answer format, depth, table size
+  /prefs   how answers are rendered
   /persona list|show|activate <name> — change the tone, no restart
   /quit    exit (/exit works too)
 
@@ -498,9 +498,14 @@ def _ask_definition(console, term, options):
     A number outside the list is re-asked rather than taken literally — someone
     who types `9` at five options meant to pick something, and recording
     "loyal = 9" would be a definition they never gave.
-    """
-    from retail_agent.store.definitions import MAX_DEFINITION_CHARS
 
+    A slash command is re-asked for the same reason, and it is the one that
+    actually happened: `/persona` typed here was stored as the meaning of
+    "loyal customers", and every later turn read it back, reported the term
+    settled, and handed the model a definition that says nothing. That is worse
+    than never having asked, because the only remedy is a `/definitions forget`
+    the executive has no reason to know they need.
+    """
     own, hand_back = len(options) + 1, len(options) + 2
     while True:
         render_definition_prompt(console, term, options)
@@ -509,20 +514,49 @@ def _ask_definition(console, term, options):
         if not typed:
             return ""
         if not typed.isdigit():
-            return typed[:MAX_DEFINITION_CHARS]
+            accepted = _vet_definition(console, term, typed)
+            if accepted is None:
+                continue
+            return accepted
 
         picked = int(typed)
         if 1 <= picked <= len(options):
             return options[picked - 1]
         if picked == own:
             console.print(f"[dim]What should {term!r} mean?[/dim]")
-            return console.input("\n[bold yellow]›[/bold yellow] ").strip()[
-                :MAX_DEFINITION_CHARS
-            ]
+            while True:
+                typed = console.input("\n[bold yellow]›[/bold yellow] ").strip()
+                if not typed:
+                    return ""
+                accepted = _vet_definition(console, term, typed)
+                if accepted is not None:
+                    return accepted
         if picked == hand_back:
             return _HAND_BACK
 
         console.print(f"[yellow]Pick a number between 1 and {hand_back}.[/yellow]")
+
+
+def _vet_definition(console, term, typed) -> str | None:
+    """Free text on its way to becoming a definition, or None to re-ask.
+
+    Every path that accepts typed text goes through here — the slash-command
+    incident recurred through the "write my own" prompt precisely because the
+    guard sat on only one of the two input sites. The echo is escaped: `[/]`
+    in a typed command is a Rich closing tag, and unescaped it kills the
+    interrupt-resume flow with a MarkupError instead of re-asking.
+    """
+    from rich.markup import escape
+
+    from retail_agent.store.definitions import MAX_DEFINITION_CHARS
+
+    if typed.startswith("/"):
+        console.print(
+            f"[yellow]Commands do not run here. Answer for {escape(term)!r}, "
+            f"or press enter to cancel and then type {escape(typed)}.[/yellow]"
+        )
+        return None
+    return typed[:MAX_DEFINITION_CHARS]
 
 
 def _remember(console, deps, user, term, definition) -> None:
