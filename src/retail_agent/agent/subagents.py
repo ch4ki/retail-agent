@@ -218,15 +218,17 @@ def report_writer_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
 
 
 def _definitions(found: list, known: dict[str, str], assumed: list[str]) -> str:
-    """Everything settled about this question's terms, agreed first.
+    """Everything settled about this question's terms.
 
-    Order matters: where both cover a term the corpus wins, so the model reads
-    the reviewed decision before the personal one. `sql_assumption_note` covers
-    the rest — without it a model given no threshold reaches for a bind
-    parameter, which nothing binds and BigQuery rejects.
+    Where both cover a term the executive's own definition is the one in
+    force — `remember_definition` promised "from now on" — so the corpus block
+    withholds it rather than render a second meaning the model could prefer.
+    `sql_assumption_note` covers the rest — without it a model given no
+    threshold reaches for a bind parameter, which nothing binds and BigQuery
+    rejects.
     """
     blocks = [
-        definitions_block(found),
+        definitions_block(found, except_for=known),
         personal_definitions_block(known),
         sql_assumption_note(assumed),
     ]

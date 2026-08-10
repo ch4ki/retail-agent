@@ -248,3 +248,41 @@ def test_a_question_the_columns_answer_is_not_interrupted(source, question):
     contact with users. A gate that asks about "revenue" gets clicked through,
     and then it is not a gate at all."""
     assert _tools_called(source, question, "ask_for_definitions") == []
+
+
+# Counting entities that must first pass a per-entity test. This is the shape
+# the eval caught the agent getting wrong on every definition-dependent count.
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "How many loyal customers do we have?",
+        "How many engaged customers do we have?",
+    ],
+)
+def test_a_count_behind_a_per_entity_threshold_returns_one_row(source, question):
+    """`SELECT COUNT(DISTINCT user_id) ... GROUP BY user_id HAVING ...` returns
+    one row per customer, each holding 1, and never computes the total.
+
+    Live, all three definition-dependent counting cases did exactly that. Two
+    still scored correct, because the *number of rows* happened to be the
+    answer and the truncation warning tells the agent to read it. The third
+    asked for a percentage, where no row count can stand in, and had nothing to
+    divide.
+
+    So the assertion is on the query's shape rather than on the figure: one row
+    holding the count, which is the only form that also supports a ratio.
+    """
+    from retail_agent.agent.seams import ask_once
+    from retail_agent.bootstrap import build_deps
+    from retail_agent.config import Settings
+
+    deps = build_deps(Settings(), llm=_llm(), source=source)
+    answer = ask_once(deps, question)
+
+    assert answer.sql, "no query ran"
+    assert answer.row_count == 1, (
+        f"expected a single row holding the count, got {answer.row_count} "
+        f"rows — the query groups by the column it is counting.\n{answer.sql}"
+    )

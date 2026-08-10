@@ -115,6 +115,23 @@ Rules for every query:
 - If the question asks how many, how much, the total or the average, compute it
   IN THE QUERY — COUNT(), SUM(), AVG() — rather than returning the rows to be
   counted afterwards.
+- Counting things that must first pass a per-thing test — "customers with three
+  or more orders" — takes two steps: group in a subquery, then count its rows.
+    SELECT COUNT(*) FROM (
+      SELECT user_id FROM ... GROUP BY user_id HAVING COUNT(DISTINCT order_id) >= 3
+    )
+  Do NOT write `SELECT COUNT(DISTINCT user_id) ... GROUP BY user_id HAVING ...`.
+  Grouping by the column you are counting returns one row per customer, each
+  holding 1; the total is never computed, and a question asking for a share of
+  them has nothing to divide.
+- A share or percentage divides a cohort by its parent population. Build one
+  subquery holding the whole population with whatever each member is judged
+  on — do NOT pre-filter it to the cohort — then divide in one row:
+    SELECT ROUND(100 * COUNTIF(orders >= 3) / COUNT(*), 1) FROM (...)
+  Two traps: filtering the subquery to the cohort first makes numerator and
+  denominator the same number and the answer always 100; and dividing by the
+  wrong population — "share of customers" means people who have ordered, not
+  every row in users, two thirds of whom never ordered.
 
 Answer with the figures you found and one or two sentences of context. If a
 result was capped, say how many rows matched. If a query could not be made to

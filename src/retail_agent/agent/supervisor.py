@@ -1,6 +1,6 @@
 """The agent, assembled.
 
-One `create_agent` with seven tools and one middleware stack. This is the whole
+One `create_agent` with ten tools and one middleware stack. This is the whole
 control flow of the product; there is no second place a turn can be shaped.
 
 The system prompt is absent on purpose — `supervisor_middleware` supplies it
