@@ -3,5 +3,6 @@
   "graphs": {
     "retail_agent": "./src/retail_agent/agent/studio.py:graph"
   },
-  "env": ".env"
+  "env": ".env",
+  "python_version": "3.12"
 }

@@ -56,3 +56,28 @@ def test_provider_packages_stay_unbounded():
             f"{package} is pinned to {declared[package]!r}; integration packages "
             f"should track latest"
         )
+
+
+def test_langgraph_declares_a_python_version():
+    """Absent, it defaults to 3.11 — below this project's floor, so every
+    `langgraph build`, `up` and `deploy` fails dependency resolution."""
+    import json
+
+    config = json.loads(LANGGRAPH_JSON.read_text())
+
+    assert "python_version" in config
+
+
+def test_langgraph_python_version_satisfies_requires_python():
+    import json
+
+    config = json.loads(LANGGRAPH_JSON.read_text())
+    requires = tomllib.loads(PYPROJECT.read_text())["project"]["requires-python"]
+
+    declared = tuple(int(part) for part in config["python_version"].split("."))
+    floor = tuple(int(part) for part in requires.removeprefix(">=").strip().split("."))
+
+    assert declared >= floor, (
+        f"langgraph.json builds on {config['python_version']} but pyproject "
+        f"requires {requires}"
+    )
