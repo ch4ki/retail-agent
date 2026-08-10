@@ -320,3 +320,25 @@ def test_an_up_to_date_corpus_says_so():
 
     assert code == 0
     assert "up to date" in text.lower()
+
+
+def test_only_the_analyst_is_an_agent():
+    """An agent loop with no tools can only ever make one model call, and
+    `create_agent` compiles a graph — inside the tool body, so on every
+    invocation — to do what one `model.invoke` does.
+
+    Asserted against the source because the property is "nobody added another
+    one", which no behavioural test can see. Same technique as
+    `test_both_entry_points_use_the_same_wiring` above.
+    """
+    import inspect
+
+    from retail_agent.agent import subagents
+
+    source = inspect.getsource(subagents)
+
+    assert source.count("create_agent(") == 1, (
+        "exactly one subagent should compile a graph — the analyst, which has "
+        "real tools. A tool-less capability belongs in a plain model call "
+        "through `resilient_call`."
+    )

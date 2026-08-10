@@ -5,6 +5,8 @@ assertions here are about what is still in the store while the user is being
 asked — not about what the agent said.
 """
 
+from dataclasses import replace
+
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
@@ -16,7 +18,7 @@ from retail_agent.agent.supervisor import build_agent
 
 
 def writer(deps, capture):
-    return {fn.__name__: fn for fn in build_subagents(deps, capture)}["report_writer"]
+    return {t.name: t.func for t in build_subagents(deps, capture)}["report_writer"]
 
 
 @pytest.fixture
@@ -117,7 +119,7 @@ def test_a_delete_cannot_reach_another_owner(make_deps, saved):
     """Ownership is a WHERE clause in the store, not a check in the agent."""
     deps = make_deps(script=[[("delete_reports", {"term": "Acme"})], "None."])
     capture = TurnCapture(user_id="someone-else", session_id="s1", question="q")
-    tools = {fn.__name__: fn for fn in build_report_tools(deps, capture)}
+    tools = {t.name: t.func for t in build_report_tools(deps, capture)}
 
     answer = tools["delete_reports"]("Acme")
 
@@ -198,14 +200,14 @@ def test_there_is_no_save_report_tool(make_deps):
     """Its only caller was the supervisor retyping a body it had just read."""
     from retail_agent.agent.supervisor import build_tools
 
-    names = {fn.__name__ for fn in build_tools(make_deps(), TurnCapture())}
+    names = {t.name for t in build_tools(make_deps(), TurnCapture())}
 
     assert "save_report" not in names
     assert "report_writer" in names
 
 
 def asker(deps, capture):
-    return {fn.__name__: fn for fn in build_subagents(deps, capture)}["ask_about_report"]
+    return {t.name: t.func for t in build_subagents(deps, capture)}["ask_about_report"]
 
 
 def test_a_report_is_answered_from_its_stored_body(make_deps, reports):
@@ -250,3 +252,37 @@ def test_a_missing_report_costs_no_model_call(make_deps):
     answer = asker(deps, capture)(report_id="nope", question="?")
 
     assert "No report nope" in answer
+
+
+class _FlakyOnce:
+    """A model that fails its first call with a transient error, then delegates.
+
+    Wrapping rather than subclassing `ScriptedChatModel`: the script must be
+    consumed by the successful attempt, not by the failed one.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = 0
+
+    def invoke(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("429 rate limit")
+        return self._inner.invoke(*args, **kwargs)
+
+
+def test_a_transient_failure_while_writing_the_report_is_survived(
+    make_deps, reports
+):
+    """The defect this replaces: `report_writer` ran with no middleware, so a
+    429 killed the turn — after the SQL had already been paid for."""
+    base = make_deps(script=["## Summary\nDenim fell in Q1."])
+    flaky = _FlakyOnce(base.llm)
+    deps = replace(base, llm=flaky)
+    capture = TurnCapture(user_id="exec", session_id="s1")
+
+    writer(deps, capture)(brief="denim findings", title="Q1 Denim")
+
+    assert flaky.calls == 2, "the first attempt failed and the second succeeded"
+    assert reports.list_reports(owner_id="exec")[0].body == "## Summary\nDenim fell in Q1."
