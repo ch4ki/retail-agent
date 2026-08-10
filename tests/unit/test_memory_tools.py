@@ -16,6 +16,7 @@ from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.memory import build_memory_tools
 from retail_agent.config import Settings
+from retail_agent.knowledge.seeds import SEED_TRIOS
 from retail_agent.obs.traces import InMemoryTraceStore
 from retail_agent.safety.pii import PiiPolicy
 from retail_agent.store.definitions import InMemoryDefinitionStore
@@ -23,7 +24,7 @@ from retail_agent.store.reports import InMemoryReportStore
 from retail_agent.store.preferences import InMemoryPreferenceStore
 
 
-def tools_for(question):
+def tools_for(question, trios=(), dense=None):
     deps = AgentDeps(
         settings=Settings(_env_file=None, google_cloud_project="test"),
         llm=object(),
@@ -33,6 +34,8 @@ def tools_for(question):
         traces=InMemoryTraceStore(),
         preferences=InMemoryPreferenceStore(),
         definitions=InMemoryDefinitionStore(),
+        trios=list(trios),
+        dense=dense,
     )
     capture = TurnCapture(user_id="dana", session_id="s1", question=question)
     return {fn.__name__: fn for fn in build_memory_tools(deps, capture)}, deps, capture
@@ -234,6 +237,144 @@ def test_with_nobody_to_ask_the_agent_is_told_to_choose_and_disclose():
     assert "LGB" in answer
     assert "state" in answer.lower(), "the disclosure is demanded, not optional"
     assert capture.assumed_terms == ["LGB"], "and the trace records it"
+
+
+def test_a_term_the_analytics_team_agreed_is_not_treated_as_unsettled():
+    """The corpus is consulted before the executive is told nobody defined it.
+
+    Live, this cost five of the eval's forty-seven cases. Asked how many loyal
+    customers there are, the `loyal-customers` trio was retrieved — it says
+    three or more completed orders, all time — and this tool reported "loyal"
+    unsettled anyway, because it only ever read the per-user store. The analyst
+    then received the agreed definition *and* an instruction to invent one, and
+    answered on a threshold it made up.
+    """
+    tools, _, capture = tools_for("How many loyal customers do we have?", SEED_TRIOS)
+
+    answer = tools["ask_for_definitions"](["loyal"])
+
+    assert capture.assumed_terms == [], "the corpus settles it; nothing was assumed"
+    assert "three or more completed orders" in answer.lower()
+
+
+def test_the_phrase_the_executive_used_finds_the_term_the_corpus_defines():
+    """The model passes the words as they were written, because its own tool
+    description tells it to. The corpus keys its definitions on the business
+    term alone.
+
+    So "loyal customers" has to find `loyal`. Live, it did not: the answer read
+    'There is no agreed definition for "loyal customers"' while the trio
+    defining `loyal` sat in the same turn's retrieval.
+    """
+    tools, _, capture = tools_for("How many loyal customers do we have?", SEED_TRIOS)
+
+    answer = tools["ask_for_definitions"](["loyal customers"])
+
+    assert capture.assumed_terms == []
+    assert "three or more completed orders" in answer.lower()
+
+
+def test_the_executives_own_definition_wins_over_the_corpus():
+    """`remember_definition` answers "I will use that from now on". A corpus
+    trio arriving later — or retrieved for the first time by a rephrased
+    question — must not silently replace the definition this executive was
+    promised is in force. The corpus fills gaps; it does not override."""
+    tools, deps, _ = tools_for("How many loyal customers do we have?", SEED_TRIOS)
+    deps.definitions.remember(
+        user_id="dana", term="loyal", definition="five or more orders"
+    )
+
+    answer = tools["ask_for_definitions"](["loyal"])
+
+    assert "five or more orders" in answer
+    assert "three or more completed orders" not in answer.lower()
+
+
+def test_a_corpus_settled_term_is_recorded_in_the_trace():
+    """The meaning is injected verbatim into the model's context, so the trio
+    it came from must show in /trace — an answer that used a corpus definition
+    cannot claim it used none."""
+    tools, _, capture = tools_for("How many loyal customers do we have?", SEED_TRIOS)
+
+    tools["ask_for_definitions"](["loyal"])
+
+    assert capture.trio_ids, "the consulted trio reaches the trace and the eval"
+
+
+def test_one_turn_runs_retrieval_once_however_many_places_ask():
+    """The gate's `when` predicate and the tool body both need the settled set,
+    and with dense retrieval configured every run costs an embedding round
+    trip. The corpus cannot change mid-turn, so the second asker reads the
+    first one's result."""
+    from retail_agent.agent.tools import settled_meanings
+
+    calls = []
+
+    class Dense:
+        def rank(self, question, trios):
+            calls.append(question)
+            return []
+
+    _, deps, capture = tools_for(
+        "How many loyal customers do we have?", SEED_TRIOS, dense=Dense()
+    )
+
+    settled_meanings(deps, capture)
+    settled_meanings(deps, capture)
+
+    assert len(calls) == 1
+
+
+def test_a_definition_stored_during_the_pause_is_seen_after_it():
+    """Only the corpus half may be cached: the gate runs, the executive answers,
+    the store gains a row, and the tool body on `approve` must read it back."""
+    from retail_agent.agent.tools import settled_meanings
+
+    _, deps, capture = tools_for("report on 10 LGB customers")
+
+    before = settled_meanings(deps, capture)
+    deps.definitions.remember(
+        user_id="dana", term="lgb", definition="low gross basket"
+    )
+    after = settled_meanings(deps, capture)
+
+    assert "lgb" not in before
+    assert after["lgb"] == "low gross basket"
+
+
+def test_partition_splits_the_settled_from_the_still_open():
+    """One partition, used by the gate and the tool body — they diverged once
+    and the CLI asked about a term the corpus had already settled."""
+    from retail_agent.agent.tools import partition_terms
+
+    settled, still_open = partition_terms(
+        {"lgb": "low gross basket"}, ["LGB", " top ", "", None]
+    )
+
+    assert settled == {"LGB": "low gross basket"}
+    assert still_open == ["top"]
+
+
+def test_a_phrase_is_not_settled_by_a_word_it_merely_contains():
+    """The match is on whole words, and only where the defined term is the
+    thing being asked about. Without that this degrades into substring
+    matching, which would settle "disloyal customers" from `loyal`."""
+    tools, _, capture = tools_for("How many disloyal customers?", SEED_TRIOS)
+
+    tools["ask_for_definitions"](["disloyal customers"])
+
+    assert capture.assumed_terms == ["disloyal customers"]
+
+
+def test_a_term_nobody_agreed_is_still_reported_unsettled():
+    """The corpus lookup must not swallow the case it exists to protect: a word
+    no trio covers still has to reach the executive."""
+    tools, _, capture = tools_for("report on 10 LGB customers", SEED_TRIOS)
+
+    answer = tools["ask_for_definitions"](["LGB"])
+
+    assert capture.assumed_terms == ["LGB"]
+    assert "LGB" in answer
 
 
 def test_a_term_still_open_is_reported_next_to_one_already_settled():

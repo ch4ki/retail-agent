@@ -14,12 +14,18 @@ true as tools are added.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.knowledge.retrieval import retrieve
-from retail_agent.knowledge.trios import definitions_block, live_trios
+from retail_agent.knowledge.trios import (
+    agreed_definitions,
+    definitions_block,
+    live_trios,
+    lookup_definition,
+)
+from retail_agent.store.definitions import all_definitions
 from retail_agent.safety.frame import MaskedFrame
 from retail_agent.safety.pii import mask_dataframe
 from retail_agent.safety.sql_guard import check_sql
@@ -150,6 +156,65 @@ def recall(deps: AgentDeps, question: str) -> list:
     except Exception as err:
         log.warning("trio retrieval failed (%s); answering without it", err)
         return []
+
+
+def settled_meanings(deps: AgentDeps, capture: TurnCapture) -> dict[str, str]:
+    """Every definition already in play this turn, as term → meaning.
+
+    The agreed corpus for this question, then whatever this executive has
+    settled themselves. The executive's own definition wins where both cover a
+    term: `remember_definition` answers "I will use that from now on", and a
+    trio merged later must not silently break that promise. The corpus fills
+    gaps; it never overrides.
+
+    The trios consulted are recorded on the capture: their meanings reach the
+    model's context, so an answer that used them cannot show a trace that
+    claims it used none.
+
+    One function because there are two places that must agree on whether a word
+    needs asking about, and they run on opposite sides of an interrupt. The
+    tool body decides it for headless callers; the gate's `when` predicate
+    decides it for the CLI, *before* that body runs. They disagreed once — the
+    CLI stopped to ask what "loyal" meant while the trio defining it sat in the
+    same turn's retrieval — and the reason was that each had its own lookup.
+
+    Retrieval runs once per turn, cached on the capture, because it is the
+    expensive half — with dense retrieval configured it is an embedding round
+    trip — and its inputs are fixed for the turn. Two independent runs would
+    also mean the two sides of the interrupt could, in principle, see two
+    different corpora. The personal store is read fresh every call: the pause
+    exists so the executive can write to it.
+    """
+    if capture.recalled_trios is None:
+        capture.recalled_trios = recall(deps, capture.question)
+    found = capture.recalled_trios
+    capture.record_definitions([trio.id for trio in found])
+    merged = dict(agreed_definitions(found))
+    merged.update(all_definitions(deps.definitions, capture.user_id))
+    return merged
+
+
+def partition_terms(
+    known: dict[str, str], terms: Sequence[str | None]
+) -> tuple[dict[str, str], list[str]]:
+    """Split the asked-about terms into settled (term → meaning) and still open.
+
+    One partition because the gate's `when` predicate and the tool body must
+    make the same call for every term — a stripping or matching rule applied
+    in one and not the other is how they came to disagree about "loyal".
+    """
+    settled: dict[str, str] = {}
+    still_open: list[str] = []
+    for term in terms:
+        cleaned = term.strip() if term else ""
+        if not cleaned:
+            continue
+        meaning = lookup_definition(known, cleaned)
+        if meaning is None:
+            still_open.append(cleaned)
+        else:
+            settled[cleaned] = meaning
+    return settled, still_open
 
 
 def _render(frame: MaskedFrame) -> str:

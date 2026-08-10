@@ -20,6 +20,7 @@ from langgraph.types import Command
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.supervisor import build_agent
+from retail_agent.knowledge.seeds import SEED_TRIOS
 from retail_agent.store.definitions import InMemoryDefinitionStore
 
 from .conftest import FakeSource
@@ -97,6 +98,44 @@ def test_a_term_the_executive_already_defined_is_not_asked_again(make_deps):
 
     assert not paused(result)
     assert source.executed, "the analyst ran"
+
+
+def test_a_term_the_corpus_defines_does_not_pause_the_turn(make_deps):
+    """The gate reads the agreed corpus, not only this executive's own answers.
+
+    Reported from a live session: asked "how many loyal customers do we have?",
+    the CLI stopped and offered four invented meanings of "loyal", while the
+    `loyal-customers` trio — three or more completed orders, all time — was in
+    the corpus the same turn would retrieve.
+
+    The tool body already consulted the corpus. This gate runs *before* the
+    body, so arming the interrupt was enough to bypass that entirely: headless
+    callers got the agreed definition and the CLI did not.
+    """
+    source = FakeSource(frames={"default": pd.DataFrame({"id": [1]})})
+    deps = make_deps(
+        script=asking(question="how many loyal customers do we have?", terms=("loyal customers",)),
+        src=source,
+        definitions=InMemoryDefinitionStore(),
+        trios=list(SEED_TRIOS),
+    )
+
+    _, _, _, result = start(deps, question="how many loyal customers do we have?")
+
+    assert not paused(result), "the analytics team already defined 'loyal'"
+    assert source.executed, "the analyst ran"
+
+
+def test_a_term_no_trio_covers_still_pauses(make_deps):
+    """The corpus lookup must not swallow the case the gate exists for."""
+    deps = make_deps(
+        script=asking(), definitions=InMemoryDefinitionStore(), trios=list(SEED_TRIOS)
+    )
+
+    _, _, capture, result = start(deps)
+
+    assert paused(result)
+    assert capture.pending_definition.terms == ("LGB",)
 
 
 def test_only_the_unsettled_terms_reach_the_pause(make_deps):

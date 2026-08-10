@@ -82,6 +82,43 @@ def test_the_summary_prompt_forbids_restating_figures():
     assert "{messages}" in CONVERSATION_SUMMARY_PROMPT
 
 
+def test_a_shared_capture_follows_the_turns_actual_question(make_deps):
+    """Studio compiles the agent once and closes its tools over one capture,
+    so `capture.question` is set at build time — to "" — and never again.
+    `settled_meanings` then retrieves for the empty string and caches the
+    nothing it found, for the life of the process. The sync hook re-points the
+    capture at each turn's last human message and drops the stale retrieval."""
+    from retail_agent.agent.middleware import _turn_sync
+
+    capture = TurnCapture(user_id="studio", question="")
+    capture.recalled_trios = []
+
+    sync = _turn_sync(capture)
+    sync.before_agent(
+        {"messages": [HumanMessage(content="How many loyal customers?")]}, None
+    )
+
+    assert capture.question == "How many loyal customers?"
+    assert capture.recalled_trios is None, "the stale retrieval is dropped"
+
+
+def test_the_sync_hook_leaves_a_per_turn_capture_alone(make_deps):
+    """The CLI and the eval build a fresh capture per turn with the question
+    already set. Same question, nothing to drop — the mid-turn cache must
+    survive, or the gate's retrieval is thrown away before the tool reads it."""
+    from retail_agent.agent.middleware import _turn_sync
+
+    capture = TurnCapture(user_id="exec", question="How many loyal customers?")
+    capture.recalled_trios = ["kept"]
+
+    sync = _turn_sync(capture)
+    sync.before_agent(
+        {"messages": [HumanMessage(content="How many loyal customers?")]}, None
+    )
+
+    assert capture.recalled_trios == ["kept"]
+
+
 def test_the_recorder_measures_the_thread_it_just_finished(make_deps):
     """The threshold in Settings was set against a number nothing measured.
     This is that number."""

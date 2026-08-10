@@ -5,9 +5,12 @@ executive told the agent when the bucket had nothing — asked once, then reused
 because asking the same person what "loyal" means every week is how a safety
 feature becomes an irritation.
 
-Deliberately *below* the corpus in precedence. A trio is a reviewed, versioned
-decision by the people who own the numbers; this is one person's answer typed
-into a terminal. It fills gaps, it never overrides.
+Deliberately *above* the corpus in precedence, for this user alone. A trio is
+a reviewed, versioned decision by the people who own the numbers — but when
+this executive was asked and answered, `remember_definition` promised "I will
+use that from now on", and a trio merged later must not silently break that
+promise. The corpus fills the gaps this store leaves; where both cover a term,
+the answer this person actually gave is the one in force.
 
 Per user, not global, for the same reason: one manager saying loyal means three
 orders must not silently redefine the term for everyone else. Promoting a

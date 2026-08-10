@@ -118,6 +118,11 @@ class TurnCapture:
     status: str = "ok"
     pending: PendingDelete | None = None
     pending_definition: PendingDefinition | None = None
+    # The corpus retrieval for this turn's question, run once and read by both
+    # sides of the definition interrupt. Only this half is cached: the trio
+    # corpus cannot change mid-turn, but the personal definition store can —
+    # the pause exists so the executive can write to it.
+    recalled_trios: list | None = None
 
     @contextmanager
     def step(self, name: str) -> Iterator[Step]:

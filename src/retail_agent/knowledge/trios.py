@@ -19,10 +19,50 @@ analyst's judgement and lets the agent write fresh SQL.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import re
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Protocol, runtime_checkable
+
+_WORD = re.compile(r"[a-z0-9']+")
+
+# Filler carries no signal about which trio is relevant. "many" was in a live
+# question — "how many shoppers have gone quiet?" — and matched a trio whose
+# question read "How many loyal customers do we have?", on that word alone.
+_STOPWORDS = frozenset(
+    """a an and are as at be by did do does for from has have how in into is it
+    its of on or our that the their they this to was were what when where which
+    who why with you your me my show give tell
+    many much more most some any all every each few lot lots number count
+    there here we us i he she them him her it's dont don't can could would
+    should will shall may might must been being am get got had having
+    please just now then than so very really quite rather also too only
+    over under about across between within during while before after""".split()
+)
+
+
+def tokenize(text: str) -> list[str]:
+    return [w for w in _WORD.findall(text.lower()) if w not in _STOPWORDS and len(w) > 1]
+
+
+# Words that reverse or qualify a term rather than ride along with it. Kept out
+# of the filler set explicitly, whatever `_STOPWORDS` grows to include later:
+# "not loyal" settled from `loyal` answers the opposite question, silently.
+_NEVER_FILLER = frozenset(
+    "not no never non without least fewest lowest worst former ex stopped".split()
+)
+
+# The subjects a business term describes. "loyal customers" must settle from
+# `loyal`; these are the words allowed alongside a matched term without leaving
+# the phrase open. Any word in neither set fails closed — the phrase stays
+# open and gets asked about — so a qualifier missing from `_NEVER_FILLER`
+# costs a question, never a wrong cohort.
+_SUBJECTS = frozenset(
+    "customer customers user users shopper shoppers buyer buyers client clients".split()
+)
+
+_FILLER = (_STOPWORDS | _SUBJECTS) - _NEVER_FILLER
 
 # There used to be a dict of nineteen words here, matched by regex, and it was
 # how the agent decided a question needed a definition before it could be
@@ -53,17 +93,89 @@ class Trio:
     superseded_by: str | None = None
 
 
-def definitions_block(trios: list[Trio]) -> str:
-    """The definitions to put in front of the model, deduplicated.
+def agreed_definitions(trios: list[Trio]) -> dict[str, str]:
+    """Every term these trios settle, as lowercased term → meaning.
 
-    Only definitions — not the past SQL. A previous query carries its own date
-    filters and joins, and pasting it into a new question is how an agent
-    answers last quarter's question with this quarter's label.
+    Earlier trios win, because `retrieve` returns them in relevance order and
+    the best match should not be overwritten by an also-ran that happens to use
+    the same word.
+
+    Separate from `definitions_block` because two callers need different
+    things from the same fact. The analyst needs it rendered into a prompt;
+    `ask_for_definitions` needs to *look a term up* before telling the
+    executive nobody has defined it.
     """
     seen: dict[str, str] = {}
     for trio in trios:
         for term, meaning in trio.metric_definitions.items():
             seen.setdefault(term.lower(), meaning)
+    return seen
+
+
+def lookup_definition(definitions: dict[str, str], phrase: str) -> str | None:
+    """The definition of `phrase`, allowing for how the two sides name things.
+
+    The model passes the executive's own words — its tool description tells it
+    to — so it asks about "loyal customers", with whatever punctuation they
+    typed. Definitions are keyed on the business term alone: `loyal`. Exact
+    lookup misses, and the executive is told nobody has defined a term the
+    analytics team agreed months ago.
+
+    Matching is on whole words, never substrings: `disloyal customers` must not
+    be settled by the definition of `loyal`. The most specific defined term
+    wins, so "share of loyal customers" answers from `loyal share` rather than
+    falling through to plain `loyal` and losing the rule the longer term
+    carries. A phrase holding two independent terms keeps both meanings —
+    returning one would drop a constraint, and *which* one would depend on
+    dict order.
+
+    Every word the match does not account for must be filler. A word that is
+    neither part of a matched term nor in `_FILLER` — "not", "least", "semi",
+    anything nobody anticipated — leaves the phrase open. That is the safe
+    direction: an open phrase costs a question, a phrase settled by the
+    positive half of "not loyal" costs a silently inverted cohort.
+    """
+    words = _WORD.findall(phrase.lower())
+    if not words:
+        return None
+
+    present = set(words)
+    covered: set[str] = set()
+    matched: list[tuple[str, str]] = []
+    for term in sorted(definitions, key=lambda t: (-len(tokenize(t)), t)):
+        target = set(tokenize(term))
+        if target and target <= present and not target <= covered:
+            covered |= target
+            matched.append((term, definitions[term]))
+
+    if not matched:
+        # A term made only of filler can never be token-covered; the stored
+        # key itself is the one remaining way to find it.
+        return definitions.get(phrase.lower().strip())
+    if any(w not in covered and w not in _FILLER for w in words):
+        return None
+    if len(matched) == 1:
+        return matched[0][1]
+    return "; ".join(f"{term}: {meaning}" for term, meaning in matched)
+
+
+def definitions_block(trios: list[Trio], *, except_for: Collection[str] = ()) -> str:
+    """The definitions to put in front of the model, deduplicated.
+
+    Only definitions — not the past SQL. A previous query carries its own date
+    filters and joins, and pasting it into a new question is how an agent
+    answers last quarter's question with this quarter's label.
+
+    `except_for` withholds terms the executive has overridden with their own
+    definition: rendering both meanings hands the model a choice it must not
+    have.
+    """
+    overridden = {term.lower() for term in except_for}
+    seen = {
+        term: meaning
+        for term, meaning in agreed_definitions(trios).items()
+        if term not in overridden
+    }
 
     if not seen:
         return ""

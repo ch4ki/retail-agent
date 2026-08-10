@@ -34,7 +34,8 @@ from collections.abc import Callable
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
-from retail_agent.store.definitions import MAX_DEFINITION_CHARS, all_definitions
+from retail_agent.agent.tools import partition_terms, settled_meanings
+from retail_agent.store.definitions import MAX_DEFINITION_CHARS
 from retail_agent.store.preferences import (
     MAX_NOTE_CHARS,
     MAX_NOTES,
@@ -124,10 +125,11 @@ def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
         trace to a decision.
         """
         with capture.step("ask_for_definitions") as step:
-            wanted = [term.strip() for term in terms if term and term.strip()]
-            known = all_definitions(deps.definitions, capture.user_id)
-            settled = {t: known[t.lower()] for t in wanted if t.lower() in known}
-            still_open = [t for t in wanted if t.lower() not in known]
+            # The same lookup and the same partition the CLI's gate uses, so a
+            # word settled before the pause and one settled inside the tool
+            # body are the same set.
+            known = settled_meanings(deps, capture)
+            settled, still_open = partition_terms(known, terms)
 
             # Recorded here rather than by the caller: this is the one place
             # that knows a term went unanswered, and `assumption_note` on the
@@ -139,7 +141,7 @@ def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
             if settled:
                 lines = "\n".join(f"- {t}: {d}" for t, d in settled.items())
                 parts.append(
-                    f"The executive defines these. Use them exactly:\n{lines}"
+                    f"These are already defined. Use them exactly:\n{lines}"
                 )
             if still_open:
                 parts.append(NOBODY_TO_ASK.format(terms=", ".join(still_open)))

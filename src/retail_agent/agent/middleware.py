@@ -29,9 +29,10 @@ from langchain.agents.middleware import (
     ToolCallLimitMiddleware,
     ToolErrorMiddleware,
     after_agent,
+    before_agent,
     dynamic_prompt,
 )
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from retail_agent.agent.capture import PendingDefinition, TurnCapture
@@ -43,7 +44,7 @@ from retail_agent.agent.prompts import (
     SUPERVISOR_PROMPT,
 )
 from retail_agent.agent.reports import render_manifest, resolve_delete
-from retail_agent.agent.tools import GuardRejection
+from retail_agent.agent.tools import GuardRejection, partition_terms, settled_meanings
 from retail_agent.datasources.base import DataSourceError
 from retail_agent.llm.messages import message_text
 from retail_agent.llm.resilience import (
@@ -51,7 +52,6 @@ from retail_agent.llm.resilience import (
     MAX_DELAY_SECONDS,
     is_retryable,
 )
-from retail_agent.store.definitions import all_definitions
 from retail_agent.store.personas import active_body
 from retail_agent.store.preferences import notes_for, preference_block
 
@@ -107,7 +107,7 @@ def supervisor_middleware(
     still runs — it finds nothing in the store, records the assumption and tells
     the model to choose and disclose.
     """
-    stack: list[AgentMiddleware] = [_prompt(deps, capture), *_pii()]
+    stack: list[AgentMiddleware] = [_turn_sync(capture), _prompt(deps, capture), *_pii()]
 
     # After `_pii()`, and that placement is the guarantee rather than a
     # preference. Both hook `before_model` and those run in list order; the
@@ -177,6 +177,7 @@ def _pii() -> list[AgentMiddleware]:
             strategy="redact",
             apply_to_input=False,
             apply_to_tool_results=True,
+            apply_to_output=False,
         )
         for pii_type in PII_TYPES
     ]
@@ -341,16 +342,14 @@ def open_terms(
     without a model: a term this executive defined last week must not produce
     the same prompt again, however reasonable the model was to ask.
 
-    Never raises — `all_definitions` returns what it managed to read, so an
-    unreachable store costs a question that did not need asking, never the turn.
+    Never raises — `settled_meanings` reads through stores that return what
+    they managed to read and a `recall` that answers failure with an empty
+    list, so an unreachable store costs a question that did not need asking,
+    never the turn.
     """
-    known = all_definitions(deps.definitions, capture.user_id)
-    still_open = tuple(
-        term.strip()
-        for term in terms
-        if term and term.strip() and term.strip().lower() not in known
-    )
-    return PendingDefinition(terms=still_open) if still_open else None
+    known = settled_meanings(deps, capture)
+    _, still_open = partition_terms(known, terms)
+    return PendingDefinition(terms=tuple(still_open)) if still_open else None
 
 
 def describe_open_terms(terms: Sequence[str]) -> str:
@@ -361,6 +360,34 @@ def describe_open_terms(terms: Sequence[str]) -> str:
     each one, and `propose` puts concrete candidate meanings under this anyway.
     """
     return "\n".join(f"{term!r} has no agreed definition yet" for term in terms)
+
+
+def _turn_sync(capture: TurnCapture) -> AgentMiddleware:
+    """Point a long-lived capture at the turn actually being run.
+
+    The CLI and the eval build a fresh capture per turn, question already set,
+    and this hook changes nothing there. Studio compiles the agent once and
+    closes its tools over one capture — so without this, `settled_meanings`
+    retrieves for the build-time question ("") and caches the nothing it found,
+    for the life of the process.
+
+    The mid-turn cache is dropped only when the question changed: a resume
+    after the definition pause is the same question, and the gate's retrieval
+    must survive it for the tool body to read.
+    """
+
+    @before_agent
+    def sync(state, runtime) -> None:
+        for message in reversed(state.get("messages", []) or []):
+            if isinstance(message, HumanMessage):
+                question = message_text(message).strip()
+                if question and question != capture.question:
+                    capture.question = question
+                    capture.recalled_trios = None
+                return None
+        return None
+
+    return sync
 
 
 def _recorder(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
