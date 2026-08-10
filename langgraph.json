@@ -1,7 +1,7 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "retail_agent": "./src/retail_agent/agent/studio.py:graph"
+    "retail_agent": "./src/retail_agent/agent/studio.py:make_graph"
   },
   "env": ".env",
   "python_version": "3.12"
