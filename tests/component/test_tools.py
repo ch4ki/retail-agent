@@ -17,7 +17,7 @@ from .conftest import FakeSource
 
 def tools_for(deps):
     capture = TurnCapture(user_id="exec", session_id="s1", question="q")
-    by_name = {fn.__name__: fn for fn in build_analyst_tools(deps, capture)}
+    by_name = {t.name: t.func for t in build_analyst_tools(deps, capture)}
     return by_name, capture
 
 
@@ -75,9 +75,9 @@ def test_only_run_sql_reads_the_warehouse(make_deps):
         build_analyst_tools(deps, capture)[1],  # lookup_definitions
     ]
 
-    for fn in others:
-        body = inspect.getsource(fn)
-        assert "source.execute" not in body, f"{fn.__name__} queries the warehouse"
+    for t in others:
+        body = inspect.getsource(t.func)
+        assert "source.execute" not in body, f"{t.name} queries the warehouse"
 
 
 def test_a_failed_query_is_recorded_and_re_raised(make_deps):

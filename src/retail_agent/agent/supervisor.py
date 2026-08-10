@@ -11,6 +11,7 @@ the next turn rather than the next deploy.
 from __future__ import annotations
 
 from langchain.agents import create_agent
+from langchain_core.tools import BaseTool
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
@@ -21,12 +22,12 @@ from retail_agent.agent.schema import build_schema_tool
 from retail_agent.agent.subagents import build_subagents
 
 
-def build_tools(deps: AgentDeps, capture: TurnCapture) -> list:
+def build_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """Every capability the agent has, in one list.
 
-    Adding one is adding a line here — that is the extensibility story, and it
-    is the same line whether the new capability is a plain function or another
-    `create_agent` behind a callable.
+    Adding one is a `@tool` in the relevant builder — that is the extensibility
+    story, and it is the same either way, whether the new capability is a plain
+    function or another `create_agent` behind one.
     """
     return [
         *build_subagents(deps, capture),
