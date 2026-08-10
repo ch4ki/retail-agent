@@ -40,6 +40,13 @@ def _process_deps() -> AgentDeps:
 
     Tracing is configured from in here rather than at import, so its os.environ
     write happens on the first request and happens once.
+
+    `lru_cache` only serialises the dict update, not this function body, so
+    two concurrent first requests can both miss the cache and both call
+    `build_deps` before either result is stored — one of the two built
+    `AgentDeps` is then discarded. Harmless here (`AgentDeps` is frozen and
+    nothing it holds is mutated), but "built once" is a description of the
+    common case, not a guarantee.
     """
     settings = get_settings()
     configure_tracing(settings)

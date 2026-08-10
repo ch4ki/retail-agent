@@ -134,9 +134,11 @@ def _migrate(*, console: Console | None = None) -> int:
     settings = get_settings()
     try:
         revision = run_migrations(settings.database_url)
-        # Same command, same transaction boundary as every other table. A
-        # migrate that upgraded the schema but left the checkpointer without
-        # tables would exit 0 and fail on the next turn.
+        # A separate connection and transaction from the Alembic upgrade above
+        # — `setup_checkpoint_tables` opens and commits its own via
+        # `PostgresSaver.from_conn_string`. If it fails after Alembic already
+        # committed, the schema is left half-migrated, but both halves are
+        # idempotent, so re-running `migrate` repairs it.
         setup_checkpoint_tables(settings.database_url)
     except Exception as err:
         render_error(

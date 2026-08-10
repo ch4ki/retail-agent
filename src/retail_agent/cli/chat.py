@@ -131,15 +131,43 @@ def run_chat(args) -> int:
 CONNECTION_ERRORS = (psycopg.OperationalError, psycopg_pool.PoolTimeout)
 
 
+class _SchemaOutOfDate(Exception):
+    """The checkpoint tables exist but predate the installed package's migrations.
+
+    Raised by `_assert_migrated`, not by psycopg — there is no database error
+    for this, since every column and table `SELECT_SQL` reads still exists.
+    """
+
+
 def _assert_migrated(saver) -> None:
-    """Read one checkpoint that cannot exist.
+    """Read one checkpoint that cannot exist, then confirm the schema version.
 
     `from_conn_string` opens a connection; it never touches the tables. So a
     database that was never migrated looks healthy here and fails on the first
     turn instead — inside `_answer`, where it surfaces as a failed turn rather
     than as the startup warning it is.
+
+    The read alone is not enough to catch every un-migrated database, though:
+    `get_tuple` only ever issues `SELECT_SQL`, and `SELECT_SQL` does not read
+    every column a migration has added. `task_path` (added at migration index
+    9, in the installed `langgraph-checkpoint-postgres`) is written by
+    `INSERT_CHECKPOINT_WRITES_SQL`/`UPSERT_CHECKPOINT_WRITES_SQL` but never
+    referenced by `SELECT_SQL`. A database sitting at an older migration
+    version — created by an older version of this same dependency — would
+    pass the read probe here and only fail once the agent tries to write,
+    inside `_answer`, exactly the failure mode this function exists to avoid.
+    So this also compares the version recorded in `checkpoint_migrations`
+    against the version the installed `PostgresSaver.MIGRATIONS` expects.
     """
     saver.get_tuple({"configurable": {"thread_id": "__migration_probe__"}})
+
+    expected = len(saver.MIGRATIONS) - 1
+    with saver._cursor() as cur:
+        cur.execute("SELECT max(v) AS v FROM checkpoint_migrations")
+        row = cur.fetchone()
+    applied = row["v"] if row and row["v"] is not None else -1
+    if applied < expected:
+        raise _SchemaOutOfDate(applied, expected)
 
 
 @contextmanager
@@ -154,12 +182,17 @@ def _checkpointer(console: Console, database_url: str):
         try:
             saver = stack.enter_context(PostgresSaver.from_conn_string(database_url))
             _assert_migrated(saver)
-        except psycopg.errors.UndefinedTable:
+        except (psycopg.ProgrammingError, _SchemaOutOfDate):
+            # ProgrammingError covers UndefinedTable (no schema at all),
+            # UndefinedColumn and InsufficientPrivilege — all genuine "the
+            # schema is missing or wrong" states. It is not a broad
+            # `Exception` catch: a NameError from broken startup wiring is not
+            # a ProgrammingError and still propagates.
             stack.close()
             console.print(
-                "[yellow]The database has no checkpoint tables — this session "
-                "will not be saved. Run `retail-agent migrate` to enable "
-                "history.[/yellow]"
+                "[yellow]The database's checkpoint schema is missing or out "
+                "of date — this session will not be saved. Run "
+                "`retail-agent migrate` to enable history.[/yellow]"
             )
         except CONNECTION_ERRORS as err:
             # Full detail only under --verbose; the console gets one actionable line.

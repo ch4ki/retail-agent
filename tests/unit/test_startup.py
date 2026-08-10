@@ -10,6 +10,8 @@ A NameError inside a function is invisible to every test that does not call
 that function.
 """
 
+import pytest
+
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.bootstrap import build_deps
 from retail_agent.config import Settings
@@ -134,8 +136,17 @@ def test_the_factory_takes_exactly_a_config():
     assert parameters == ["config"]
 
 
+@pytest.fixture
 def _fake_deps(monkeypatch):
-    """Point the credentialed path at doubles, so `_process_deps` can run."""
+    """Point the credentialed path at doubles, so `_process_deps` can run.
+
+    Clears the `_process_deps` cache on both sides: on entry, so a stale entry
+    from an earlier test cannot stand in for this one's doubles; on exit, so
+    this test does not leave an `AgentDeps` built from a fake model against an
+    unreachable database sitting in the cache for whichever test runs next.
+    `pytest-randomly` is installed, so that staleness is a live ordering
+    hazard, not just untidiness.
+    """
     from retail_agent.agent import studio
     from retail_agent.config import Settings
 
@@ -146,14 +157,15 @@ def _fake_deps(monkeypatch):
     monkeypatch.setattr(studio, "build_models", lambda settings: (_bindable(), []))
     monkeypatch.setattr(studio, "BigQuerySource", lambda settings: _schema_only())
     studio._process_deps.cache_clear()
-    return studio
+    yield studio
+    studio._process_deps.cache_clear()
 
 
-def test_each_run_gets_its_own_capture(monkeypatch):
+def test_each_run_gets_its_own_capture(_fake_deps, monkeypatch):
     """The defect this replaces: one capture shared by every Studio thread, so
     two conversations wrote their events, reports and pending approvals into
     the same object."""
-    studio = _fake_deps(monkeypatch)
+    studio = _fake_deps
 
     seen = []
     monkeypatch.setattr(
@@ -167,8 +179,8 @@ def test_each_run_gets_its_own_capture(monkeypatch):
     assert (seen[0].session_id, seen[1].session_id) == ("thread-a", "thread-b")
 
 
-def test_the_user_comes_from_the_config_when_given(monkeypatch):
-    studio = _fake_deps(monkeypatch)
+def test_the_user_comes_from_the_config_when_given(_fake_deps, monkeypatch):
+    studio = _fake_deps
 
     seen = []
     monkeypatch.setattr(
@@ -182,9 +194,9 @@ def test_the_user_comes_from_the_config_when_given(monkeypatch):
     assert seen[1].user_id == "studio", "the default when nothing identifies the caller"
 
 
-def test_the_expensive_dependencies_are_built_once(monkeypatch):
+def test_the_expensive_dependencies_are_built_once(_fake_deps, monkeypatch):
     """Per-run construction must not mean per-run BigQuery and model clients."""
-    studio = _fake_deps(monkeypatch)
+    studio = _fake_deps
     monkeypatch.setattr(studio, "build_agent", lambda deps, capture, **kw: None)
 
     studio.make_graph({"configurable": {"thread_id": "one"}})
@@ -194,14 +206,14 @@ def test_the_expensive_dependencies_are_built_once(monkeypatch):
     assert (info.misses, info.hits) == (1, 1)
 
 
-def test_the_returned_graph_carries_no_persistence(monkeypatch):
+def test_the_returned_graph_carries_no_persistence(_fake_deps):
     """`langgraph_api/graph.py:801-822` raises under `langgraph dev` if the
     graph has a checkpointer or a store; the server injects its own at
     graph.py:402. The assertion mirrors that isinstance check exactly."""
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.store.base import BaseStore
 
-    studio = _fake_deps(monkeypatch)
+    studio = _fake_deps
 
     compiled = studio.make_graph({"configurable": {"thread_id": "t"}})
 

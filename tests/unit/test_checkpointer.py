@@ -7,26 +7,57 @@ reported every one of them as "Postgres unreachable".
 """
 
 import io
+from contextlib import contextmanager
 
 import psycopg
 import psycopg_pool
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.postgres import PostgresSaver
 from rich.console import Console
 
 from retail_agent.cli import chat
 
 
-class _FakeSaver:
-    """A saver whose probe behaves however the test needs."""
+class _FakeCursor:
+    """Reports whatever migration version the test asks for."""
 
-    def __init__(self, on_probe=None):
+    def __init__(self, applied_version):
+        self._applied_version = applied_version
+
+    def execute(self, sql, params=None):
+        return self
+
+    def fetchone(self):
+        return {"v": self._applied_version}
+
+
+class _FakeSaver:
+    """A saver whose probe behaves however the test needs.
+
+    `MIGRATIONS` mirrors the real `PostgresSaver.MIGRATIONS` so `expected =
+    len(saver.MIGRATIONS) - 1` inside `_assert_migrated` means the same thing
+    here as it does against a real saver. `applied_version` defaults to the
+    current one, so tests that do not care about the version check (most of
+    them) get a saver that passes it.
+    """
+
+    MIGRATIONS = PostgresSaver.MIGRATIONS
+
+    def __init__(self, on_probe=None, applied_version=None):
         self._on_probe = on_probe
+        self._applied_version = (
+            applied_version if applied_version is not None else len(self.MIGRATIONS) - 1
+        )
 
     def get_tuple(self, config):
         if self._on_probe is not None:
             raise self._on_probe
         return None
+
+    @contextmanager
+    def _cursor(self):
+        yield _FakeCursor(self._applied_version)
 
 
 class _FakeConnection:
@@ -94,6 +125,34 @@ def test_an_unmigrated_database_names_the_command_that_fixes_it(console, monkeyp
     assert connection.closed, "the connection was left open"
 
 
+def test_a_database_at_the_current_migration_version_yields_the_real_saver(
+    console, monkeypatch
+):
+    """The read probe passing is not enough on its own — this pins that a
+    saver whose recorded version matches what the installed package expects
+    is treated as healthy, not as behind."""
+    saver = _FakeSaver(applied_version=len(PostgresSaver.MIGRATIONS) - 1)
+    connection = _FakeConnection(saver)
+
+    assert _use(console, monkeypatch, opens=connection) is saver
+
+
+def test_an_older_migration_version_falls_back_naming_migrate(console, monkeypatch):
+    """`SELECT_SQL` (what the read probe issues) does not reference every
+    column a migration has added — `task_path`, added at migration index 9,
+    is written but never read. So a database sitting one migration behind
+    would pass the read probe and only fail once the agent tries to write.
+    This pins that the version check catches it instead, at startup."""
+    saver = _FakeSaver(applied_version=len(PostgresSaver.MIGRATIONS) - 2)
+    connection = _FakeConnection(saver)
+
+    yielded = _use(console, monkeypatch, opens=connection)
+
+    assert isinstance(yielded, MemorySaver)
+    assert "retail-agent migrate" in console.export_text()
+    assert connection.closed, "the connection was left open"
+
+
 def test_an_unexpected_failure_propagates(console, monkeypatch):
     """The whole point of narrowing the catch. A NameError in startup must not
     read as a database problem."""
@@ -144,6 +203,13 @@ def test_a_real_unmigrated_database_raises_undefined_table():
                 chat._assert_migrated(saver)
 
         setup_checkpoint_tables(fresh_url)
+
+        with psycopg.connect(fresh_url) as conn, conn.cursor() as cur:
+            cur.execute("SELECT max(v) FROM checkpoint_migrations")
+            applied = cur.fetchone()[0]
+        assert applied == len(PostgresSaver.MIGRATIONS) - 1, (
+            "setup() did not apply every migration the installed package has"
+        )
 
         with PostgresSaver.from_conn_string(fresh_url) as saver:
             assert chat._assert_migrated(saver) is None, "probe fails after migrate"
