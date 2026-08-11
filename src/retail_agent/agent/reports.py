@@ -148,6 +148,10 @@ def build_report_tools(deps: AgentDeps) -> list[BaseTool]:
             answer = f"I found no reports{described} to delete."
             return _reply(runtime, answer, "delete_reports", started, detail)
 
+        if runtime.stream_writer:
+            runtime.stream_writer(
+                {"progress": f"{len(pending.report_ids)} report(s) matched"}
+            )
         decision = interrupt(
             {
                 "kind": "delete_reports",

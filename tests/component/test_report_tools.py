@@ -595,3 +595,34 @@ def test_a_reports_body_is_not_in_state(make_deps, reports):
     assert set(written) == {"report_id", "title", "show"}
     assert body not in str(result["reports_written"])
     assert reports.get(owner_id="exec", report_id=written["report_id"]).body == body
+
+
+def test_writing_a_report_says_so_while_it_works(make_deps):
+    """A report is the slowest thing a turn does that is not a query. Silence
+    while it happens is the gap the spinner used to paper over."""
+    from retail_agent.agent.deps import TurnContext
+    from retail_agent.agent.supervisor import build_agent
+
+    deps = make_deps(
+        script=[
+            [("report_writer", {"brief": "denim", "title": "Q1 Denim"})],
+            "## Summary\nDenim fell.",
+            "Written.",
+        ]
+    )
+    agent = build_agent(deps)
+
+    progress = [
+        chunk
+        for mode, chunk in agent.stream(
+            {"messages": [{"role": "user", "content": "write it up"}]},
+            {"configurable": {"thread_id": "s1"}},
+            context=TurnContext(user_id="exec", session_id="s1", turn_id="t1"),
+            stream_mode=["custom", "values"],
+        )
+        if mode == "custom"
+    ]
+
+    assert any("Q1 Denim" in str(chunk) for chunk in progress), (
+        f"report_writer said nothing while it worked; saw {progress}"
+    )

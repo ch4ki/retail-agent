@@ -176,6 +176,8 @@ def build_subagents(deps: AgentDeps) -> list[BaseTool]:
             (runtime.state or {}).get("trio_ids", []),
             user_id=runtime.context.user_id,
         )
+        if runtime.stream_writer:
+            runtime.stream_writer({"progress": f"writing '{title}'…"})
         # A plain call, not an agent: with no tools there is no loop for a
         # graph to run, and `resilient_call` supplies the retry and fallback
         # that `create_agent`'s middleware supplied to the others.
@@ -264,6 +266,8 @@ def build_subagents(deps: AgentDeps) -> list[BaseTool]:
             )
 
         detail = f"{report.id}, {len(report.body)} chars"
+        if runtime.stream_writer:
+            runtime.stream_writer({"progress": f"reading '{report.title}'…"})
         reply = resilient_call(
             deps,
             lambda model: model.invoke(
