@@ -8,8 +8,14 @@ Which is why this file is one list, built in one place, rather than options
 scattered across call sites.
 
 Two stacks, because the two agents bound different things. The supervisor
-carries the human gate, the persona and the recording; the analyst carries the
-query budget and the repair path.
+carries the persona and the recording; the analyst carries the query budget
+and the repair path. The human gates used to live here too, as a
+`HumanInTheLoopMiddleware` `when` predicate deciding whether to pause. They
+don't any more: a `when` predicate is read-only and cannot touch the store or
+write state, so it could resolve a pause but never answer one. Both gates
+moved into the tool bodies that need the answers — `delete_reports` and
+`ask_for_definitions` call `interrupt()` themselves, resolve what they showed
+the user again on the way back, and act on the resume value directly.
 """
 
 from __future__ import annotations

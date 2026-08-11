@@ -37,34 +37,18 @@ class Step:
 class PendingDelete:
     """A destructive operation resolved against the store, awaiting approval.
 
-    Resolved by the interrupt's `when` predicate — read-only — and read back by
-    the tool on the far side of the approval, so what the user was shown is
-    exactly what gets deleted. Resolving twice would leave a gap, however small,
-    between the manifest and the act.
+    Resolved by the tool itself — once before the pause, to build the manifest
+    `interrupt()` shows the user, and again on replay after resume, so what
+    gets deleted is recomputed against the store rather than trusted from
+    before the pause. What crosses the interrupt boundary is the resume value,
+    not this object; resolving twice would otherwise leave a gap, however
+    small, between the manifest and the act.
     """
 
     action_id: str
     report_ids: tuple[str, ...]
     titles: tuple[str, ...]
     token: str  # what the user must type back, verbatim
-
-
-@dataclass(frozen=True)
-class PendingDefinition:
-    """Terms the model asked about that this user has not already answered.
-
-    Resolved by the interrupt's `when` predicate — read-only, and without a
-    model call — and read back by the CLI, which asks about them in order. The
-    same discipline as `PendingDelete`: what stops the turn is decided once, and
-    what the user is then shown is exactly what stopped it.
-
-    Which words are worth asking about is the model's judgement, made by calling
-    `ask_for_definitions` at all. The filtering this holds is the other half:
-    whichever of those words are already on file, dropped before anyone is
-    interrupted, so a definition given last week is never asked for twice.
-    """
-
-    terms: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -116,8 +100,6 @@ class TurnCapture:
     # recorder middleware; a turn that died before it never has a figure.
     context_tokens: int = 0
     status: str = "ok"
-    pending: PendingDelete | None = None
-    pending_definition: PendingDefinition | None = None
     # The corpus retrieval for this turn's question, run once and read by both
     # sides of the definition interrupt. Only this half is cached: the trio
     # corpus cannot change mid-turn, but the personal definition store can —
