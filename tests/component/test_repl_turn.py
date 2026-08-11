@@ -138,6 +138,17 @@ def test_a_failing_turn_still_leaves_a_trace(make_deps, traces):
     assert traces.get(owner_id="dana", turn_id=trace.turn_id) is not None
 
 
+def test_the_answer_reaches_the_console_as_it_is_produced(make_deps):
+    """The spinner hid the whole turn. A question that spends three queries and
+    writes a report showed one unchanging line until it was completely done."""
+    console = FakeConsole()
+    deps = make_deps(script=["Denim fell 11.8% in Q1."])
+
+    answer(console, deps, "how did denim do?")
+
+    assert "Denim fell 11.8% in Q1." in console.text()
+
+
 def test_a_failed_turn_prints_no_report(make_deps, monkeypatch):
     """The error panel is what the executive gets. A report printed underneath
     it would claim the turn produced something the turn did not finish."""

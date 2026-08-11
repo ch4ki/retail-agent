@@ -24,7 +24,6 @@ from langgraph.types import Command
 from rich.console import Console
 
 from retail_agent.agent.deps import TurnContext
-from retail_agent.agent.subagents import final_text
 from retail_agent.agent.supervisor import build_agent
 from retail_agent.bootstrap import build_deps
 from retail_agent.cli.render import (
@@ -378,6 +377,35 @@ def _undo(console, deps, user) -> None:
     )
 
 
+def _stream_turn(console, agent, payload, config, context) -> str:
+    """Drive one turn, rendering as it arrives. Returns the answer text.
+
+    `messages` carries the supervisor's tokens; `custom` carries whatever a tool
+    chose to say while it worked. Only `AIMessage` chunks with content are the
+    answer — a `ToolMessage` is the tool's receipt to the model, and
+    `report_writer`'s receipt is deliberately a covering sentence rather than
+    the report it wrote.
+    """
+    from langchain_core.messages import AIMessage
+
+    parts: list[str] = []
+    for mode, chunk in agent.stream(
+        payload, config, context=context, stream_mode=["messages", "custom"]
+    ):
+        if mode == "custom":
+            console.print(f"[dim]{chunk.get('progress', chunk)}[/dim]")
+        elif mode == "messages":
+            message, _meta = chunk
+            if isinstance(message, AIMessage):
+                text = message_text(message)
+                if text:
+                    parts.append(text)
+                    console.print(text, end="")
+    if parts:
+        console.print()
+    return "".join(parts)
+
+
 def _answer(console, deps, saver, user, session_id, question):
     """Run one turn. Always returns its trace, including when it fails.
 
@@ -400,20 +428,24 @@ def _answer(console, deps, saver, user, session_id, question):
         # Armed here and nowhere else: a pause needs somebody who can answer it,
         # and this is the only caller with a person at a keyboard.
         agent = build_agent(deps, checkpointer=saver, pause_for_definitions=True)
-        with console.status("thinking…"):
-            result = agent.invoke(
-                {"messages": [{"role": "user", "content": question}]},
-                config,
-                context=context,
-            )
+        answer = _stream_turn(
+            console,
+            agent,
+            {"messages": [{"role": "user", "content": question}]},
+            config,
+            context,
+        )
+        result = agent.get_state(config).values
 
         # Two things pause a turn: `delete_reports` and `ask_for_definitions`,
         # both interrupting themselves now, so `_decide` returns exactly the
         # value each one expects back — nothing here has to reshape it.
-        while _pending(result):
-            resume = _decide(console, deps, result)
-            with console.status("working…"):
-                result = agent.invoke(Command(resume=resume), config, context=context)
+        while _pending(agent, config):
+            resume = _decide(console, deps, agent, config)
+            answer = _stream_turn(
+                console, agent, Command(resume=resume), config, context
+            )
+            result = agent.get_state(config).values
     except Exception as err:  # the REPL must survive anything
         # Full detail goes to the log; the user gets one actionable line. The
         # turn id makes a complaint a single lookup rather than an
@@ -431,7 +463,6 @@ def _answer(console, deps, saver, user, session_id, question):
         # with no sign it was the wrong question.
         return _record_failure(deps, agent, config, context)
 
-    answer = final_text(result)
     render_answer(console, answer, result, prefs=preferred(deps.preferences, user))
     # Printed here rather than left to the model, for the same reason the
     # preference note below is: what the executive was told is not something to
@@ -524,13 +555,27 @@ def _record_failure(deps, agent, config, context):
     return trace
 
 
-def _pending(result) -> bool:
-    return bool(result.get("__interrupt__"))
+def _pending(agent, config) -> bool:
+    """Whether the turn stopped for a person.
+
+    `agent.get_state(config).next` rather than an `__interrupt__` key: a
+    streamed turn's result is the state read back from the checkpointer, and
+    this is the same check `seams.ask_once` already uses.
+    """
+    return bool(agent.get_state(config).next)
 
 
-def _payload(result) -> dict:
-    """What the tool asked for."""
-    value = result["__interrupt__"][0].value
+def _payload(snapshot) -> dict:
+    """What the tool asked for.
+
+    Reads `snapshot.interrupts` rather than a `result["__interrupt__"]` key:
+    `agent.invoke` used to stamp that key onto its return value, but a streamed
+    turn's `result` is the checkpointed state, which never carries it — the
+    interrupt itself only lives on the state snapshot `get_state` returns.
+    """
+    if not snapshot.interrupts:
+        return {}
+    value = snapshot.interrupts[0].value
     return value if isinstance(value, dict) else {}
 
 
@@ -550,15 +595,22 @@ def _question_from(result) -> str:
     return ""
 
 
-def _decide(console, deps, result) -> dict:
+def _decide(console, deps, agent, config) -> dict:
     """Turn a pause into the value the tool resumes with.
 
     Dispatching on the payload's own `kind`: the tool that asked is the tool
     that named the question, so there is nothing to infer.
+
+    Takes `agent`/`config` rather than a result dict: the interrupt payload
+    lives on the state snapshot (see `_payload`), not on the checkpointed
+    values a streamed turn's `result` now is.
     """
-    payload = _payload(result)
+    snapshot = agent.get_state(config)
+    payload = _payload(snapshot)
     if payload.get("kind") == "ask_for_definitions":
-        return _settle_definitions(console, deps, _question_from(result), payload)
+        return _settle_definitions(
+            console, deps, _question_from(snapshot.values), payload
+        )
 
     if _confirm(console, payload):
         return {
