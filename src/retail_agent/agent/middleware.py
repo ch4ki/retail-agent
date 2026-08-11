@@ -263,8 +263,8 @@ def _turn_sync(capture: TurnCapture) -> AgentMiddleware:
     for the life of the process.
 
     The mid-turn cache is dropped only when the question changed: a resume
-    after the definition pause is the same question, and the gate's retrieval
-    must survive it for the tool body to read.
+    after the definition pause is the same question, and `settled_meanings`'
+    retrieval must survive it for the replayed tool body to read.
     """
 
     @before_agent

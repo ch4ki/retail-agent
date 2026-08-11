@@ -22,6 +22,8 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from langgraph.errors import GraphBubbleUp
+
 from retail_agent.obs.traces import MAX_ANSWER_CHARS, TraceRecord
 from retail_agent.safety.frame import MaskedFrame
 
@@ -113,13 +115,28 @@ class TurnCapture:
         Wrapping at the call site rather than inside each tool body means a tool
         added later is traced by virtue of being called, the way the graph's
         `_traced` wrapper made a new node traced by virtue of being registered.
+
+        A tool that calls `interrupt()` raises `GraphBubbleUp` (the base LangGraph
+        gives `GraphInterrupt`) out of this `with` block on the pre-pause pass, and
+        `interrupt()` re-executes the node from the top on resume — so a plain
+        `finally` here would file the pre-pause pass as a completed step with an
+        empty detail, then file the real one again on replay, doubling every paused
+        tool's trace. Bubble-up is let through unrecorded and uncounted instead; a
+        genuine tool failure is not `GraphBubbleUp` and is still filed below.
         """
         started = time.perf_counter()
         step = Step()
         self.calls += 1
         try:
             yield step
-        finally:
+        except GraphBubbleUp:
+            self.calls -= 1
+            raise
+        except BaseException:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            self.events.append((name, elapsed_ms, step.detail))
+            raise
+        else:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             self.events.append((name, elapsed_ms, step.detail))
 

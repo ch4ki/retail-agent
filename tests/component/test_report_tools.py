@@ -1,6 +1,7 @@
 """The report library, and the gate in front of the destructive part.
 
-The confirmation is an interrupt *before* `delete_reports` runs, so the
+The confirmation is an interrupt `delete_reports` raises from inside itself,
+after resolving what it would delete but before writing anything, so the
 assertions here are about what is still in the store while the user is being
 asked — not about what the agent said.
 """
@@ -89,6 +90,37 @@ def test_approving_deletes_exactly_what_was_shown(make_deps, saved):
 
     remaining = [r.title for r in saved.list_reports(owner_id="exec")]
     assert remaining == ["Beta Q1"]
+
+
+def test_a_paused_delete_traces_exactly_one_event(make_deps, saved):
+    """`interrupt()` raises out of `capture.step("delete_reports")` on the
+    pre-pause pass, then `interrupt()` replays the whole node on resume. A
+    bare `try/finally` in `TurnCapture.step` would file the pre-pause pass as
+    a completed step with an empty detail before the exception is even seen,
+    then file the real one again on replay — two events, one of them blank,
+    for a single delete. There must be exactly one, and it must carry the
+    real detail."""
+    deps = make_deps(
+        script=[[("delete_reports", {"term": "Acme"})], "Deleted 1 report."]
+    )
+    agent, capture, config, result = run(deps, "delete all reports mentioning Acme")
+    payload = result["__interrupt__"][0].value
+
+    agent.invoke(
+        Command(
+            resume={
+                "approved": True,
+                "report_ids": payload["report_ids"],
+                "token": payload["token"],
+            }
+        ),
+        config,
+    )
+
+    delete_events = [e for e in capture.events if e[0] == "delete_reports"]
+    assert len(delete_events) == 1, capture.events
+    assert delete_events[0][2] == "deleted 1"
+    assert capture.calls == 1
 
 
 def test_rejecting_leaves_the_library_alone(make_deps, saved):
@@ -338,19 +370,6 @@ def test_a_report_added_between_prompt_and_approval_is_not_deleted(
 
     surviving = {r.title for r in reports.list_reports(owner_id="exec")}
     assert surviving == {"Gamma Q1"}, "only the reports shown were deleted"
-
-
-def test_rejecting_deletes_nothing(make_deps, saved, reports):
-    deps = make_deps(script=[[("delete_reports", {"term": "Acme"})], "Nothing deleted."])
-    saver = MemorySaver()
-    capture = TurnCapture(user_id="exec", session_id="s1", question="delete Acme")
-    agent = build_agent(deps, capture, checkpointer=saver)
-    config = {"configurable": {"thread_id": "s1"}}
-
-    agent.invoke({"messages": [{"role": "user", "content": "delete Acme"}]}, config)
-    agent.invoke(Command(resume={"approved": False}), config)
-
-    assert len(reports.list_reports(owner_id="exec")) == 2
 
 
 def test_a_transient_failure_while_answering_about_a_report_is_survived(
