@@ -153,6 +153,13 @@ def test_the_answer_reaches_the_console_exactly_once(make_deps):
     streaming it. Do not re-add a containment assertion here believing it
     proves streaming — it would pass just as well against the old blocking
     `_answer`.
+
+    This also only covers the simple path: no tool here makes a model call of
+    its own. `test_a_report_writers_draft_does_not_leak_into_the_answer` and
+    `test_ask_about_reports_internal_reply_does_not_leak_into_the_answer`
+    below cover the path where a tool's own internal `model.invoke()` would
+    otherwise surface in the same stream — see `_SUPERVISOR_NODE` in
+    `chat.py` for why that happens and how it is filtered out.
     """
     console = FakeConsole()
     deps = make_deps(script=["Denim fell 11.8% in Q1."])
@@ -160,6 +167,64 @@ def test_the_answer_reaches_the_console_exactly_once(make_deps):
     answer(console, deps, "how did denim do?")
 
     assert console.text().count("Denim fell 11.8%") == 1
+
+
+def test_a_report_writers_draft_does_not_leak_into_the_answer(make_deps):
+    """`report_writer` drafts the report with a bare `model.invoke()` inside
+    `resilient_call`. LangGraph propagates the parent run's callback context
+    into that call, so the draft surfaces as an `AIMessage` chunk on
+    `stream_mode="messages"` too — tagged `langgraph_node="tools"`, never
+    touching `TurnState["messages"]`, which is why `final_text(result)` never
+    saw it before streaming existed.
+
+    Unfiltered, `_stream_turn` glued that draft onto the covering sentence
+    with no separator, and — because `_stream_turn`'s return value becomes
+    `trace.answer` — persisted the glued text to the trace, not just the
+    console. `/trace` and every later audit would have shown it.
+    """
+    console = FakeConsole()
+    deps = make_deps(
+        script=[
+            [("report_writer", {"brief": "denim", "title": "Q1 Report"})],
+            "# Q1 Report\n\nRevenue up 5%.",
+            "Here's your report.",
+        ]
+    )
+
+    trace = answer(console, deps, "write me a report on denim")
+
+    assert trace.answer == "Here's your report."
+
+
+def test_ask_about_reports_internal_reply_does_not_leak_into_the_answer(
+    make_deps, reports
+):
+    """Same leak, a different tool: `ask_about_report` also drafts its reply
+    with a bare `model.invoke()` inside `resilient_call`, and that call's
+    `AIMessage` chunk is tagged `langgraph_node="tools"` for the same reason.
+    Unfiltered, the internal reply and the supervisor's own covering sentence
+    both rendered — the answer appeared twice, once from each node.
+    """
+    saved_report = reports.save(
+        owner_id="dana", session_id="s1", title="Q1 Denim", body="Denim rose 3% in Q1."
+    )
+    console = FakeConsole()
+    deps = make_deps(
+        script=[
+            [
+                (
+                    "ask_about_report",
+                    {"report_id": saved_report.id, "question": "how did denim do?"},
+                )
+            ],
+            "Denim rose 3%, driven by wholesale.",
+            "It rose 3%, mostly wholesale.",
+        ]
+    )
+
+    trace = answer(console, deps, "what does the denim report say?")
+
+    assert trace.answer == "It rose 3%, mostly wholesale."
 
 
 def test_a_failed_turn_prints_no_report(make_deps, monkeypatch):

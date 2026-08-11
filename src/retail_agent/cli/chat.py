@@ -377,30 +377,71 @@ def _undo(console, deps, user) -> None:
     )
 
 
+# The supervisor's own graph node, as `create_agent` names it — confirmed
+# against a live stream, not assumed: `report_writer` and `ask_about_report`
+# both make a bare `model.invoke()` inside `resilient_call`, and LangGraph
+# propagates the parent run's callback context into any Runnable invoked
+# synchronously inside a node, so those internal calls surface as `AIMessage`
+# chunks on `stream_mode="messages"` too — tagged `langgraph_node="tools"`,
+# never touching `TurnState["messages"]`. A probe against the real agent
+# (report_writer scripted, then the covering sentence) showed exactly this:
+#   AIMessage  node=model  text=''                          <- tool-call request
+#   AIMessage  node=tools  text='# Q1 Report\n\nRevenue...'  <- the leak
+#   ToolMessage node=tools text="Report ... written ..."     <- already skipped by type
+#   AIMessage  node=model  text="Here's your report."        <- the actual answer
+# The `analyst` subagent does not leak this way: it is a compiled subgraph
+# reached through `.invoke()`, which LangGraph does not auto-forward into the
+# parent's message stream.
+_SUPERVISOR_NODE = "model"
+
+
 def _stream_turn(console, agent, payload, config, context) -> str:
     """Drive one turn, rendering as it arrives. Returns the answer text.
 
     `messages` carries the supervisor's tokens; `custom` carries whatever a tool
-    chose to say while it worked. Only `AIMessage` chunks with content are the
-    answer — a `ToolMessage` is the tool's receipt to the model, and
-    `report_writer`'s receipt is deliberately a covering sentence rather than
-    the report it wrote.
+    chose to say while it worked. Only `AIMessage` chunks with content, from the
+    supervisor's own node, are the answer:
+
+    - A `ToolMessage` is the tool's receipt to the model, and `report_writer`'s
+      receipt is deliberately a covering sentence rather than the report it
+      wrote — skipped by type, not by guessing from content.
+    - An `AIMessage` from any node other than `_SUPERVISOR_NODE` is a tool's
+      own internal model call leaking through the shared callback context (see
+      `_SUPERVISOR_NODE`'s comment) — skipped by node, since `isinstance`
+      alone cannot tell it apart from the real answer.
     """
     from langchain_core.messages import AIMessage
 
     parts: list[str] = []
+    # Every `AIMessage` chunk's node, seen regardless of the filter below —
+    # if the supervisor's own node is never among them, the name this filter
+    # relies on has changed, and silently rendering nothing would be a worse
+    # bug than the one this replaced.
+    seen_nodes: set[str] = set()
     for mode, chunk in agent.stream(
         payload, config, context=context, stream_mode=["messages", "custom"]
     ):
         if mode == "custom":
             console.print(f"[dim]{chunk.get('progress', chunk)}[/dim]")
         elif mode == "messages":
-            message, _meta = chunk
+            message, meta = chunk
             if isinstance(message, AIMessage):
-                text = message_text(message)
-                if text:
-                    parts.append(text)
-                    console.print(text, end="")
+                # `str(...)`: a chunk with no `langgraph_node` at all must still
+                # land somewhere sortable in `seen_nodes` below, not raise a
+                # `TypeError` from comparing `None` against a string.
+                node = str(meta.get("langgraph_node"))
+                seen_nodes.add(node)
+                if node == _SUPERVISOR_NODE:
+                    text = message_text(message)
+                    if text:
+                        parts.append(text)
+                        console.print(text, end="")
+    if seen_nodes and _SUPERVISOR_NODE not in seen_nodes:
+        raise RuntimeError(
+            f"expected an AIMessage chunk from node {_SUPERVISOR_NODE!r}, saw "
+            f"only {sorted(seen_nodes)} — the supervisor's node name changed "
+            "and _stream_turn's filter needs updating, not silent dropping."
+        )
     if parts:
         console.print()
     return "".join(parts)
