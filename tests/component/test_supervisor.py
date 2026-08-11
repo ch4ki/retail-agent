@@ -12,6 +12,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import MemorySaver
 
 from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.prompts import SAFETY_RULES
 from retail_agent.agent.subagents import final_text
 from retail_agent.agent.supervisor import build_agent
@@ -27,6 +28,9 @@ def run(deps, question, user="exec"):
     result = agent.invoke(
         {"messages": [{"role": "user", "content": question}]},
         {"configurable": {"thread_id": "s1"}},
+        context=TurnContext(
+            user_id=user, session_id="s1", turn_id=capture.turn_id
+        ),
     )
     return final_text(result), capture
 
@@ -138,14 +142,24 @@ def test_describe_schema_costs_no_query_and_says_what_it_found(make_deps, source
     It read "0 table(s)" against a live warehouse holding six, because the count
     grepped for a string the DDL renderer does not emit.
     """
+    from langchain.tools import ToolRuntime
+
     from retail_agent.agent.capture import TurnCapture
     from retail_agent.agent.schema import build_schema_tool
 
     deps = make_deps(src=source)
     capture = TurnCapture()
     describe = build_schema_tool(deps, capture)[0].func
+    runtime = ToolRuntime(
+        state=None,
+        context=TurnContext(),
+        config={},
+        stream_writer=None,
+        tool_call_id="test",
+        store=None,
+    )
 
-    rendered = describe()
+    rendered = describe(runtime=runtime)
 
     assert source.executed == [], "answering what data exists must cost nothing"
     assert "order_items" in rendered

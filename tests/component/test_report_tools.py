@@ -13,13 +13,54 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.reports import build_report_tools, confirmation_token
 from retail_agent.agent.subagents import build_subagents
 from retail_agent.agent.supervisor import build_agent
 
 
+def _runtime_with(context):
+    """A ToolRuntime carrying just the context, for calling a tool's raw
+    `.func` directly the way this file's other tests do.
+
+    Six of its nine fields are required; `tools`, `execution_info` and
+    `server_info` have defaults and are omitted.
+    """
+    from langchain.tools import ToolRuntime
+
+    return ToolRuntime(
+        state=None,
+        context=context,
+        config={},
+        stream_writer=None,
+        tool_call_id="test",
+        store=None,
+    )
+
+
+def context_for(capture: TurnCapture) -> TurnContext:
+    """The runtime context matching a `TurnCapture`'s own identity.
+
+    Used everywhere a test drives a compiled agent through `agent.invoke`
+    directly: the tools now read identity from `runtime.context`, which
+    `invoke` never fills in unless the caller passes it, so a test that omits
+    it would have every identity-scoped tool see an empty user rather than
+    the one the fixtures set up.
+    """
+    return TurnContext(
+        user_id=capture.user_id,
+        session_id=capture.session_id,
+        turn_id=capture.turn_id,
+    )
+
+
 def writer(deps, capture):
-    return {t.name: t.func for t in build_subagents(deps, capture)}["report_writer"]
+    func = {t.name: t.func for t in build_subagents(deps, capture)}["report_writer"]
+
+    def call(**kwargs):
+        return func(runtime=_runtime_with(context_for(capture)), **kwargs)
+
+    return call
 
 
 @pytest.fixture
@@ -39,7 +80,9 @@ def run(deps, question, saver=None):
     agent = build_agent(deps, capture, checkpointer=saver)
     config = {"configurable": {"thread_id": "s1"}}
     result = agent.invoke(
-        {"messages": [{"role": "user", "content": question}]}, config
+        {"messages": [{"role": "user", "content": question}]},
+        config,
+        context=context_for(capture),
     )
     return agent, capture, config, result
 
@@ -86,6 +129,7 @@ def test_approving_deletes_exactly_what_was_shown(make_deps, saved):
             }
         ),
         config,
+        context=context_for(capture),
     )
 
     remaining = [r.title for r in saved.list_reports(owner_id="exec")]
@@ -115,6 +159,7 @@ def test_a_paused_delete_traces_exactly_one_event(make_deps, saved):
             }
         ),
         config,
+        context=context_for(capture),
     )
 
     delete_events = [e for e in capture.events if e[0] == "delete_reports"]
@@ -127,9 +172,11 @@ def test_rejecting_leaves_the_library_alone(make_deps, saved):
     deps = make_deps(
         script=[[("delete_reports", {"term": "Acme"})], "Nothing was deleted."]
     )
-    agent, _, config, _ = run(deps, "delete all reports mentioning Acme")
+    agent, capture, config, _ = run(deps, "delete all reports mentioning Acme")
 
-    agent.invoke(Command(resume={"approved": False}), config)
+    agent.invoke(
+        Command(resume={"approved": False}), config, context=context_for(capture)
+    )
 
     assert len(saved.list_reports(owner_id="exec")) == 2
 
@@ -139,7 +186,7 @@ def test_a_deletion_can_be_undone(make_deps, saved):
     deps = make_deps(
         script=[[("delete_reports", {"term": "Acme"})], "Deleted."]
     )
-    agent, _, config, result = run(deps, "delete all reports mentioning Acme")
+    agent, capture, config, result = run(deps, "delete all reports mentioning Acme")
     payload = result["__interrupt__"][0].value
     agent.invoke(
         Command(
@@ -150,6 +197,7 @@ def test_a_deletion_can_be_undone(make_deps, saved):
             }
         ),
         config,
+        context=context_for(capture),
     )
 
     assert saved.undo(owner_id="exec") == 1
@@ -173,7 +221,9 @@ def test_a_delete_cannot_reach_another_owner(make_deps, saved):
     capture = TurnCapture(user_id="someone-else", session_id="s1", question="q")
     tools = {t.name: t.func for t in build_report_tools(deps, capture)}
 
-    answer = tools["delete_reports"]("Acme")
+    answer = tools["delete_reports"](
+        runtime=_runtime_with(context_for(capture)), term="Acme"
+    )
 
     assert "no reports" in answer.lower()
     assert len(saved.list_reports(owner_id="exec")) == 2
@@ -259,7 +309,12 @@ def test_there_is_no_save_report_tool(make_deps):
 
 
 def asker(deps, capture):
-    return {t.name: t.func for t in build_subagents(deps, capture)}["ask_about_report"]
+    func = {t.name: t.func for t in build_subagents(deps, capture)}["ask_about_report"]
+
+    def call(**kwargs):
+        return func(runtime=_runtime_with(context_for(capture)), **kwargs)
+
+    return call
 
 
 def test_a_report_is_answered_from_its_stored_body(make_deps, reports):
@@ -353,7 +408,9 @@ def test_a_report_added_between_prompt_and_approval_is_not_deleted(
     config = {"configurable": {"thread_id": "s1"}}
 
     result = agent.invoke(
-        {"messages": [{"role": "user", "content": "delete the Q1 reports"}]}, config
+        {"messages": [{"role": "user", "content": "delete the Q1 reports"}]},
+        config,
+        context=context_for(capture),
     )
     payload = result["__interrupt__"][0].value
     shown = list(payload["report_ids"])
@@ -366,6 +423,7 @@ def test_a_report_added_between_prompt_and_approval_is_not_deleted(
     agent.invoke(
         Command(resume={"approved": True, "report_ids": shown, "token": payload["token"]}),
         config,
+        context=context_for(capture),
     )
 
     surviving = {r.title for r in reports.list_reports(owner_id="exec")}
@@ -405,3 +463,31 @@ def test_a_transient_failure_while_answering_about_a_report_is_survived(
 
     assert flaky.calls == 2, "the first attempt failed and the second succeeded"
     assert "Audit Texas" in answer
+
+
+def test_one_compiled_agent_serves_two_users(make_deps, reports):
+    """The shape this change exists for. Identity used to be decided when the
+    agent was built, so a single compiled graph could only ever act for one
+    executive. Sub-project E made the server rebuild per request, which hid the
+    symptom; this removes the reason.
+    """
+    from retail_agent.agent.deps import TurnContext
+
+    body = "## Summary\nDenim fell in Q1."
+    deps = make_deps(script=[body, body])
+    capture = TurnCapture(question="write it up")
+    write = {t.name: t.func for t in build_subagents(deps, capture)}["report_writer"]
+
+    write(
+        brief="denim findings",
+        title="Ada's report",
+        runtime=_runtime_with(TurnContext(user_id="ada", session_id="s1")),
+    )
+    write(
+        brief="denim findings",
+        title="Bo's report",
+        runtime=_runtime_with(TurnContext(user_id="bo", session_id="s2")),
+    )
+
+    assert [r.title for r in reports.list_reports(owner_id="ada")] == ["Ada's report"]
+    assert [r.title for r in reports.list_reports(owner_id="bo")] == ["Bo's report"]

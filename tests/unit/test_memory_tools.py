@@ -13,7 +13,7 @@ prevent.
 """
 
 from retail_agent.agent.capture import TurnCapture
-from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.memory import build_memory_tools
 from retail_agent.config import Settings
 from retail_agent.knowledge.seeds import SEED_TRIOS
@@ -22,6 +22,39 @@ from retail_agent.safety.pii import PiiPolicy
 from retail_agent.store.definitions import InMemoryDefinitionStore
 from retail_agent.store.reports import InMemoryReportStore
 from retail_agent.store.preferences import InMemoryPreferenceStore
+
+
+def _runtime():
+    """A `ToolRuntime` good enough to call a tool's raw `.func` directly.
+
+    The framework only injects a real one when a tool runs through
+    `agent.invoke`; calling `.func` here bypasses that machinery entirely, so
+    the test has to build one itself. Six of `ToolRuntime`'s nine fields are
+    required — `tools`, `execution_info` and `server_info` have defaults.
+    """
+    from langchain.tools import ToolRuntime
+
+    return ToolRuntime(
+        state=None,
+        context=TurnContext(user_id="dana", session_id="s1"),
+        config={},
+        stream_writer=None,
+        tool_call_id="test",
+        store=None,
+    )
+
+
+def _bound(tools):
+    """Every tool's `.func`, pre-bound to this file's identity.
+
+    Calling `.func` directly bypasses `BaseTool.run` and the runtime
+    injection that goes with it, so every call site would otherwise need its
+    own `runtime=` argument. Binding it once here keeps every existing call
+    site unchanged.
+    """
+    import functools
+
+    return {t.name: functools.partial(t.func, runtime=_runtime()) for t in tools}
 
 
 def tools_for(question, trios=(), dense=None):
@@ -38,7 +71,7 @@ def tools_for(question, trios=(), dense=None):
         dense=dense,
     )
     capture = TurnCapture(user_id="dana", session_id="s1", question=question)
-    return {t.name: t.func for t in build_memory_tools(deps, capture)}, deps, capture
+    return _bound(build_memory_tools(deps, capture)), deps, capture
 
 
 def test_a_quoted_preference_is_saved_in_the_users_own_words():
@@ -125,7 +158,7 @@ def test_a_store_failure_costs_the_preference_not_the_turn():
             raise RuntimeError("postgres is down")
 
     object.__setattr__(deps, "preferences", Broken())
-    tools = {t.name: t.func for t in build_memory_tools(deps, capture)}
+    tools = _bound(build_memory_tools(deps, capture))
 
     answer = tools["note_preference"]("keep answers brief", "keep it brief")
 
@@ -204,7 +237,7 @@ def test_a_definition_store_failure_costs_the_memory_not_the_turn():
             raise RuntimeError("postgres is down")
 
     object.__setattr__(deps, "definitions", Broken())
-    tools = {t.name: t.func for t in build_memory_tools(deps, capture)}
+    tools = _bound(build_memory_tools(deps, capture))
 
     answer = tools["remember_definition"]("loyal", "three orders")
 
@@ -320,8 +353,8 @@ def test_one_turn_runs_retrieval_once_however_many_places_ask():
         "How many loyal customers do we have?", SEED_TRIOS, dense=Dense()
     )
 
-    settled_meanings(deps, capture)
-    settled_meanings(deps, capture)
+    settled_meanings(deps, capture, user_id="dana")
+    settled_meanings(deps, capture, user_id="dana")
 
     assert len(calls) == 1
 
@@ -337,11 +370,11 @@ def test_a_definition_stored_during_the_pause_is_seen_after_it():
 
     _, deps, capture = tools_for("report on 10 LGB customers")
 
-    before = settled_meanings(deps, capture)
+    before = settled_meanings(deps, capture, user_id="dana")
     deps.definitions.remember(
         user_id="dana", term="lgb", definition="low gross basket"
     )
-    after = settled_meanings(deps, capture)
+    after = settled_meanings(deps, capture, user_id="dana")
 
     assert "lgb" not in before
     assert after["lgb"] == "low gross basket"

@@ -40,12 +40,17 @@ def _runtime():
     `agent.invoke`; calling `.func` here bypasses that machinery entirely, so
     the test has to build one itself. Six of `ToolRuntime`'s nine fields are
     required — `tools`, `execution_info` and `server_info` have defaults.
+
+    `context` carries the same identity `subagents_for` gives its capture, so
+    a tool reading `runtime.context.user_id` sees the same executive a tool
+    still reading `capture.user_id` would.
     """
     from langchain.tools import ToolRuntime
+    from retail_agent.agent.deps import TurnContext
 
     return ToolRuntime(
         state=None,
-        context=None,
+        context=TurnContext(user_id="exec", session_id="s1"),
         config={},
         stream_writer=None,
         tool_call_id="test",
@@ -162,7 +167,7 @@ def test_the_report_writer_is_shown_how_analysts_here_write(make_deps):
     writer, capture = subagents_for(deps)
     capture.record_definitions(["trio-loyal"])
 
-    writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue")
+    writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue", runtime=_runtime())
 
     assert "Loyalty is measured over a rolling year." in deps.llm.prompts[0]
 
@@ -172,7 +177,7 @@ def test_a_report_with_no_trio_behind_it_still_writes(make_deps):
     deps = make_deps(script=["## Summary\nRevenue rose."])
     writer, _ = subagents_for(deps)
 
-    assert writer["report_writer"]("Revenue rose 4%.", title="Q1 Revenue")
+    assert writer["report_writer"]("Revenue rose 4%.", title="Q1 Revenue", runtime=_runtime())
 
 
 def test_the_report_writer_runs_through_the_provider_chain(make_deps):
@@ -193,7 +198,7 @@ def test_the_report_writer_runs_through_the_provider_chain(make_deps):
     object.__setattr__(deps, "llm_fallbacks", [deps.llm])
     writer, _ = subagents_for(deps)
 
-    receipt = writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue")
+    receipt = writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue", runtime=_runtime())
 
     # The receipt itself carries no report text (see test_report_tools.py) —
     # what this test needs is proof the tool-less compile path produced a
@@ -207,7 +212,7 @@ def test_the_report_writer_cannot_reach_the_data(make_deps):
     deps = make_deps(script=["## Summary\nRevenue rose."])
     writer, _ = subagents_for(deps)
 
-    writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue")
+    writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue", runtime=_runtime())
 
     assert "Revenue rose" in deps.reports.list_reports(owner_id="exec")[0].body
     assert deps.llm.bound_tools == []

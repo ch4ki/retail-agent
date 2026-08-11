@@ -9,15 +9,39 @@ import pandas as pd
 import pytest
 
 from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.tools import EMPTY_HINT, GuardRejection, build_analyst_tools
 from retail_agent.datasources.base import QuerySyntaxError
 
 from .conftest import FakeSource
 
 
+def _runtime():
+    """A `ToolRuntime` good enough to call a tool's raw `.func` directly.
+
+    Calling `.func` bypasses `BaseTool.run` and the runtime injection that
+    goes with it, so the test has to build one itself.
+    """
+    from langchain.tools import ToolRuntime
+
+    return ToolRuntime(
+        state=None,
+        context=TurnContext(user_id="exec", session_id="s1"),
+        config={},
+        stream_writer=None,
+        tool_call_id="test",
+        store=None,
+    )
+
+
 def tools_for(deps):
+    import functools
+
     capture = TurnCapture(user_id="exec", session_id="s1", question="q")
-    by_name = {t.name: t.func for t in build_analyst_tools(deps, capture)}
+    by_name = {
+        t.name: functools.partial(t.func, runtime=_runtime())
+        for t in build_analyst_tools(deps, capture)
+    }
     return by_name, capture
 
 

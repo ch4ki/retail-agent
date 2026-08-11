@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 
+from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, tool
 
 from retail_agent.agent.capture import TurnCapture
@@ -69,7 +70,7 @@ def build_analyst_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]
     """
 
     @tool
-    def run_sql(sql: str) -> str:
+    def run_sql(sql: str, runtime: ToolRuntime) -> str:
         """Run a read-only BigQuery query against theLook and return the rows.
 
         Write exactly one SELECT statement. Do not add a LIMIT; one is applied
@@ -120,7 +121,7 @@ def build_analyst_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]
             return _render(frame)
 
     @tool
-    def lookup_definitions(question: str) -> str:
+    def lookup_definitions(question: str, runtime: ToolRuntime) -> str:
         """Look up how the business defines the terms in a question.
 
         Use this when a term's meaning is a business decision rather than a
@@ -164,7 +165,9 @@ def recall(deps: AgentDeps, question: str) -> list:
         return []
 
 
-def settled_meanings(deps: AgentDeps, capture: TurnCapture) -> dict[str, str]:
+def settled_meanings(
+    deps: AgentDeps, capture: TurnCapture, *, user_id: str
+) -> dict[str, str]:
     """Every definition already in play this turn, as term → meaning.
 
     The agreed corpus for this question, then whatever this executive has
@@ -198,7 +201,7 @@ def settled_meanings(deps: AgentDeps, capture: TurnCapture) -> dict[str, str]:
     found = capture.recalled_trios
     capture.record_definitions([trio.id for trio in found])
     merged = dict(agreed_definitions(found))
-    merged.update(all_definitions(deps.definitions, capture.user_id))
+    merged.update(all_definitions(deps.definitions, user_id))
     return merged
 
 

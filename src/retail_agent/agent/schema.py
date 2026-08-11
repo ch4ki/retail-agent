@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 
+from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, tool
 
 from retail_agent.agent.capture import TurnCapture
@@ -31,7 +32,7 @@ def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """
 
     @tool
-    def describe_schema() -> str:
+    def describe_schema(runtime: ToolRuntime) -> str:
         """Describe the data available: tables, columns and what they support.
 
         Runs no query and costs nothing. Use this for questions about what can

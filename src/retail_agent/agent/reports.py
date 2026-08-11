@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import uuid
 
+from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, tool
 from langgraph.types import interrupt
 
@@ -34,7 +35,12 @@ def confirmation_token(count: int) -> str:
 
 
 def resolve_delete(
-    deps: AgentDeps, capture: TurnCapture, *, term: str, session_scoped: bool
+    deps: AgentDeps,
+    *,
+    user_id: str,
+    session_id: str,
+    term: str,
+    session_scoped: bool,
 ) -> PendingDelete | None:
     """What a delete would take, resolved read-only.
 
@@ -45,9 +51,9 @@ def resolve_delete(
     delete; the ids that actually get removed come back in the resume value.
     """
     targets = deps.reports.resolve(
-        owner_id=capture.user_id,
+        owner_id=user_id,
         term=term or None,
-        session_id=capture.session_id if session_scoped else None,
+        session_id=session_id if session_scoped else None,
     )
     if not targets:
         return None
@@ -77,10 +83,10 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """The library tools, bound to one turn's owner and session."""
 
     @tool
-    def list_reports() -> str:
+    def list_reports(runtime: ToolRuntime) -> str:
         """List the reports this executive has saved."""
         with capture.step("list_reports") as step:
-            saved = deps.reports.list_reports(owner_id=capture.user_id)
+            saved = deps.reports.list_reports(owner_id=runtime.context.user_id)
             step.detail = f"{len(saved)} report(s)"
             if not saved:
                 return "You have no saved reports yet."
@@ -90,7 +96,9 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             )
 
     @tool
-    def delete_reports(term: str = "", session_scoped: bool = False) -> str:
+    def delete_reports(
+        runtime: ToolRuntime, term: str = "", session_scoped: bool = False
+    ) -> str:
         """Delete saved reports. Destructive, and confirmed with the user first.
 
         `term` selects reports whose text mentions it — leave it empty only if
@@ -102,7 +110,11 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             # so this runs a second time — which is why its result decides only
             # whether to ask and what to show, never what to remove.
             pending = resolve_delete(
-                deps, capture, term=term, session_scoped=session_scoped
+                deps,
+                user_id=runtime.context.user_id,
+                session_id=runtime.context.session_id,
+                term=term,
+                session_scoped=session_scoped,
             )
             if pending is None:
                 described = f" mentioning '{term}'" if term else ""
@@ -124,7 +136,7 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             # Ids and token from the resume value, not from `pending`: what the
             # executive approved is what goes, whatever the replay re-resolved.
             deleted = deps.reports.soft_delete(
-                owner_id=capture.user_id,
+                owner_id=runtime.context.user_id,
                 report_ids=tuple(decision["report_ids"]),
                 action_id=pending.action_id,
                 token=decision["token"],

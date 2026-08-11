@@ -19,6 +19,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.supervisor import build_agent
 from retail_agent.knowledge.seeds import SEED_TRIOS
 from retail_agent.store.definitions import InMemoryDefinitionStore, all_definitions
@@ -49,13 +50,31 @@ def straight_to_analysis(question=QUESTION):
     ]
 
 
+def context_for(capture: TurnCapture) -> TurnContext:
+    """The runtime context matching a `TurnCapture`'s own identity.
+
+    The tools now read identity from `runtime.context`, which `invoke` never
+    fills in unless the caller passes it — so both the initial invoke and
+    every resume below have to carry it, the same as `cli/chat.py` does.
+    """
+    return TurnContext(
+        user_id=capture.user_id,
+        session_id=capture.session_id,
+        turn_id=capture.turn_id,
+    )
+
+
 def start(deps, question=QUESTION, arm=True, script=None):
     capture = TurnCapture(user_id="exec", session_id="s1", question=question)
     agent = build_agent(
         deps, capture, checkpointer=MemorySaver(), pause_for_definitions=arm
     )
     config = {"configurable": {"thread_id": "s1"}}
-    result = agent.invoke({"messages": [{"role": "user", "content": question}]}, config)
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": question}]},
+        config,
+        context=context_for(capture),
+    )
     return agent, config, capture, result
 
 
@@ -165,9 +184,11 @@ def test_approving_lets_the_analyst_run_in_the_same_turn(make_deps):
     source = FakeSource(frames={"default": pd.DataFrame({"id": [1]})})
     deps = make_deps(script=asking(), src=source, definitions=definitions)
 
-    agent, config, _, _ = start(deps)
+    agent, config, capture, _ = start(deps)
     result = agent.invoke(
-        Command(resume={"answers": {"LGB": "low gross basket"}}), config
+        Command(resume={"answers": {"LGB": "low gross basket"}}),
+        config,
+        context=context_for(capture),
     )
 
     assert not paused(result)
@@ -180,8 +201,12 @@ def test_the_answer_reaches_the_model_that_asked(make_deps):
     definitions = InMemoryDefinitionStore()
     deps = make_deps(script=asking(), definitions=definitions)
 
-    agent, config, _, _ = start(deps)
-    agent.invoke(Command(resume={"answers": {"LGB": "low gross basket"}}), config)
+    agent, config, capture, _ = start(deps)
+    agent.invoke(
+        Command(resume={"answers": {"LGB": "low gross basket"}}),
+        config,
+        context=context_for(capture),
+    )
 
     assert any("low gross basket" in prompt for prompt in deps.llm.prompts)
 
@@ -255,9 +280,11 @@ def test_the_tool_writes_the_definition_the_executive_gave(make_deps):
     definitions = InMemoryDefinitionStore()
     deps = make_deps(script=asking(), definitions=definitions)
 
-    agent, config, _, _ = start(deps)
+    agent, config, capture, _ = start(deps)
     result = agent.invoke(
-        Command(resume={"answers": {"LGB": "low gross basket"}}), config
+        Command(resume={"answers": {"LGB": "low gross basket"}}),
+        config,
+        context=context_for(capture),
     )
 
     assert not paused(result)
@@ -271,7 +298,9 @@ def test_a_declined_term_is_recorded_as_assumed(make_deps):
     deps = make_deps(script=asking(), definitions=definitions)
 
     agent, config, capture, _ = start(deps)
-    agent.invoke(Command(resume={"answers": {}}), config)
+    agent.invoke(
+        Command(resume={"answers": {}}), config, context=context_for(capture)
+    )
 
     assert "LGB" in capture.assumed_terms
     assert all_definitions(definitions, "exec") == {}
@@ -306,7 +335,7 @@ def test_cancelling_a_later_term_keeps_an_earlier_terms_answer(make_deps):
     # the CLI's cancel path, distinct from the numbered hand-back option.
     console = FakeConsole(["the 10 highest by revenue", ""])
     resume = _settle_definitions(console, deps, capture, {"terms": ["top", "LGB"]})
-    result = agent.invoke(Command(resume=resume), config)
+    result = agent.invoke(Command(resume=resume), config, context=context_for(capture))
 
     assert not paused(result)
     kept = all_definitions(definitions, "exec")

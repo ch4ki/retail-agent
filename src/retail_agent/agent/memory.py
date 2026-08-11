@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 
+from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, tool
 from langgraph.types import interrupt
 
@@ -87,7 +88,7 @@ def build_memory_tools(
     """Bound to one turn, because both tools write against its user."""
 
     @tool
-    def remember_definition(term: str, definition: str) -> str:
+    def remember_definition(term: str, definition: str, runtime: ToolRuntime) -> str:
         """Record what a business term means for this executive.
 
         Call this when they tell you — for example "loyal means three or more
@@ -104,7 +105,7 @@ def build_memory_tools(
 
             try:
                 deps.definitions.remember(
-                    user_id=capture.user_id,
+                    user_id=runtime.context.user_id,
                     term=term.strip().lower(),
                     definition=definition.strip()[:MAX_DEFINITION_CHARS],
                 )
@@ -121,7 +122,7 @@ def build_memory_tools(
             )
 
     @tool
-    def ask_for_definitions(terms: list[str]) -> str:
+    def ask_for_definitions(terms: list[str], runtime: ToolRuntime) -> str:
         """Ask the executive what a business term means, before querying.
 
         Use this when the question turns on a word whose meaning is a business
@@ -136,7 +137,7 @@ def build_memory_tools(
         with capture.step("ask_for_definitions") as step:
             # The same lookup and the same partition the CLI's gate used to do,
             # now in the one place that needs the answer.
-            known = settled_meanings(deps, capture)
+            known = settled_meanings(deps, capture, user_id=runtime.context.user_id)
             settled, still_open = partition_terms(known, terms)
 
             # Only pause if the answer can be kept: without a store the agent
@@ -150,7 +151,7 @@ def build_memory_tools(
                 for term, meaning in answers.items():
                     try:
                         deps.definitions.remember(
-                            user_id=capture.user_id,
+                            user_id=runtime.context.user_id,
                             term=term.strip().lower(),
                             definition=meaning.strip()[:MAX_DEFINITION_CHARS],
                         )
@@ -176,7 +177,7 @@ def build_memory_tools(
             return "\n\n".join(parts) or "There was nothing to settle."
 
     @tool
-    def note_preference(preference: str, evidence: str) -> str:
+    def note_preference(preference: str, evidence: str, runtime: ToolRuntime) -> str:
         """Record how this executive wants answers written.
 
         `preference` is the request in plain words — "keep answers under three
@@ -200,7 +201,9 @@ def build_memory_tools(
 
             note = " ".join(preference.split())
             try:
-                outcome = add_note(deps.preferences, user_id=capture.user_id, note=note)
+                outcome = add_note(
+                    deps.preferences, user_id=runtime.context.user_id, note=note
+                )
             except Exception as err:
                 log.warning("could not save the preference %r (%s)", note, err)
                 step.detail = f"failed: {err}"
@@ -218,7 +221,7 @@ def build_memory_tools(
             return f"Saved: {note}. I will follow that from now on. Apply it now."
 
     @tool
-    def forget_preference(preference: str) -> str:
+    def forget_preference(preference: str, runtime: ToolRuntime) -> str:
         """Drop a preference this executive no longer wants.
 
         Pass the saved wording as closely as you can; the match ignores case and
@@ -241,7 +244,7 @@ def build_memory_tools(
                     (
                         existing
                         for existing in deps.preferences.list_notes(
-                            user_id=capture.user_id
+                            user_id=runtime.context.user_id
                         )
                         if " ".join(existing.split()).lower() == note.lower()
                     ),
@@ -251,7 +254,9 @@ def build_memory_tools(
                     step.detail = "no match"
                     return f"Nothing saved matching {note!r}; nothing changed."
 
-                remove_note(deps.preferences, user_id=capture.user_id, note=stored)
+                remove_note(
+                    deps.preferences, user_id=runtime.context.user_id, note=stored
+                )
             except Exception as err:
                 log.warning("could not forget the preference %r (%s)", note, err)
                 step.detail = f"failed: {err}"

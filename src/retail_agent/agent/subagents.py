@@ -79,7 +79,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             # Everything this executive has ever defined, not a lookup of terms
             # picked out of the question. Nothing picks terms out of a question
             # any more, and the whole set costs one read.
-            known = all_definitions(deps.definitions, capture.user_id)
+            known = all_definitions(deps.definitions, runtime.context.user_id)
             # Written by `ask_for_definitions` when nobody was there to answer.
             # Read rather than recomputed: this subagent no longer decides what
             # is unsettled, so the only honest source is what actually happened
@@ -111,7 +111,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
 
     @tool
     def report_writer(
-        brief: str, title: str, show_to_executive: bool = True
+        brief: str, title: str, runtime: ToolRuntime, show_to_executive: bool = True
     ) -> str:
         """Write a report from findings, save it, and show it to the executive.
 
@@ -149,8 +149,8 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             # conversation that produced it, by people who were not in it.
             scanned = scan_text(message_text(reply))
             report = deps.reports.save(
-                owner_id=capture.user_id,
-                session_id=capture.session_id,
+                owner_id=runtime.context.user_id,
+                session_id=runtime.context.session_id,
                 title=title or "Untitled report",
                 body=scanned.text,
             )
@@ -170,7 +170,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             )
 
     @tool
-    def ask_about_report(report_id: str, question: str) -> str:
+    def ask_about_report(report_id: str, question: str, runtime: ToolRuntime) -> str:
         """Answer a question about a report the executive has saved.
 
         Use this for anything about an existing report — what it concluded,
@@ -182,7 +182,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             # Owner-scoped by the store's own query, so an id guessed or
             # carried over from another session reads nothing.
             report = deps.reports.get(
-                owner_id=capture.user_id, report_id=report_id
+                owner_id=runtime.context.user_id, report_id=report_id
             )
             if report is None:
                 step.detail = f"no report {report_id}"
