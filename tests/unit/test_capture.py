@@ -84,13 +84,15 @@ def test_a_step_is_timed_even_when_it_raises():
 
 
 def test_the_trace_carries_the_attempts_and_no_rows():
-    capture = TurnCapture(user_id="exec", session_id="s1", question="how many?")
+    capture = TurnCapture(question="how many?")
     capture.record_attempt(
         "SELECT 1", executed_sql="SELECT 1", frame=frame(email=["a@b.com"]),
         bytes_billed=2_000,
     )
 
-    trace = capture.to_trace("There is one.")
+    trace = capture.to_trace(
+        "There is one.", user_id="exec", session_id="s1", turn_id="t1"
+    )
 
     assert trace.owner_id == "exec"
     assert trace.bytes_billed == 2_000
@@ -102,12 +104,14 @@ def test_the_trace_carries_what_actually_changed_the_answer():
     """Which definitions were consulted, which terms the agent decided for
     itself, and what it wrote down. The turn accumulated all three and `to_trace`
     dropped them, so `/trace` could not report the reasons for its own number."""
-    capture = TurnCapture(user_id="exec", question="who is loyal?")
+    capture = TurnCapture(question="who is loyal?")
     capture.record_definitions(["trio-loyalty"])
     capture.record_assumptions(["loyal"])
     capture.preference_changes.append(("added", "show prices in euros"))
 
-    trace = capture.to_trace("Nine of them.")
+    trace = capture.to_trace(
+        "Nine of them.", user_id="exec", session_id="s1", turn_id="t1"
+    )
 
     assert trace.trios == ["trio-loyalty"]
     assert trace.assumptions == ["loyal"]
@@ -116,7 +120,9 @@ def test_the_trace_carries_what_actually_changed_the_answer():
 
 def test_a_long_answer_is_truncated_in_the_trace():
     """A trace is for debugging, not a second copy of every report."""
-    trace = TurnCapture().to_trace("x" * 10_000)
+    trace = TurnCapture().to_trace(
+        "x" * 10_000, user_id="exec", session_id="s1", turn_id="t1"
+    )
 
     assert len(trace.answer) == 4_000
 
@@ -124,7 +130,7 @@ def test_a_long_answer_is_truncated_in_the_trace():
 def test_a_written_report_is_kept_with_its_exact_body():
     """The CLI prints this copy rather than anything the model produced, so a
     byte that changes here is a byte that differs from what was stored."""
-    capture = TurnCapture(user_id="exec")
+    capture = TurnCapture()
     body = "## Summary\nDenim fell in Q1.\n"
 
     capture.record_report("7f3a", "Q1 Denim", body, show=True)
@@ -139,7 +145,7 @@ def test_a_written_report_is_kept_with_its_exact_body():
 
 def test_writing_a_report_is_a_report_operation():
     """`save_report` used to be what marked these turns; it no longer exists."""
-    capture = TurnCapture(user_id="exec")
+    capture = TurnCapture()
     with capture.step("report_writer"):
         pass
 
@@ -155,10 +161,12 @@ def test_context_tokens_default_to_zero():
 def test_report_ids_reach_the_trace_but_bodies_do_not():
     """A trace must not become a second disclosure path, and a deep dive still
     needs to find which report a turn produced."""
-    capture = TurnCapture(user_id="exec")
+    capture = TurnCapture()
     capture.record_report("7f3a", "Q1 Denim", "Revenue was $412,880.", show=True)
 
-    trace = capture.to_trace("Written and saved.")
+    trace = capture.to_trace(
+        "Written and saved.", user_id="exec", session_id="s1", turn_id="t1"
+    )
 
     assert trace.report_ids == ["7f3a"]
     assert "412,880" not in repr(trace)
@@ -177,3 +185,18 @@ def test_the_capture_carries_no_interrupt_coordination():
 
     assert "pending" not in names
     assert "pending_definition" not in names
+
+
+def test_the_capture_carries_no_identity():
+    """Identity is fixed for a run and set by the caller, so it belongs in
+    runtime context, not on the object the tools accumulate into. A2b moves
+    what remains here into graph state."""
+    from dataclasses import fields
+
+    from retail_agent.agent.capture import TurnCapture
+
+    names = {f.name for f in fields(TurnCapture)}
+
+    assert "user_id" not in names
+    assert "session_id" not in names
+    assert "turn_id" not in names

@@ -107,7 +107,7 @@ def test_trace_before_any_turn_explains_itself():
 
 def test_the_trace_shows_every_attempt_and_the_query_that_ran():
     console = recorder()
-    capture = TurnCapture(user_id="dana", session_id="s1", question="how many?")
+    capture = TurnCapture(question="how many?")
     capture.record_attempt("SELECT *", violations=("SELECT * is not allowed.",))
     capture.record_attempt(
         "SELECT n FROM t",
@@ -118,7 +118,9 @@ def test_the_trace_shows_every_attempt_and_the_query_that_ran():
     with capture.step("run_sql") as step:
         step.detail = "1 row(s)"
 
-    render_trace(console, capture.to_trace("One."))
+    render_trace(
+        console, capture.to_trace("One.", user_id="dana", session_id="s1", turn_id="t1")
+    )
 
     printed = text(console)
     assert "SELECT * is not allowed." in printed
@@ -131,9 +133,12 @@ def test_the_trace_shows_the_answer_it_stored():
     """Stored, truncated and read back, then never shown. `/trace <id>` on an
     older turn could say what ran but not what was said."""
     console = recorder()
-    capture = TurnCapture(user_id="dana", question="how many?")
+    capture = TurnCapture(question="how many?")
 
-    render_trace(console, capture.to_trace("Nine customers."))
+    render_trace(
+        console,
+        capture.to_trace("Nine customers.", user_id="dana", session_id="s1", turn_id="t1"),
+    )
 
     assert "Nine customers." in text(console)
 
@@ -142,9 +147,12 @@ def test_a_turn_that_called_no_tool_says_so_rather_than_printing_an_empty_table(
     """Easy to reach on a follow-up the model answers from the conversation.
     Headers with nothing under them read as a broken renderer."""
     console = recorder()
-    capture = TurnCapture(user_id="dana", question="and the month before?")
+    capture = TurnCapture(question="and the month before?")
 
-    render_trace(console, capture.to_trace("It was 11."))
+    render_trace(
+        console,
+        capture.to_trace("It was 11.", user_id="dana", session_id="s1", turn_id="t1"),
+    )
 
     printed = text(console)
     assert "no tools" in printed
@@ -153,14 +161,17 @@ def test_a_turn_that_called_no_tool_says_so_rather_than_printing_an_empty_table(
 
 def test_the_trace_names_the_definitions_used_and_the_terms_assumed():
     console = recorder()
-    capture = TurnCapture(user_id="dana", question="who is loyal?")
+    capture = TurnCapture(question="who is loyal?")
     capture.record_definitions(["trio-loyalty"])
     capture.record_assumptions(["loyal"])
     capture.preference_changes.append(("answer_format", "bullets"))
     with capture.step("analyst") as step:
         step.detail = "1 trio(s)"
 
-    render_trace(console, capture.to_trace("Nine."))
+    render_trace(
+        console,
+        capture.to_trace("Nine.", user_id="dana", session_id="s1", turn_id="t1"),
+    )
 
     printed = text(console)
     assert "trio-loyalty" in printed

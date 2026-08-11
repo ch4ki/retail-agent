@@ -29,8 +29,8 @@ def deps_with(preferences):
     )
 
 
-def capture_for(user_id="dana"):
-    return TurnCapture(user_id=user_id, session_id="s1", question="how are sales?")
+def capture_for():
+    return TurnCapture(question="how are sales?")
 
 
 def test_the_supervisor_prompt_carries_the_users_notes():
@@ -39,7 +39,7 @@ def test_the_supervisor_prompt_carries_the_users_notes():
     preferences = InMemoryPreferenceStore()
     add_note(preferences, user_id="dana", note="show prices in euros")
 
-    prompt = supervisor_system_prompt(deps_with(preferences), capture_for())
+    prompt = supervisor_system_prompt(deps_with(preferences), user_id="dana")
 
     assert "show prices in euros" in prompt
 
@@ -47,7 +47,7 @@ def test_the_supervisor_prompt_carries_the_users_notes():
 def test_a_user_with_no_notes_gets_no_empty_heading():
     """A heading with nothing under it is noise the model has to read past."""
     prompt = supervisor_system_prompt(
-        deps_with(InMemoryPreferenceStore()), capture_for()
+        deps_with(InMemoryPreferenceStore()), user_id="dana"
     )
 
     assert "has asked for" not in prompt
@@ -58,7 +58,7 @@ def test_one_users_notes_never_reach_another_users_prompt():
     preferences = InMemoryPreferenceStore()
     add_note(preferences, user_id="dana", note="show prices in euros")
 
-    prompt = supervisor_system_prompt(deps_with(preferences), capture_for("sam"))
+    prompt = supervisor_system_prompt(deps_with(preferences), user_id="sam")
 
     assert "euros" not in prompt
 
@@ -70,7 +70,7 @@ def test_a_broken_store_still_produces_a_prompt():
         def list_notes(self, **_):
             raise RuntimeError("postgres is down")
 
-    prompt = supervisor_system_prompt(deps_with(Broken()), capture_for())
+    prompt = supervisor_system_prompt(deps_with(Broken()), user_id="dana")
 
     assert prompt, "the turn goes ahead without the notes"
 
@@ -97,3 +97,21 @@ def test_a_user_with_no_notes_gets_a_report_writer_prompt_with_no_dangling_tail(
 
     assert not prompt.endswith("\n"), "no dangling separator where the block was"
     assert not prompt.endswith(" "), "no dangling separator where the block was"
+
+
+def test_the_prompt_takes_the_user_it_is_written_for():
+    """`supervisor_system_prompt` used to read `capture.user_id`. It is not a
+    tool, so `ToolRuntime` does not reach it — but `ModelRequest` carries a
+    `runtime`, so the dynamic-prompt closure can pass the context's user in.
+
+    Taking it as a parameter is also what lets this be tested without building
+    a capture, which is why the function was split out of the closure at all.
+    """
+    import inspect
+
+    from retail_agent.agent.middleware import supervisor_system_prompt
+
+    parameters = inspect.signature(supervisor_system_prompt).parameters
+
+    assert "user_id" in parameters
+    assert "capture" not in parameters

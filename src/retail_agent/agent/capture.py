@@ -17,7 +17,6 @@ would silently attribute case 4's rows to case 3 the moment that changed.
 from __future__ import annotations
 
 import time
-import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -78,10 +77,7 @@ class TurnCapture:
     the user never actually typed.
     """
 
-    user_id: str = ""
-    session_id: str = ""
     question: str = ""
-    turn_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     frame: MaskedFrame | None = None
     executed_sql: str = ""
@@ -210,16 +206,24 @@ class TurnCapture:
             return "schema"
         return "chat"
 
-    def to_trace(self, answer: str) -> TraceRecord:
+    def to_trace(
+        self, answer: str, *, user_id: str, session_id: str, turn_id: str
+    ) -> TraceRecord:
         """Everything already masked, and no row values.
 
         `frame` is the only place row values live and it is not among the
         fields, so a trace cannot become a second disclosure path.
+
+        `user_id`, `session_id` and `turn_id` are parameters rather than
+        fields: identity is fixed for a run and set by the caller, so it lives
+        on `TurnContext` now. The caller reads it off `runtime.context` (or,
+        for a turn that died before the recorder middleware ran, off the same
+        `TurnContext` the turn was invoked with) and passes it through here.
         """
         return TraceRecord(
-            turn_id=self.turn_id,
-            session_id=self.session_id,
-            owner_id=self.user_id,
+            turn_id=turn_id,
+            session_id=session_id,
+            owner_id=user_id,
             question=self.question,
             intent=self.intent,
             status=self.status,

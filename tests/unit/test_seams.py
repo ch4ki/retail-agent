@@ -96,7 +96,7 @@ def test_a_generated_report_reaches_the_eval():
     from retail_agent.agent.capture import TurnCapture
     from retail_agent.agent.seams import answer_from_capture
 
-    capture = TurnCapture(user_id="eval", session_id="s1")
+    capture = TurnCapture()
     capture.record_report("7f3a", "Q1 Denim", "## Summary\nDenim fell.", show=True)
 
     answer = answer_from_capture("Written and saved.", capture)

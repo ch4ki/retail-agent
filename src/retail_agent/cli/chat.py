@@ -379,13 +379,15 @@ def _undo(console, deps, user) -> None:
 def _answer(console, deps, saver, user, session_id, question):
     """Run one turn. Always returns its trace, including when it fails.
 
-    A fresh agent and a fresh capture per turn: both close over the turn's
-    identity, and the persona and preferences are read per model call, so
-    rebuilding costs nothing and rules out a stale binding.
+    A fresh agent and a fresh capture per turn, and a fresh `TurnContext` with
+    a freshly minted `turn_id` — nothing else mints one now that identity has
+    left `TurnCapture`. The persona and preferences are read per model call,
+    so rebuilding costs nothing and rules out a stale binding.
     """
-    capture = TurnCapture(user_id=user, session_id=session_id, question=question)
+    capture = TurnCapture(question=question)
     config = {"configurable": {"thread_id": session_id}}
-    context = TurnContext(user_id=user, session_id=session_id, turn_id=capture.turn_id)
+    turn_id = uuid.uuid4().hex[:12]
+    context = TurnContext(user_id=user, session_id=session_id, turn_id=turn_id)
 
     try:
         # Inside the guard, not above it: assembling the agent reads the persona
@@ -418,14 +420,14 @@ def _answer(console, deps, saver, user, session_id, question):
         render_error(
             console,
             describe_llm_error(err, provider=deps.settings.llm_provider),
-            turn_id=capture.turn_id,
+            turn_id=context.turn_id,
         )
         # The recorder middleware is an `after_agent` hook and never runs when
         # the agent raises, so this is the only place a failed turn can be
         # written down. Without it the id above resolved to nothing and `/trace`
         # went on describing whichever turn last succeeded — the wrong question,
         # with no sign it was the wrong question.
-        return _record_failure(deps, capture)
+        return _record_failure(deps, capture, context)
 
     answer = final_text(result)
     render_answer(console, answer, capture, prefs=preferred(deps.preferences, user))
@@ -440,19 +442,33 @@ def _answer(console, deps, saver, user, session_id, question):
         console.print(f"[dim]Saved {field} = {value} as your default. /prefs to change it.[/dim]")
     # The trace was written by the recorder middleware, on every path out. This
     # is the same record, kept so `/trace` needs no round trip to storage.
-    return capture.to_trace(answer)
+    return capture.to_trace(
+        answer,
+        user_id=context.user_id,
+        session_id=context.session_id,
+        turn_id=context.turn_id,
+    )
 
 
-def _record_failure(deps, capture):
+def _record_failure(deps, capture, context):
     """The trace for a turn that died. Never raises.
 
     `failed` rather than left at `ok`: `self_correction_rate` counts a repaired
     turn as recovered only when it ended `ok`, so a turn that fixed its SQL and
     then died must not count as a self-correction that worked. That ratio is the
     only thing reading `status` now, and it is why the field survived `degraded`.
+
+    Takes the `TurnContext` the turn was invoked with: identity lives there
+    now, not on `capture`, and a turn that died before the recorder ran still
+    needs its `user_id`/`session_id`/`turn_id` for the trace.
     """
     capture.status = "failed"
-    trace = capture.to_trace("")
+    trace = capture.to_trace(
+        "",
+        user_id=context.user_id,
+        session_id=context.session_id,
+        turn_id=context.turn_id,
+    )
     try:
         deps.traces.record(trace)
     except Exception as err:

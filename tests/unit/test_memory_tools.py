@@ -70,7 +70,7 @@ def tools_for(question, trios=(), dense=None):
         trios=list(trios),
         dense=dense,
     )
-    capture = TurnCapture(user_id="dana", session_id="s1", question=question)
+    capture = TurnCapture(question=question)
     return _bound(build_memory_tools(deps, capture)), deps, capture
 
 

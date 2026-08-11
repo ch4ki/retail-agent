@@ -29,7 +29,7 @@ LOYAL = Trio(
 
 
 def subagents_for(deps, question="who are our loyal customers?"):
-    capture = TurnCapture(user_id="exec", session_id="s1", question=question)
+    capture = TurnCapture(question=question)
     return {t.name: t.func for t in build_subagents(deps, capture)}, capture
 
 
@@ -41,9 +41,10 @@ def _runtime():
     the test has to build one itself. Six of `ToolRuntime`'s nine fields are
     required — `tools`, `execution_info` and `server_info` have defaults.
 
-    `context` carries the same identity `subagents_for` gives its capture, so
-    a tool reading `runtime.context.user_id` sees the same executive a tool
-    still reading `capture.user_id` would.
+    `context` carries the same `user_id`/`session_id` used elsewhere in this
+    file's fixtures, so a tool reading `runtime.context.user_id` sees the same
+    executive throughout — identity lives only on `TurnContext` now, not on
+    the capture `subagents_for` builds alongside it.
     """
     from langchain.tools import ToolRuntime
     from retail_agent.agent.deps import TurnContext

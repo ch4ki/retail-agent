@@ -50,22 +50,20 @@ def straight_to_analysis(question=QUESTION):
     ]
 
 
-def context_for(capture: TurnCapture) -> TurnContext:
-    """The runtime context matching a `TurnCapture`'s own identity.
+def context_for(user_id: str = "exec", session_id: str = "s1", turn_id: str = "t1") -> TurnContext:
+    """The runtime context for a test's identity.
 
-    The tools now read identity from `runtime.context`, which `invoke` never
+    The tools read identity from `runtime.context`, which `invoke` never
     fills in unless the caller passes it — so both the initial invoke and
     every resume below have to carry it, the same as `cli/chat.py` does.
+    Supplied directly rather than read off a `TurnCapture`, which no longer
+    carries it.
     """
-    return TurnContext(
-        user_id=capture.user_id,
-        session_id=capture.session_id,
-        turn_id=capture.turn_id,
-    )
+    return TurnContext(user_id=user_id, session_id=session_id, turn_id=turn_id)
 
 
 def start(deps, question=QUESTION, arm=True, script=None):
-    capture = TurnCapture(user_id="exec", session_id="s1", question=question)
+    capture = TurnCapture(question=question)
     agent = build_agent(
         deps, capture, checkpointer=MemorySaver(), pause_for_definitions=arm
     )
@@ -73,7 +71,7 @@ def start(deps, question=QUESTION, arm=True, script=None):
     result = agent.invoke(
         {"messages": [{"role": "user", "content": question}]},
         config,
-        context=context_for(capture),
+        context=context_for(),
     )
     return agent, config, capture, result
 
@@ -188,7 +186,7 @@ def test_approving_lets_the_analyst_run_in_the_same_turn(make_deps):
     result = agent.invoke(
         Command(resume={"answers": {"LGB": "low gross basket"}}),
         config,
-        context=context_for(capture),
+        context=context_for(),
     )
 
     assert not paused(result)
@@ -205,7 +203,7 @@ def test_the_answer_reaches_the_model_that_asked(make_deps):
     agent.invoke(
         Command(resume={"answers": {"LGB": "low gross basket"}}),
         config,
-        context=context_for(capture),
+        context=context_for(),
     )
 
     assert any("low gross basket" in prompt for prompt in deps.llm.prompts)
@@ -284,7 +282,7 @@ def test_the_tool_writes_the_definition_the_executive_gave(make_deps):
     result = agent.invoke(
         Command(resume={"answers": {"LGB": "low gross basket"}}),
         config,
-        context=context_for(capture),
+        context=context_for(),
     )
 
     assert not paused(result)
@@ -299,7 +297,7 @@ def test_a_declined_term_is_recorded_as_assumed(make_deps):
 
     agent, config, capture, _ = start(deps)
     agent.invoke(
-        Command(resume={"answers": {}}), config, context=context_for(capture)
+        Command(resume={"answers": {}}), config, context=context_for()
     )
 
     assert "LGB" in capture.assumed_terms
@@ -335,7 +333,7 @@ def test_cancelling_a_later_term_keeps_an_earlier_terms_answer(make_deps):
     # the CLI's cancel path, distinct from the numbered hand-back option.
     console = FakeConsole(["the 10 highest by revenue", ""])
     resume = _settle_definitions(console, deps, capture, {"terms": ["top", "LGB"]})
-    result = agent.invoke(Command(resume=resume), config, context=context_for(capture))
+    result = agent.invoke(Command(resume=resume), config, context=context_for())
 
     assert not paused(result)
     kept = all_definitions(definitions, "exec")

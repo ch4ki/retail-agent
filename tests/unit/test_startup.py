@@ -193,7 +193,14 @@ def _fake_deps(monkeypatch):
 def test_each_run_gets_its_own_capture(_fake_deps, monkeypatch):
     """The defect this replaces: one capture shared by every Studio thread, so
     two conversations wrote their events, reports and pending approvals into
-    the same object."""
+    the same object.
+
+    `TurnCapture` no longer carries a `session_id` to tell the two runs'
+    captures apart by value (identity moved to `TurnContext`, set by whoever
+    calls `.invoke` against the graph this returns), so object identity is
+    now the only thing this test can check — which is also the only thing
+    the defect it replaces was ever really about.
+    """
     studio = _fake_deps
 
     seen = []
@@ -205,22 +212,6 @@ def test_each_run_gets_its_own_capture(_fake_deps, monkeypatch):
     studio.make_graph({"configurable": {"thread_id": "thread-b"}})
 
     assert seen[0] is not seen[1]
-    assert (seen[0].session_id, seen[1].session_id) == ("thread-a", "thread-b")
-
-
-def test_the_user_comes_from_the_config_when_given(_fake_deps, monkeypatch):
-    studio = _fake_deps
-
-    seen = []
-    monkeypatch.setattr(
-        studio, "build_agent", lambda deps, capture, **kw: seen.append(capture)
-    )
-
-    studio.make_graph({"configurable": {"thread_id": "t", "user_id": "regional-3"}})
-    studio.make_graph({"configurable": {"thread_id": "t"}})
-
-    assert seen[0].user_id == "regional-3"
-    assert seen[1].user_id == "studio", "the default when nothing identifies the caller"
 
 
 def test_the_expensive_dependencies_are_built_once(_fake_deps, monkeypatch):

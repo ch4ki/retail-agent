@@ -86,14 +86,20 @@ def build_studio_graph(
     credentials — the drift that broke Studio was invisible precisely because
     nothing could construct it in a test.
 
-    `user_id`/`session_id` seed the `TurnCapture` this compiled agent closes
-    over, which only labels the trace now — see `make_graph`. Whoever calls
-    `.invoke`/`.ainvoke` on the graph this returns must still pass
-    `context=TurnContext(user_id=...)` for any tool to act as anyone.
+    `user_id`/`session_id` are accepted but unused now: identity moved off
+    `TurnCapture` entirely — `to_trace` reads it from parameters, not `self` —
+    and this function never invokes the graph it builds, so there is no
+    `runtime.context` here to put them on either. They stay on the signature,
+    and `make_graph` keeps resolving them from `configurable`, only because a
+    real per-caller Studio identity needs the two-parameter `ServerRuntime`
+    form this codebase does not build against yet — see `make_graph`.
+    Whoever calls `.invoke`/`.ainvoke` on the graph this returns must still
+    pass `context=TurnContext(user_id=...)` for any tool to act as anyone,
+    and for the trace to say who.
     """
     return build_agent(
         _deps(llm=llm, source=source),
-        TurnCapture(user_id=user_id, session_id=session_id),
+        TurnCapture(),
     )
 
 
@@ -104,20 +110,21 @@ def make_graph(config):
     factory by its signature, and a second parameter would be read as a
     `ServerRuntime`.
 
-    `user_id` comes from `configurable` rather than from an authenticated
-    identity, and it only labels the trace this run produces
-    (`TurnCapture.to_trace`, still read from the closed-over capture) — no
-    tool acts as it. Tool-facing identity is a property of the *run*, not of
-    how this graph was built: every identity-scoped tool now reads
-    `runtime.context.user_id`, which comes from `context=TurnContext(...)` on
-    the `invoke`/`ainvoke` call the caller makes against the graph this
-    returns, not from anything resolved here. `supervisor_middleware`'s
-    `before_agent` hook refuses to start a turn whose context is missing or
-    carries an empty `user_id`, so a caller of this graph still has to supply
-    one — just not through `configurable`. Real per-user attribution for the
-    trace label needs the two-parameter `ServerRuntime` form and auth
-    configured behind it; neither exists yet, and `"studio"` is the honest
-    default until they do.
+    `user_id` is read from `configurable` and threaded through to
+    `build_studio_graph`, but nothing acts on it any more — not a tool, and
+    not the trace either, now that `TurnCapture.to_trace` takes identity as
+    parameters instead of reading `self`. Tool-facing identity, and the trace
+    label, are both a property of the *run*, not of how this graph was built:
+    every identity-scoped tool (and the recorder middleware that writes the
+    trace) reads `runtime.context.user_id`, which comes from
+    `context=TurnContext(...)` on the `invoke`/`ainvoke` call the caller makes
+    against the graph this returns, not from anything resolved here.
+    `supervisor_middleware`'s `before_agent` hook refuses to start a turn
+    whose context is missing or carries an empty `user_id`, so a caller of
+    this graph still has to supply one — just not through `configurable`.
+    Real per-user attribution — reading `configurable` at all — needs the
+    two-parameter `ServerRuntime` form and auth configured behind it; neither
+    exists yet, and `"studio"` is the honest default until they do.
     """
     configurable = (config or {}).get("configurable", {})
     return build_studio_graph(

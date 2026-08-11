@@ -22,15 +22,20 @@ from retail_agent.store.preferences import InMemoryPreferenceStore, add_note
 from .conftest import FakeSource
 
 
+# The fixed id every `run()` call mints its `TurnContext` with — a test's own
+# stand-in for the caller doing the minting, now that `TurnCapture` no longer
+# does. Constant rather than random: each test's `traces` store is fresh, so
+# there is nothing for two turns sharing it to collide on.
+TURN_ID = "t1"
+
+
 def run(deps, question, user="exec"):
-    capture = TurnCapture(user_id=user, session_id="s1", question=question)
+    capture = TurnCapture(question=question)
     agent = build_agent(deps, capture, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [{"role": "user", "content": question}]},
         {"configurable": {"thread_id": "s1"}},
-        context=TurnContext(
-            user_id=user, session_id="s1", turn_id=capture.turn_id
-        ),
+        context=TurnContext(user_id=user, session_id="s1", turn_id=TURN_ID),
     )
     return final_text(result), capture
 
@@ -45,7 +50,7 @@ def test_a_turn_with_no_context_fails_loudly(make_deps):
     from retail_agent.agent.middleware import MissingTurnIdentity
 
     deps = make_deps(script=["Hello."])
-    capture = TurnCapture(user_id="exec", session_id="s1", question="hello")
+    capture = TurnCapture(question="hello")
     agent = build_agent(deps, capture, checkpointer=MemorySaver())
 
     with pytest.raises(MissingTurnIdentity):
@@ -62,7 +67,7 @@ def test_a_turn_with_an_empty_user_id_fails_the_same_way(make_deps):
     from retail_agent.agent.middleware import MissingTurnIdentity
 
     deps = make_deps(script=["Hello."])
-    capture = TurnCapture(user_id="exec", session_id="s1", question="hello")
+    capture = TurnCapture(question="hello")
     agent = build_agent(deps, capture, checkpointer=MemorySaver())
 
     with pytest.raises(MissingTurnIdentity):
@@ -126,7 +131,7 @@ def test_every_turn_leaves_a_trace(make_deps, traces):
 
     answer, capture = run(deps, "what was revenue?")
 
-    stored = traces.get(owner_id="exec", turn_id=capture.turn_id)
+    stored = traces.get(owner_id="exec", turn_id=TURN_ID)
     assert stored is not None
     assert stored.intent == "analyze"
     assert stored.question == "what was revenue?"
@@ -153,7 +158,7 @@ def test_a_trace_carries_no_row_values(make_deps, traces):
 
     _, capture = run(deps, "list customers")
 
-    stored = traces.get(owner_id="exec", turn_id=capture.turn_id)
+    stored = traces.get(owner_id="exec", turn_id=TURN_ID)
     assert "a@b.com" not in str(stored)
 
 
@@ -320,12 +325,12 @@ async def test_an_async_turn_falls_over_too(make_deps):
     deps = make_deps(script=["Hello."])
     dead = with_dead_primary(deps, attempts=1)
 
-    capture = TurnCapture(user_id="exec", session_id="s1", question="hello")
+    capture = TurnCapture(question="hello")
     agent = build_agent(deps, capture, checkpointer=MemorySaver())
     result = await agent.ainvoke(
         {"messages": [{"role": "user", "content": "hello"}]},
         {"configurable": {"thread_id": "s1"}},
-        context=TurnContext(user_id="exec", session_id="s1", turn_id=capture.turn_id),
+        context=TurnContext(user_id="exec", session_id="s1", turn_id="t1"),
     )
 
     assert final_text(result) == "Hello."

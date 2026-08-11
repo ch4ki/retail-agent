@@ -72,7 +72,8 @@ def ask_once(
     measuring memory rather than analysis.
     """
     session = f"eval-{uuid.uuid4().hex[:8]}"
-    capture = TurnCapture(user_id=user, session_id=session, question=question)
+    turn_id = uuid.uuid4().hex[:12]
+    capture = TurnCapture(question=question)
     if usage is not None:
         usage.reset()
 
@@ -84,7 +85,7 @@ def ask_once(
     result = agent.invoke(
         {"messages": [{"role": "user", "content": question}]},
         config=config,
-        context=TurnContext(user_id=user, session_id=session, turn_id=capture.turn_id),
+        context=TurnContext(user_id=user, session_id=session, turn_id=turn_id),
     )
 
     # A turn paused for a delete confirmation never produces a number. Recorded

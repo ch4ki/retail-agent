@@ -37,7 +37,7 @@ def _runtime():
 def tools_for(deps):
     import functools
 
-    capture = TurnCapture(user_id="exec", session_id="s1", question="q")
+    capture = TurnCapture(question="q")
     by_name = {
         t.name: functools.partial(t.func, runtime=_runtime())
         for t in build_analyst_tools(deps, capture)

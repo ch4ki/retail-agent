@@ -38,27 +38,24 @@ def _runtime_with(context):
     )
 
 
-def context_for(capture: TurnCapture) -> TurnContext:
-    """The runtime context matching a `TurnCapture`'s own identity.
+def context_for(user_id: str = "exec", session_id: str = "s1", turn_id: str = "t1") -> TurnContext:
+    """The runtime context for a test's identity.
 
     Used everywhere a test drives a compiled agent through `agent.invoke`
-    directly: the tools now read identity from `runtime.context`, which
-    `invoke` never fills in unless the caller passes it, so a test that omits
-    it would have every identity-scoped tool see an empty user rather than
-    the one the fixtures set up.
+    directly: the tools read identity from `runtime.context`, which `invoke`
+    never fills in unless the caller passes it, so a test that omits it would
+    have every identity-scoped tool see an empty user rather than the one the
+    fixtures set up. Identity is supplied directly here rather than read off a
+    `TurnCapture` — `TurnCapture` no longer carries it.
     """
-    return TurnContext(
-        user_id=capture.user_id,
-        session_id=capture.session_id,
-        turn_id=capture.turn_id,
-    )
+    return TurnContext(user_id=user_id, session_id=session_id, turn_id=turn_id)
 
 
 def writer(deps, capture):
     func = {t.name: t.func for t in build_subagents(deps, capture)}["report_writer"]
 
     def call(**kwargs):
-        return func(runtime=_runtime_with(context_for(capture)), **kwargs)
+        return func(runtime=_runtime_with(context_for()), **kwargs)
 
     return call
 
@@ -75,14 +72,14 @@ def saved(reports):
 
 
 def run(deps, question, saver=None):
-    capture = TurnCapture(user_id="exec", session_id="s1", question=question)
+    capture = TurnCapture(question=question)
     saver = saver or MemorySaver()
     agent = build_agent(deps, capture, checkpointer=saver)
     config = {"configurable": {"thread_id": "s1"}}
     result = agent.invoke(
         {"messages": [{"role": "user", "content": question}]},
         config,
-        context=context_for(capture),
+        context=context_for(),
     )
     return agent, capture, config, result
 
@@ -129,7 +126,7 @@ def test_approving_deletes_exactly_what_was_shown(make_deps, saved):
             }
         ),
         config,
-        context=context_for(capture),
+        context=context_for(),
     )
 
     remaining = [r.title for r in saved.list_reports(owner_id="exec")]
@@ -159,7 +156,7 @@ def test_a_paused_delete_traces_exactly_one_event(make_deps, saved):
             }
         ),
         config,
-        context=context_for(capture),
+        context=context_for(),
     )
 
     delete_events = [e for e in capture.events if e[0] == "delete_reports"]
@@ -175,7 +172,7 @@ def test_rejecting_leaves_the_library_alone(make_deps, saved):
     agent, capture, config, _ = run(deps, "delete all reports mentioning Acme")
 
     agent.invoke(
-        Command(resume={"approved": False}), config, context=context_for(capture)
+        Command(resume={"approved": False}), config, context=context_for()
     )
 
     assert len(saved.list_reports(owner_id="exec")) == 2
@@ -197,7 +194,7 @@ def test_a_deletion_can_be_undone(make_deps, saved):
             }
         ),
         config,
-        context=context_for(capture),
+        context=context_for(),
     )
 
     assert saved.undo(owner_id="exec") == 1
@@ -218,11 +215,11 @@ def test_the_manifest_names_every_report_and_the_token_scales(make_deps, saved):
 def test_a_delete_cannot_reach_another_owner(make_deps, saved):
     """Ownership is a WHERE clause in the store, not a check in the agent."""
     deps = make_deps(script=[[("delete_reports", {"term": "Acme"})], "None."])
-    capture = TurnCapture(user_id="someone-else", session_id="s1", question="q")
+    capture = TurnCapture(question="q")
     tools = {t.name: t.func for t in build_report_tools(deps, capture)}
 
     answer = tools["delete_reports"](
-        runtime=_runtime_with(context_for(capture)), term="Acme"
+        runtime=_runtime_with(context_for(user_id="someone-else")), term="Acme"
     )
 
     assert "no reports" in answer.lower()
@@ -238,7 +235,7 @@ def test_the_model_never_receives_the_report_it_wrote(make_deps):
         "## Action items\n1. Audit Texas."
     )
     deps = make_deps(script=[body])
-    capture = TurnCapture(user_id="exec", session_id="s1")
+    capture = TurnCapture()
 
     receipt = writer(deps, capture)(brief="denim findings", title="Q1 Denim")
 
@@ -252,7 +249,7 @@ def test_what_is_stored_is_what_the_writer_produced(make_deps, reports):
     rather than a hope."""
     body = "## Summary\nDenim fell in Q1."
     deps = make_deps(script=[body])
-    capture = TurnCapture(user_id="exec", session_id="s1")
+    capture = TurnCapture()
 
     writer(deps, capture)(brief="denim findings", title="Q1 Denim")
 
@@ -267,7 +264,7 @@ def test_a_report_is_scanned_when_it_is_written_not_when_it_is_saved(
     """A report shown but never saved used to reach the executive unscanned,
     because the only scan lived inside `save_report`."""
     deps = make_deps(script=["Reach Dana at dana@example.com about this."])
-    capture = TurnCapture(user_id="exec", session_id="s1")
+    capture = TurnCapture()
 
     writer(deps, capture)(brief="contacts", title="Contacts")
 
@@ -279,7 +276,7 @@ def test_the_show_flag_is_carried_to_the_cli(make_deps):
     """The model decides whether the executive asked to read this; the CLI only
     obeys."""
     deps = make_deps(script=["## Summary\nA draft."])
-    capture = TurnCapture(user_id="exec", session_id="s1")
+    capture = TurnCapture()
 
     writer(deps, capture)(brief="b", title="T", show_to_executive=False)
 
@@ -290,7 +287,7 @@ def test_a_short_headerless_report_still_leaks_nothing(make_deps):
     """The adversarial shape. An excerpt-based receipt returned this whole body
     verbatim — a report short enough to fit in the receipt is still a report."""
     deps = make_deps(script=["Denim fell 11.8% in Q1. Texas drove it."])
-    capture = TurnCapture(user_id="exec", session_id="s1")
+    capture = TurnCapture()
 
     receipt = writer(deps, capture)(brief="b", title="T")
 
@@ -312,7 +309,7 @@ def asker(deps, capture):
     func = {t.name: t.func for t in build_subagents(deps, capture)}["ask_about_report"]
 
     def call(**kwargs):
-        return func(runtime=_runtime_with(context_for(capture)), **kwargs)
+        return func(runtime=_runtime_with(context_for()), **kwargs)
 
     return call
 
@@ -327,7 +324,7 @@ def test_a_report_is_answered_from_its_stored_body(make_deps, reports):
         body="## Action items\n1. Audit Texas inventory depth.",
     )
     deps = make_deps(script=["Audit Texas inventory depth."])
-    capture = TurnCapture(user_id="exec", session_id="s1")
+    capture = TurnCapture()
 
     answer = asker(deps, capture)(report_id=saved.id, question="what were the actions?")
 
@@ -342,7 +339,7 @@ def test_another_users_report_is_not_readable(make_deps, reports):
         owner_id="someone-else", session_id="s9", title="Theirs", body="Secret."
     )
     deps = make_deps(script=[])
-    capture = TurnCapture(user_id="exec", session_id="s1")
+    capture = TurnCapture()
 
     answer = asker(deps, capture)(report_id=saved.id, question="what does it say?")
 
@@ -354,7 +351,7 @@ def test_a_missing_report_costs_no_model_call(make_deps):
     """An empty script raises if the subagent is built, so this asserts the
     early return rather than the wording."""
     deps = make_deps(script=[])
-    capture = TurnCapture(user_id="exec", session_id="s1")
+    capture = TurnCapture()
 
     answer = asker(deps, capture)(report_id="nope", question="?")
 
@@ -387,7 +384,7 @@ def test_a_transient_failure_while_writing_the_report_is_survived(
     base = make_deps(script=["## Summary\nDenim fell in Q1."])
     flaky = _FlakyOnce(base.llm)
     deps = replace(base, llm=flaky)
-    capture = TurnCapture(user_id="exec", session_id="s1")
+    capture = TurnCapture()
 
     writer(deps, capture)(brief="denim findings", title="Q1 Denim")
 
@@ -403,14 +400,14 @@ def test_a_report_added_between_prompt_and_approval_is_not_deleted(
     the resume value precisely so the replay cannot widen the blast radius."""
     deps = make_deps(script=[[("delete_reports", {"term": "Q1"})], "Deleted."])
     saver = MemorySaver()
-    capture = TurnCapture(user_id="exec", session_id="s1", question="delete the Q1 reports")
+    capture = TurnCapture(question="delete the Q1 reports")
     agent = build_agent(deps, capture, checkpointer=saver)
     config = {"configurable": {"thread_id": "s1"}}
 
     result = agent.invoke(
         {"messages": [{"role": "user", "content": "delete the Q1 reports"}]},
         config,
-        context=context_for(capture),
+        context=context_for(),
     )
     payload = result["__interrupt__"][0].value
     shown = list(payload["report_ids"])
@@ -423,7 +420,7 @@ def test_a_report_added_between_prompt_and_approval_is_not_deleted(
     agent.invoke(
         Command(resume={"approved": True, "report_ids": shown, "token": payload["token"]}),
         config,
-        context=context_for(capture),
+        context=context_for(),
     )
 
     surviving = {r.title for r in reports.list_reports(owner_id="exec")}
@@ -457,7 +454,7 @@ def test_a_transient_failure_while_answering_about_a_report_is_survived(
     base = make_deps(script=["Audit Texas inventory depth."])
     flaky = _FlakyOnce(base.llm)
     deps = replace(base, llm=flaky)
-    capture = TurnCapture(user_id="exec", session_id="s1")
+    capture = TurnCapture()
 
     answer = asker(deps, capture)(report_id=saved.id, question="what were the actions?")
 

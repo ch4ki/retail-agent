@@ -33,7 +33,7 @@ def tuned(deps, settings, **overrides):
 
 
 def stack(deps):
-    return supervisor_middleware(deps, TurnCapture(user_id="exec"))
+    return supervisor_middleware(deps, TurnCapture())
 
 
 def test_the_summariser_never_runs_before_pii_redaction(make_deps, settings):
@@ -103,7 +103,7 @@ def test_a_shared_capture_follows_the_turns_actual_question(make_deps):
     capture at each turn's last human message and drops the stale retrieval."""
     from retail_agent.agent.middleware import _turn_sync
 
-    capture = TurnCapture(user_id="studio", question="")
+    capture = TurnCapture(question="")
     capture.recalled_trios = []
 
     sync = _turn_sync(capture)
@@ -123,7 +123,7 @@ def test_the_sync_hook_leaves_a_per_turn_capture_alone(make_deps):
     replayed tool body reads it."""
     from retail_agent.agent.middleware import _turn_sync
 
-    capture = TurnCapture(user_id="exec", question="How many loyal customers?")
+    capture = TurnCapture(question="How many loyal customers?")
     capture.recalled_trios = ["kept"]
 
     sync = _turn_sync(capture)
@@ -139,7 +139,7 @@ def test_the_recorder_measures_the_thread_it_just_finished(make_deps):
     """The threshold in Settings was set against a number nothing measured.
     This is that number."""
     deps = make_deps()
-    capture = TurnCapture(user_id="exec")
+    capture = TurnCapture()
     recorder = _recorder(deps, capture)
     state = {
         "messages": [
@@ -148,7 +148,10 @@ def test_the_recorder_measures_the_thread_it_just_finished(make_deps):
         ]
     }
 
-    recorder.after_agent(state, None)
+    # `_recorder` now reads identity off `runtime.context` to build the trace,
+    # so this can no longer pass `None` for the `runtime` argument the way it
+    # did when the capture carried its own identity.
+    recorder.after_agent(state, _runtime("exec"))
 
     assert capture.context_tokens > 0
     assert deps.traces.recent(owner_id="exec")[0].context_tokens == capture.context_tokens

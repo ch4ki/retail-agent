@@ -119,7 +119,7 @@ def supervisor_middleware(
     deps: AgentDeps, capture: TurnCapture
 ) -> list[AgentMiddleware]:
     """The stack that bounds the turn."""
-    stack: list[AgentMiddleware] = [_turn_sync(capture), _prompt(deps, capture), *_pii()]
+    stack: list[AgentMiddleware] = [_turn_sync(capture), _prompt(deps), *_pii()]
 
     # After `_pii()`, and that placement is the guarantee rather than a
     # preference. Both hook `before_model` and those run in list order; the
@@ -212,12 +212,16 @@ def describe_failure(error: Exception, request: object) -> str | None:
     return None
 
 
-def supervisor_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
+def supervisor_system_prompt(deps: AgentDeps, *, user_id: str) -> str:
     """The supervisor's system prompt for one model call.
 
     A plain function rather than only the closure below, because this is the
     part with a decision in it — what gets appended and when — and a test of it
     should not have to build a `ModelRequest` to ask.
+
+    Takes `user_id` rather than a `TurnCapture`: identity lives on
+    `TurnContext` now, and this is not a tool, so `ToolRuntime` never reaches
+    it. `_prompt`'s closure is what has a `runtime` to read it from.
     """
     prompt = SUPERVISOR_PROMPT.format(
         persona=active_body(deps.personas) or PERSONA_DEFAULT,
@@ -226,11 +230,11 @@ def supervisor_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
     # Appended only when there is something to append: a user with no notes
     # should get the same prompt as before this feature existed, not the same
     # prompt with two blank lines welded to the end.
-    block = preference_block(notes_for(deps.preferences, capture.user_id))
+    block = preference_block(notes_for(deps.preferences, user_id))
     return f"{prompt}\n\n{block}" if block else prompt
 
 
-def _prompt(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
+def _prompt(deps: AgentDeps) -> AgentMiddleware:
     """The supervisor's system prompt, assembled per model call.
 
     Per call rather than at build time, and that is not a detail. The persona is
@@ -241,7 +245,7 @@ def _prompt(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
 
     @dynamic_prompt
     def supervisor_prompt(request) -> str:
-        return supervisor_system_prompt(deps, capture)
+        return supervisor_system_prompt(deps, user_id=request.runtime.context.user_id)
 
     return supervisor_prompt
 
@@ -346,8 +350,16 @@ def _recorder(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
         message = _last_ai_message(state)
         answer = message_text(message).strip() if message is not None else ""
 
+        context = runtime.context
         try:
-            deps.traces.record(capture.to_trace(answer))
+            deps.traces.record(
+                capture.to_trace(
+                    answer,
+                    user_id=context.user_id,
+                    session_id=context.session_id,
+                    turn_id=context.turn_id,
+                )
+            )
         except Exception as err:
             # Losing a trace should not lose the answer it describes.
             log.warning("could not record the trace (%s)", err)
