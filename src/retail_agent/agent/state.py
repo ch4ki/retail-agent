@@ -22,25 +22,59 @@ from typing import Annotated
 from langchain.agents.middleware import AgentState
 
 
+def _keep_last(existing, update):
+    """Last write wins.
+
+    `frame` and `executed_sql` are single-value fields, not accumulators —
+    but a bare field with no reducer at all is `LastValue`, which raises
+    `InvalidUpdateError` the moment two tool calls in the same super-step
+    both write it. Gemini and OpenAI both emit parallel tool calls routinely
+    (three `run_sql` calls in one assistant turn; a supervisor issuing two
+    parallel `analyst` calls), so "only one tool ever runs per step" is not a
+    safe assumption. An explicit reducer — even one that just keeps the
+    newest value — turns that into an ordinary sequential apply instead of a
+    crash.
+    """
+    return update
+
+
+def _dedupe_ordered(existing, update):
+    """Order-preserving union, the way `TurnCapture.record_definitions` and
+    `record_assumptions` did it.
+
+    `operator.add` appends, so the model looking the same term up twice would
+    report it twice — and a forced disclosure that names an assumed term
+    twice in one sentence reads as a mistake, not as thoroughness. A trace
+    should report what was consulted, not how often.
+    """
+    result = list(existing)
+    for item in update:
+        if item not in result:
+            result.append(item)
+    return result
+
+
 class TurnState(AgentState):
     """The turn's record, alongside the messages.
 
     The `operator.add` fields accumulate across tool calls; without a reducer
     the second `run_sql` in a turn would replace the first rather than add to
-    it, and the turn would report one query.
+    it, and the turn would report one query. `trio_ids` and `assumed_terms`
+    use `_dedupe_ordered` instead — see its docstring. `frame` and
+    `executed_sql` use `_keep_last` — see its docstring.
     """
 
     attempts: Annotated[list[dict], operator.add]
     events: Annotated[list[dict], operator.add]
-    trio_ids: Annotated[list[str], operator.add]
-    assumed_terms: Annotated[list[str], operator.add]
+    trio_ids: Annotated[list[str], _dedupe_ordered]
+    assumed_terms: Annotated[list[str], _dedupe_ordered]
     preference_changes: Annotated[list[dict], operator.add]
     reports_written: Annotated[list[dict], operator.add]
     redactions: Annotated[int, operator.add]
     calls: Annotated[int, operator.add]
     context_tokens: int
-    frame: dict | None
-    executed_sql: str
+    frame: Annotated[dict | None, _keep_last]
+    executed_sql: Annotated[str, _keep_last]
     status: str
 
 

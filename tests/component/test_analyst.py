@@ -350,3 +350,128 @@ def test_three_queries_accumulate_three_attempts(make_deps):
 
     assert [a["step_id"] for a in result["attempts"]] == ["q1", "q2", "q3"]
     assert [a["sql"] for a in result["attempts"]] == ["SELECT 1", "SELECT 2", "SELECT 3"]
+
+
+def test_two_parallel_run_sql_calls_in_one_turn_do_not_crash_it(make_deps):
+    """Reproduces the C2 regression: with no reducer on `frame` and
+    `executed_sql`, LangGraph raises `InvalidUpdateError` — "can receive only
+    one value per step" — the instant two tool calls in the same super-step
+    both write one. `ScriptedChatModel`'s script entries are ordinarily one
+    tool call per assistant turn; this one is two, one round, the shape
+    Gemini and OpenAI both emit routinely and the shape the suite never had.
+    Green here is the whole fix for `frame`/`executed_sql`'s `_keep_last`
+    reducer.
+    """
+    import pandas as pd
+
+    from langchain.agents import create_agent
+
+    from retail_agent.agent.state import TurnState
+    from retail_agent.agent.tools import build_analyst_tools
+    from .conftest import FakeSource
+
+    source = FakeSource(frames={"default": pd.DataFrame({"n": [1]})})
+    deps = make_deps(
+        script=[
+            [
+                ("run_sql", {"sql": "SELECT 1"}),
+                ("run_sql", {"sql": "SELECT 2"}),
+            ],
+            "Two of them.",
+        ],
+        src=source,
+    )
+    agent = create_agent(
+        model=deps.llm,
+        tools=build_analyst_tools(deps),
+        state_schema=TurnState,
+    )
+
+    result = agent.invoke({"messages": [{"role": "user", "content": "how many?"}]})
+
+    assert len(result["attempts"]) == 2
+    assert result["calls"] == 2
+    assert result["frame"] is not None, "one of the two parallel writes survived"
+    assert result["executed_sql"].startswith(("SELECT 1", "SELECT 2"))
+
+
+def test_two_analyst_calls_in_one_turn_do_not_collide_on_step_id(make_deps):
+    """`step_id` used to always start at `q1` inside the analyst's own nested
+    `agent.invoke` — that subgraph's state starts empty every time it is
+    called, so it has no way to know a second `analyst` call is this turn's
+    second query. `[a["step_id"] for a in result.update["attempts"]]` used to
+    read `["q1"]` for both calls; renumbering against the parent turn's own
+    running total (known only at the lift, in `subagents.py`) is what fixes
+    it.
+    """
+    import pandas as pd
+
+    from .conftest import FakeSource
+
+    source = FakeSource(frames={"default": pd.DataFrame({"n": [1]})})
+    deps = make_deps(
+        script=[
+            [("run_sql", {"sql": "SELECT 1"})],
+            "one.",
+            [("run_sql", {"sql": "SELECT 2"})],
+            "two.",
+        ],
+        src=source,
+    )
+    analyst = subagents_for(deps)
+
+    first = analyst["analyst"]("how many orders?", runtime=_runtime())
+    second = analyst["analyst"](
+        "how many customers?",
+        runtime=_runtime(state={"attempts": first.update["attempts"]}),
+    )
+
+    assert [a["step_id"] for a in first.update["attempts"]] == ["q1"]
+    assert [a["step_id"] for a in second.update["attempts"]] == ["q2"]
+
+
+def test_the_analysts_redactions_reach_the_turn(make_deps):
+    """Load-bearing lift, previously untested: without it, `render_answer`'s
+    "N personal-data values masked" footnote, `TraceRecord.redactions` and
+    `compute_metrics`'s masked total all read 0 for every `analyst` turn,
+    because the nested subgraph's `redactions` never left its own state.
+    """
+    import pandas as pd
+
+    from .conftest import FakeSource
+
+    source = FakeSource(
+        frames={"default": pd.DataFrame({"id": [1], "email": ["a@b.com"]})}
+    )
+    deps = make_deps(
+        script=[[("run_sql", {"sql": "SELECT id, email FROM users"})], "one."],
+        src=source,
+    )
+    analyst = subagents_for(deps)
+
+    result = analyst["analyst"]("who are our customers?", runtime=_runtime())
+
+    assert result.update["redactions"] > 0
+
+
+def test_the_analysts_calls_reach_the_turn(make_deps):
+    """Load-bearing lift, previously untested: without `result.get("calls",
+    0) + 1`, `AgentAnswer.calls` undercounts by one per `analyst` call — the
+    nested `run_sql` call the subgraph made is invisible to the parent turn,
+    and only the wrapper's own call is counted.
+    """
+    import pandas as pd
+
+    from .conftest import FakeSource
+
+    source = FakeSource(frames={"default": pd.DataFrame({"n": [1]})})
+    deps = make_deps(
+        script=[[("run_sql", {"sql": "SELECT COUNT(*) AS n FROM users"})], "one."],
+        src=source,
+    )
+    analyst = subagents_for(deps)
+
+    result = analyst["analyst"]("how many customers?", runtime=_runtime())
+
+    # 1 for the nested run_sql call, +1 for the analyst call itself.
+    assert result.update["calls"] == 2

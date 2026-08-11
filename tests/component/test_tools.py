@@ -56,15 +56,41 @@ def _content(command):
     return command.update["messages"][0].content
 
 
+def _sql_failure(deps, sql, state=None):
+    """Drives a failing `run_sql` call through `_SqlFailureRecorder`, the
+    middleware that now does what `TurnCapture.record_attempt` used to do
+    inline, before re-raising.
+
+    `run_sql` itself still just raises on this path — calling `.func`
+    directly, as every other test in this file does, proves that half.
+    Recording only happens one layer up, in the `wrap_tool_call` middleware
+    that sits where `analyst_middleware` puts `_SqlFailureRecorder`, so
+    exercising the recording means building the `ToolCallRequest` that
+    layer receives and calling it the way `ToolNode` would.
+    """
+    from langchain.agents.middleware.types import ToolCallRequest
+
+    from retail_agent.agent.middleware import _SqlFailureRecorder
+
+    tool = build_analyst_tools(deps)[0]  # run_sql
+    request = ToolCallRequest(
+        tool_call={"name": "run_sql", "args": {"sql": sql}, "id": "test"},
+        tool=tool,
+        state=state or {},
+        runtime=_runtime(),
+    )
+
+    def handler(req):
+        return tool.func(req.tool_call["args"]["sql"], runtime=req.runtime)
+
+    return _SqlFailureRecorder().wrap_tool_call(request, handler)
+
+
 def test_a_guard_violation_never_reaches_the_warehouse(make_deps, source):
     """The order matters more than the message: a rejected query must not run.
 
     Asserting on `source.executed` rather than on the exception is deliberate —
     a guard that raised *after* executing would still raise.
-
-    `run_sql` never wrote a rejected attempt anywhere reachable — a raised
-    tool never returns a `Command`, so there is nowhere to record a rejected
-    attempt into `TurnState`; that attempt is simply not recorded.
     """
     deps = make_deps(src=source)
     tools = tools_for(deps)
@@ -73,6 +99,25 @@ def test_a_guard_violation_never_reaches_the_warehouse(make_deps, source):
         tools["run_sql"]("DROP TABLE users")
 
     assert source.executed == []
+
+
+def test_a_guard_violation_is_recorded_by_the_middleware_that_catches_it(
+    make_deps, source
+):
+    """`run_sql` raising is only half the property — `ToolErrorMiddleware`
+    needs the exception, but a rejected query still has to show up in
+    `/trace`. `_SqlFailureRecorder` is the layer that writes it, since
+    `run_sql` itself has no `Command` to write it into on a path that raises.
+    """
+    deps = make_deps(src=source)
+
+    command = _sql_failure(deps, "DROP TABLE users")
+
+    assert source.executed == []
+    assert command.update["attempts"][0]["violations"]
+    assert command.update["attempts"][0]["step_id"] == "q1"
+    assert command.update["calls"] == 1
+    assert "rewrite it" in _content(command).lower()
 
 
 def test_restricted_columns_are_dropped_before_the_model_sees_them(make_deps):
@@ -117,13 +162,14 @@ def test_only_run_sql_reads_the_warehouse(make_deps):
         assert "source.execute" not in body, f"{t.name} queries the warehouse"
 
 
-def test_a_failed_query_is_recorded_and_re_raised(make_deps):
-    """`ToolErrorMiddleware` needs the exception.
-
-    A failed query is not recorded anywhere: a raised tool never returns a
-    `Command`, so that recording has nowhere to go on this path. What remains
-    — the tool still raises, so `ToolErrorMiddleware` still gets the
-    exception it needs — is the part this task's scope actually owns.
+def test_a_failed_query_is_recorded_and_repaired(make_deps):
+    """`run_sql` itself still just raises `QuerySyntaxError` when called
+    directly — that is what lets `_SqlFailureRecorder` (standing where
+    `ToolErrorMiddleware(on_error=describe_failure)` used to sit in
+    `analyst_middleware`) catch it. Driving the same failure through that
+    middleware is what proves the recording: the attempt, the event and the
+    `calls` increment are written, and the model gets a repair message back
+    instead of a dead turn.
     """
     source = FakeSource(frames={"default": pd.DataFrame({"n": [1]})}, failing={"bad"})
     deps = make_deps(src=source)
@@ -132,13 +178,22 @@ def test_a_failed_query_is_recorded_and_re_raised(make_deps):
     with pytest.raises(QuerySyntaxError):
         tools["run_sql"]("SELECT bad FROM users")
 
+    command = _sql_failure(deps, "SELECT bad FROM users")
+
+    assert command.update["attempts"][0]["error"]
+    assert command.update["attempts"][0]["sql"] == "SELECT bad FROM users"
+    assert "frame" not in command.update, "a failed attempt writes no frame"
+    assert command.update["calls"] == 1
+    assert "fix it" in _content(command).lower()
+
 
 def test_the_last_successful_query_is_the_one_kept(make_deps):
     """A turn that fails, repairs and succeeds is scored on the query that ran.
 
-    The failed attempt writes nothing (see
-    `test_a_failed_query_is_recorded_and_re_raised`), so there is only ever
-    one `Command` to inspect here: the second call's. Checking that its
+    Calling `.func` directly, as this does, bypasses `_SqlFailureRecorder`
+    (see `test_a_failed_query_is_recorded_and_repaired` for what that layer
+    records), so the failed call here still just raises and there is only
+    ever one `Command` to inspect: the second call's. Checking that its
     `executed_sql` and `frame` reflect the query that actually ran — not the
     one that failed — is read straight off the tool's own return.
     """

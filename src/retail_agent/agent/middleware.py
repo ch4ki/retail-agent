@@ -21,6 +21,7 @@ the user again on the way back, and act on the resume value directly.
 from __future__ import annotations
 
 import logging
+import time
 
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -35,8 +36,10 @@ from langchain.agents.middleware import (
     dynamic_prompt,
 )
 from langchain.agents.middleware.types import ToolCallRequest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
+from langgraph.errors import GraphBubbleUp
+from langgraph.types import Command
 
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.prompts import (
@@ -45,6 +48,7 @@ from retail_agent.agent.prompts import (
     SAFETY_RULES,
     SUPERVISOR_PROMPT,
 )
+from retail_agent.agent.state import attempt_record, step_event
 from retail_agent.agent.tools import GuardRejection
 from retail_agent.datasources.base import DataSourceError
 from retail_agent.llm.messages import message_text
@@ -111,7 +115,7 @@ def analyst_middleware(deps: AgentDeps) -> list[AgentMiddleware]:
         *_pii(),
         ToolCallLimitMiddleware(tool_name="run_sql", run_limit=sql_budget),
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS, exit_behavior="end"),
-        ToolErrorMiddleware(on_error=describe_failure),
+        _SqlFailureRecorder(),
         *_resilience(deps),
     ]
 
@@ -207,12 +211,101 @@ def describe_failure(error: Exception, request: object) -> str | None:
     `request` is unused but not optional — `OnError` takes two arguments, and a
     one-argument version passes every test that does not call it, then raises
     TypeError against the live provider.
+
+    Used two ways now: by `ToolErrorMiddleware` in `supervisor_middleware`'s
+    stack (for whatever future supervisor tool might raise one of these), and
+    called directly by `_SqlFailureRecorder` below, which needs the same text
+    but has to attach it to a `Command` rather than a bare `ToolMessage`.
     """
     if isinstance(error, GuardRejection):
         return f"The query was rejected before running: {error}. Rewrite it."
     if isinstance(error, DataSourceError):
         return f"The query failed: {error}. Fix it and try again."
     return None
+
+
+class _SqlFailureRecorder(AgentMiddleware):
+    """Turns a rejected or failed `run_sql` call into the turn's record.
+
+    `run_sql` still raises `GuardRejection`/`DataSourceError` exactly as it
+    always has (see their docstrings) — a tool cannot both raise, which is
+    what `describe_failure` needs to explain the failure, and return the
+    `Command` that writes an attempt into `TurnState`, which is what a raise
+    never does. This sits between the two: it lets the tool run, catches
+    exactly the two exception types `describe_failure` already knows how to
+    turn into a repair instruction, and converts each into the same shape a
+    successful call returns — a `Command` carrying the repair `ToolMessage`,
+    the attempt, the event and the `calls` increment — instead of an error
+    that reaches nowhere. Anything else propagates unrecorded, same as
+    before this existed: an internal bug should still kill the turn rather
+    than read as an agent that quietly recovered from it.
+
+    `GuardRejection` and `DataSourceError` are exactly the two types
+    `test_only_run_sql_reads_the_warehouse` guarantees only `run_sql` can
+    raise, so this needs no tool-name filter to stay scoped to it — and it
+    replaces `ToolErrorMiddleware(on_error=describe_failure)` in
+    `analyst_middleware`'s stack rather than sitting alongside it, since
+    nothing else there can raise a type `describe_failure` recognises.
+    """
+
+    def wrap_tool_call(self, request: ToolCallRequest, handler):
+        started = time.perf_counter()
+        try:
+            return handler(request)
+        except GraphBubbleUp:
+            raise
+        except (GuardRejection, DataSourceError) as exc:
+            return _sql_failure_command(request, exc, started)
+
+    async def awrap_tool_call(self, request: ToolCallRequest, handler):
+        started = time.perf_counter()
+        try:
+            return await handler(request)
+        except GraphBubbleUp:
+            raise
+        except (GuardRejection, DataSourceError) as exc:
+            return _sql_failure_command(request, exc, started)
+
+
+def _sql_failure_command(
+    request: ToolCallRequest, exc: Exception, started: float
+) -> Command:
+    """The `Command` a failed or rejected `run_sql` call should have
+    returned, had a raise not been the only way to reach `describe_failure`.
+
+    `sql` comes off the tool call itself — the model's own draft — since
+    `run_sql` had nothing else to attach it to before raising. `executed_sql`
+    and `violations` come off the exception: `run_sql` set them at the point
+    it raised, because only it knows the qualified query or the guard's
+    verdict. `index` reads `request.state`, the analyst subgraph's own
+    running `attempts` — the same count `run_sql`'s success path numbers
+    against — so a rejected first query and a successful second one still
+    read `q1`, `q2` rather than both claiming `q1`.
+    """
+    text = describe_failure(exc, request) or str(exc)
+    state = request.state or {}
+    return Command(
+        update={
+            "messages": [
+                ToolMessage(
+                    content=text,
+                    tool_call_id=request.tool_call["id"],
+                    status="error",
+                )
+            ],
+            "attempts": [
+                attempt_record(
+                    sql=request.tool_call["args"].get("sql", ""),
+                    executed_sql=getattr(exc, "executed_sql", None),
+                    violations=getattr(exc, "violations", None),
+                    error=None if isinstance(exc, GuardRejection) else str(exc),
+                    index=len(state.get("attempts", [])),
+                )
+            ],
+            "events": [step_event("run_sql", started, text)],
+            "calls": 1,
+        }
+    )
 
 
 def supervisor_system_prompt(deps: AgentDeps, *, user_id: str) -> str:

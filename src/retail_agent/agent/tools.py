@@ -25,6 +25,7 @@ from langgraph.types import Command
 
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.state import attempt_record, frame_to_state, step_event
+from retail_agent.datasources.base import DataSourceError
 from retail_agent.knowledge.retrieval import retrieve
 from retail_agent.knowledge.trios import (
     agreed_definitions,
@@ -59,9 +60,15 @@ EMPTY_HINT = (
 class GuardRejection(Exception):
     """The query never ran.
 
-    Carries the violations so `ToolErrorMiddleware` can hand them back to the
-    model, which is what the graph's repair edge did.
+    `run_sql` still raises this rather than returning a `Command` — a tool
+    cannot do both, and the exception is what lets `describe_failure`
+    recognise the failure and `_SqlFailureRecorder` (`middleware.py`) catch
+    it. `violations` is set on the instance, right where it is raised, so
+    that middleware can write the same rejected attempt into `TurnState`
+    that this tool cannot write itself on a path that raises.
     """
+
+    violations: list[str]
 
 
 def build_analyst_tools(deps: AgentDeps) -> list[BaseTool]:
@@ -91,10 +98,20 @@ def build_analyst_tools(deps: AgentDeps) -> list[BaseTool]:
             qualify_with=deps.settings.bq_dataset,
         )
         if not verdict.ok:
-            raise GuardRejection("; ".join(verdict.violations))
+            error = GuardRejection("; ".join(verdict.violations))
+            error.violations = verdict.violations
+            raise error
 
-        deps.source.assert_within_budget(verdict.sql)
-        result = deps.source.execute(verdict.sql)
+        try:
+            deps.source.assert_within_budget(verdict.sql)
+            result = deps.source.execute(verdict.sql)
+        except DataSourceError as err:
+            # `verdict.sql` is only known here — the qualified, limited query
+            # that actually reached the warehouse, not the model's first
+            # draft. `_SqlFailureRecorder` reads it back off the exception to
+            # record the same `executed_sql` a successful attempt would.
+            err.executed_sql = verdict.sql
+            raise
 
         masked, report = mask_dataframe(
             result.rows, deps.policy, salt=deps.settings.pii_salt
@@ -120,7 +137,7 @@ def build_analyst_tools(deps: AgentDeps) -> list[BaseTool]:
                         executed_sql=verdict.sql,
                         row_count=frame.row_count,
                         bytes_billed=result.bytes_billed,
-                        index=len(runtime.state.get("attempts", [])),
+                        index=len((runtime.state or {}).get("attempts", [])),
                     )
                 ],
                 "events": [

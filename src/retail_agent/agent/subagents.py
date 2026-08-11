@@ -118,18 +118,28 @@ def build_subagents(deps: AgentDeps) -> list[BaseTool]:
         # so it lifts every field the nested run produced into the `Command`
         # below, alongside `found`'s own trio ids and this call's own event —
         # the two things only this wrapper, not the nested run, knows about.
+        #
+        # `attempts` is renumbered rather than lifted as-is: the subgraph's
+        # own state starts empty on every nested invoke, so its `run_sql`
+        # calls always number their own `step_id` from `q1` — correct within
+        # one `analyst` call, wrong the moment a turn calls `analyst` twice,
+        # where the second call's queries collide with the first's instead of
+        # continuing `q3, q4…`. Only this lift knows the parent turn's own
+        # running total, so this is the only place that can fix it.
         return Command(
             update={
                 "messages": [
                     ToolMessage(content=answer, tool_call_id=runtime.tool_call_id)
                 ],
-                "attempts": result.get("attempts", []),
+                "attempts": _renumber_attempts(
+                    result.get("attempts", []),
+                    offset=len((runtime.state or {}).get("attempts", [])),
+                ),
                 "events": [
                     *result.get("events", []),
                     step_event("analyst", started, detail),
                 ],
                 "trio_ids": [trio.id for trio in found] + result.get("trio_ids", []),
-                "assumed_terms": result.get("assumed_terms", []),
                 "redactions": result.get("redactions", 0),
                 "calls": result.get("calls", 0) + 1,
                 "frame": result.get("frame"),
@@ -317,6 +327,21 @@ def report_writer_system_prompt(
         examples=style_examples(consulted),
         style=preference_block(notes_for(deps.preferences, user_id)),
     ).strip()
+
+
+def _renumber_attempts(attempts: list[dict], *, offset: int) -> list[dict]:
+    """`attempts` with `step_id` renumbered against the parent turn's count.
+
+    The subagent's own `step_id`s always start at `q1` (see the call site's
+    comment); `offset` is how many the parent turn had already recorded
+    before this `analyst` call started, so the result reads `q{offset+1},
+    q{offset+2}, …` — continuing the turn's own sequence rather than
+    restarting it.
+    """
+    return [
+        {**attempt, "step_id": f"q{offset + index + 1}"}
+        for index, attempt in enumerate(attempts)
+    ]
 
 
 def _definitions(found: list, known: dict[str, str], assumed: list[str]) -> str:

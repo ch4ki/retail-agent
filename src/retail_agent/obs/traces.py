@@ -80,7 +80,7 @@ def trace_from_state(
         owner_id=user_id,
         question=_last_human_text(state.get("messages") or []),
         intent=intent_from_events(events),
-        status=state.get("status") or "ok",
+        status="ok",
         answer=answer[:MAX_ANSWER_CHARS],
         redactions=state.get("redactions", 0),
         bytes_billed=sum(a.get("bytes_billed") or 0 for a in attempts),

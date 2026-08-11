@@ -21,8 +21,6 @@ def test_the_accumulating_fields_have_adding_reducers():
     for field in (
         "attempts",
         "events",
-        "trio_ids",
-        "assumed_terms",
         "preference_changes",
         "reports_written",
         "redactions",
@@ -31,6 +29,42 @@ def test_the_accumulating_fields_have_adding_reducers():
         annotation = hints[field]
         assert get_origin(annotation) is Annotated, f"{field} has no reducer"
         assert get_args(annotation)[1] is operator.add, f"{field}'s reducer is not add"
+
+
+def test_the_consulted_term_fields_dedupe_instead_of_adding():
+    """`trio_ids` and `assumed_terms` report what was consulted, not how often
+    — `operator.add` would report the model looking the same term up twice as
+    two distinct consultations, and a forced disclosure would name an assumed
+    term twice in one sentence."""
+    from retail_agent.agent.state import TurnState, _dedupe_ordered
+
+    hints = get_type_hints(TurnState, include_extras=True)
+
+    for field in ("trio_ids", "assumed_terms"):
+        annotation = hints[field]
+        assert get_origin(annotation) is Annotated, f"{field} has no reducer"
+        assert get_args(annotation)[1] is _dedupe_ordered, (
+            f"{field}'s reducer is not _dedupe_ordered"
+        )
+
+    assert _dedupe_ordered(["loyal"], ["loyal", "top"]) == ["loyal", "top"]
+
+
+def test_the_single_value_fields_keep_the_newest_write():
+    """`frame` and `executed_sql` are not accumulators, but a bare field with
+    no reducer at all raises `InvalidUpdateError` the instant two tool calls
+    in the same super-step both write it — parallel tool calls are routine
+    for both Gemini and OpenAI, so that crash is reachable in production."""
+    from retail_agent.agent.state import TurnState, _keep_last
+
+    hints = get_type_hints(TurnState, include_extras=True)
+
+    for field in ("frame", "executed_sql"):
+        annotation = hints[field]
+        assert get_origin(annotation) is Annotated, f"{field} has no reducer"
+        assert get_args(annotation)[1] is _keep_last, f"{field}'s reducer is not _keep_last"
+
+    assert _keep_last("SELECT 1", "SELECT 2") == "SELECT 2"
 
 
 def test_a_step_event_is_a_dict_of_primitives():
