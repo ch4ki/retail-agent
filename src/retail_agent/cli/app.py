@@ -116,11 +116,30 @@ def run_trios(argv, *, console: Console | None = None, store=None) -> int:
     return 0
 
 
-def _migrate() -> int:
-    console = Console()
+def setup_checkpoint_tables(database_url: str) -> None:
+    """Create LangGraph's checkpoint tables. Idempotent.
+
+    Imported inside the function, not at module scope: `app.py` is deliberately
+    thin so `retail-agent migrate` starts immediately, and `PostgresSaver`
+    pulls in langgraph.
+    """
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    with PostgresSaver.from_conn_string(database_url) as saver:
+        saver.setup()
+
+
+def _migrate(*, console: Console | None = None) -> int:
+    console = console or Console()
     settings = get_settings()
     try:
         revision = run_migrations(settings.database_url)
+        # A separate connection and transaction from the Alembic upgrade above
+        # — `setup_checkpoint_tables` opens and commits its own via
+        # `PostgresSaver.from_conn_string`. If it fails after Alembic already
+        # committed, the schema is left half-migrated, but both halves are
+        # idempotent, so re-running `migrate` repairs it.
+        setup_checkpoint_tables(settings.database_url)
     except Exception as err:
         render_error(
             console,

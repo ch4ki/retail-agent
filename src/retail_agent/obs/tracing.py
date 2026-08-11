@@ -49,10 +49,10 @@ def _invalidate_langsmith_env_cache() -> None:
     before we get here, so the cached miss would win and nothing would be
     traced — while every other signal said tracing was on.
     """
-    try:
-        from langsmith import utils as ls_utils
-    except ImportError:  # langsmith is optional at runtime
-        return
+    # Imported here rather than at module scope so `retail-agent migrate` does
+    # not pay for it. No ImportError guard: langsmith is a declared dependency
+    # now, and a branch no test can reach is worse than no branch.
+    from langsmith import utils as ls_utils
 
     for name in ("get_env_var", "get_tracer_project", "get_host_url"):
         cached = getattr(ls_utils, name, None)
