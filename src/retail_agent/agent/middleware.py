@@ -8,19 +8,22 @@ Which is why this file is one list, built in one place, rather than options
 scattered across call sites.
 
 Two stacks, because the two agents bound different things. The supervisor
-carries the human gate, the persona and the recording; the analyst carries the
-query budget and the repair path.
+carries the persona and the recording; the analyst carries the query budget
+and the repair path. The human gates used to live here too, as a
+`HumanInTheLoopMiddleware` `when` predicate deciding whether to pause. They
+don't any more: a `when` predicate is read-only and cannot touch the store or
+write state, so it could resolve a pause but never answer one. Both gates
+moved into the tool bodies that need the answers — `delete_reports` and
+`ask_for_definitions` call `interrupt()` themselves, resolve what they showed
+the user again on the way back, and act on the resume value directly.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
 
 from langchain.agents.middleware import (
     AgentMiddleware,
-    HumanInTheLoopMiddleware,
-    InterruptOnConfig,
     ModelCallLimitMiddleware,
     ModelFallbackMiddleware,
     ModelRetryMiddleware,
@@ -35,7 +38,7 @@ from langchain.agents.middleware import (
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
-from retail_agent.agent.capture import PendingDefinition, TurnCapture
+from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.prompts import (
     CONVERSATION_SUMMARY_PROMPT,
@@ -43,8 +46,7 @@ from retail_agent.agent.prompts import (
     SAFETY_RULES,
     SUPERVISOR_PROMPT,
 )
-from retail_agent.agent.reports import render_manifest, resolve_delete
-from retail_agent.agent.tools import GuardRejection, partition_terms, settled_meanings
+from retail_agent.agent.tools import GuardRejection
 from retail_agent.datasources.base import DataSourceError
 from retail_agent.llm.messages import message_text
 from retail_agent.llm.resilience import (
@@ -96,17 +98,9 @@ def analyst_middleware(deps: AgentDeps) -> list[AgentMiddleware]:
 
 
 def supervisor_middleware(
-    deps: AgentDeps, capture: TurnCapture, *, pause_for_definitions: bool = False
+    deps: AgentDeps, capture: TurnCapture
 ) -> list[AgentMiddleware]:
-    """The stack that bounds the turn.
-
-    `pause_for_definitions` arms the pause on the `ask_for_definitions` tool.
-    Off by default because a pause needs somebody there to answer it:
-    `seams.ask_once` scores a paused turn as unanswered, and the eval cases that
-    turn on an undefined term are the brief's own examples. Unarmed, the tool
-    still runs — it finds nothing in the store, records the assumption and tells
-    the model to choose and disclose.
-    """
+    """The stack that bounds the turn."""
     stack: list[AgentMiddleware] = [_turn_sync(capture), _prompt(deps, capture), *_pii()]
 
     # After `_pii()`, and that placement is the guarantee rather than a
@@ -119,7 +113,6 @@ def supervisor_middleware(
         stack.append(summarizer)
 
     stack += [
-        _approval_gate(deps, capture, pause_for_definitions=pause_for_definitions),
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS, exit_behavior="end"),
         ToolErrorMiddleware(on_error=describe_failure),
         _recorder(deps, capture),
@@ -260,108 +253,6 @@ def _summarization(deps: AgentDeps) -> AgentMiddleware | None:
     )
 
 
-def _approval_gate(
-    deps: AgentDeps, capture: TurnCapture, *, pause_for_definitions: bool = False
-) -> AgentMiddleware:
-    """The two places a turn stops for a person, as interrupts before the tool.
-
-    Both `when` predicates resolve read-only, without a model call, and park
-    what they found on the capture. That is what makes each one a gate rather
-    than advice: a delete that matches nothing never raises a prompt, a term
-    this executive has already defined never raises one either, and in both
-    cases what the user is shown is exactly what the predicate found.
-
-    What changed with `ask_for_definitions` is which half is deterministic.
-    *Whether* a word needs settling is now the model's judgement, made by
-    calling the tool at all. What survives here is the narrower check that does
-    not need one: whether the answer is already on file.
-    """
-
-    def has_targets(request) -> bool:
-        args = request.tool_call.get("args", {})
-        capture.pending = resolve_delete(
-            deps,
-            capture,
-            term=args.get("term", "") or "",
-            session_scoped=bool(args.get("session_scoped", False)),
-        )
-        return capture.pending is not None
-
-    def describe(tool_call, state, runtime) -> str:
-        return (
-            render_manifest(capture.pending)
-            if capture.pending
-            else "Delete saved reports?"
-        )
-
-    def still_unsettled(request) -> bool:
-        # Only pause if the answer can be kept. Without a store the agent would
-        # ask the same person the same question every turn, which is worse than
-        # assuming and saying so — the bargain the tool's own body makes.
-        if deps.definitions is None:
-            return False
-
-        args = request.tool_call.get("args", {})
-        capture.pending_definition = open_terms(
-            deps, capture, args.get("terms") or []
-        )
-        return capture.pending_definition is not None
-
-    def describe_definition(tool_call, state, runtime) -> str:
-        pending = capture.pending_definition
-        return describe_open_terms(pending.terms) if pending else "A term needs defining."
-
-    interrupt_on: dict[str, InterruptOnConfig] = {
-        "delete_reports": InterruptOnConfig(
-            allowed_decisions=["approve", "reject"],
-            description=describe,
-            when=has_targets,
-        )
-    }
-    if pause_for_definitions:
-        interrupt_on["ask_for_definitions"] = InterruptOnConfig(
-            # `approve` runs the tool body, which reads the answers back out of
-            # the store the CLI just wrote them to. "Decide for me" and "cancel"
-            # are both `reject` with different messages: the body never runs, so
-            # nothing has to rewrite the call's arguments to mean either.
-            allowed_decisions=["approve", "reject"],
-            description=describe_definition,
-            when=still_unsettled,
-        )
-
-    return HumanInTheLoopMiddleware(interrupt_on=interrupt_on, description_prefix="")
-
-
-def open_terms(
-    deps: AgentDeps, capture: TurnCapture, terms: Sequence[str]
-) -> PendingDefinition | None:
-    """Of the words the model asked about, the ones still worth a question.
-
-    The model decides what it does not understand; this decides what has
-    already been answered. Both matter, and only the second can be settled
-    without a model: a term this executive defined last week must not produce
-    the same prompt again, however reasonable the model was to ask.
-
-    Never raises — `settled_meanings` reads through stores that return what
-    they managed to read and a `recall` that answers failure with an empty
-    list, so an unreachable store costs a question that did not need asking,
-    never the turn.
-    """
-    known = settled_meanings(deps, capture)
-    _, still_open = partition_terms(known, terms)
-    return PendingDefinition(terms=tuple(still_open)) if still_open else None
-
-
-def describe_open_terms(terms: Sequence[str]) -> str:
-    """What the pause is about.
-
-    The term alone. There is no gloss to add any more: the words are the
-    executive's own rather than keys of a dict that shipped a description with
-    each one, and `propose` puts concrete candidate meanings under this anyway.
-    """
-    return "\n".join(f"{term!r} has no agreed definition yet" for term in terms)
-
-
 def _turn_sync(capture: TurnCapture) -> AgentMiddleware:
     """Point a long-lived capture at the turn actually being run.
 
@@ -372,8 +263,8 @@ def _turn_sync(capture: TurnCapture) -> AgentMiddleware:
     for the life of the process.
 
     The mid-turn cache is dropped only when the question changed: a resume
-    after the definition pause is the same question, and the gate's retrieval
-    must survive it for the tool body to read.
+    after the definition pause is the same question, and `settled_meanings`'
+    retrieval must survive it for the replayed tool body to read.
     """
 
     @before_agent

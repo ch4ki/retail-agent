@@ -101,8 +101,6 @@ class TurnCapture:
     reports_written: list[WrittenReport]        # bodies included, so the CLI can print them
     context_tokens: int              # what this thread costs every later turn
     status: str                      # "ok" or "failed"
-    pending: PendingDelete | None    # resolved by the approval gate, read by the tool
-    pending_definition: PendingDefinition | None
 ```
 
 One capture per turn, created by the caller and closed over by the tools.

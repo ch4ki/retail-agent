@@ -21,7 +21,7 @@ from langgraph.types import Command
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.supervisor import build_agent
 from retail_agent.knowledge.seeds import SEED_TRIOS
-from retail_agent.store.definitions import InMemoryDefinitionStore
+from retail_agent.store.definitions import InMemoryDefinitionStore, all_definitions
 
 from .conftest import FakeSource
 
@@ -63,17 +63,25 @@ def paused(result) -> bool:
     return bool(result.get("__interrupt__"))
 
 
+def open_terms(result) -> list[str]:
+    """The terms named by the pause itself — our own payload shape now, not
+    `HumanInTheLoopMiddleware`'s `action_requests`, and not a side channel on
+    the capture (`_approval_gate` is gone; nothing sets `pending_definition`
+    any more)."""
+    return result["__interrupt__"][0].value["terms"]
+
+
 def test_asking_pauses_the_turn_before_a_query_is_spent(make_deps):
     """The point of the pause: it happens before the analyst runs, so nothing
     is billed for a question whose meaning is not yet agreed."""
     source = FakeSource(frames={"default": pd.DataFrame({"id": [1]})})
     deps = make_deps(script=asking(), src=source, definitions=InMemoryDefinitionStore())
 
-    _, _, capture, result = start(deps)
+    _, _, _, result = start(deps)
 
     assert paused(result)
     assert source.executed == [], "no query before the term is settled"
-    assert capture.pending_definition.terms == ("LGB",)
+    assert open_terms(result) == ["LGB"]
 
 
 def test_the_pause_names_the_term_the_model_could_not_settle(make_deps):
@@ -82,8 +90,7 @@ def test_the_pause_names_the_term_the_model_could_not_settle(make_deps):
 
     _, _, _, result = start(deps)
 
-    description = result["__interrupt__"][0].value["action_requests"][0]["description"]
-    assert "LGB" in description
+    assert "LGB" in open_terms(result)
 
 
 def test_a_term_the_executive_already_defined_is_not_asked_again(make_deps):
@@ -132,10 +139,10 @@ def test_a_term_no_trio_covers_still_pauses(make_deps):
         script=asking(), definitions=InMemoryDefinitionStore(), trios=list(SEED_TRIOS)
     )
 
-    _, _, capture, result = start(deps)
+    _, _, _, result = start(deps)
 
     assert paused(result)
-    assert capture.pending_definition.terms == ("LGB",)
+    assert open_terms(result) == ["LGB"]
 
 
 def test_only_the_unsettled_terms_reach_the_pause(make_deps):
@@ -145,10 +152,10 @@ def test_only_the_unsettled_terms_reach_the_pause(make_deps):
         script=asking(terms=("top", "LGB")), definitions=definitions
     )
 
-    _, _, capture, result = start(deps)
+    _, _, _, result = start(deps)
 
     assert paused(result)
-    assert capture.pending_definition.terms == ("LGB",)
+    assert open_terms(result) == ["LGB"]
 
 
 def test_approving_lets_the_analyst_run_in_the_same_turn(make_deps):
@@ -159,22 +166,22 @@ def test_approving_lets_the_analyst_run_in_the_same_turn(make_deps):
     deps = make_deps(script=asking(), src=source, definitions=definitions)
 
     agent, config, _, _ = start(deps)
-    definitions.remember(user_id="exec", term="LGB", definition="low gross basket")
-    result = agent.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
+    result = agent.invoke(
+        Command(resume={"answers": {"LGB": "low gross basket"}}), config
+    )
 
     assert not paused(result)
     assert source.executed, "the analyst ran once the term was settled"
 
 
 def test_the_answer_reaches_the_model_that_asked(make_deps):
-    """`approve` runs the tool body, which reads the store back. That is why
-    nothing has to rewrite the tool call's arguments."""
+    """The tool body stores the answer it was resumed with, and uses it right
+    there — that is why nothing has to rewrite the tool call's arguments."""
     definitions = InMemoryDefinitionStore()
     deps = make_deps(script=asking(), definitions=definitions)
 
     agent, config, _, _ = start(deps)
-    definitions.remember(user_id="exec", term="LGB", definition="low gross basket")
-    agent.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
+    agent.invoke(Command(resume={"answers": {"LGB": "low gross basket"}}), config)
 
     assert any("low gross basket" in prompt for prompt in deps.llm.prompts)
 
@@ -238,3 +245,72 @@ def test_with_no_definition_store_there_is_nothing_to_ask_into(make_deps):
     _, _, _, result = start(deps)
 
     assert not paused(result)
+
+
+def test_the_tool_writes_the_definition_the_executive_gave(make_deps):
+    """The CLI must not write before resuming: the tool body replays, and a
+    store that changed in between would make `still_open` come back different,
+    leaving the `interrupt()` call unreachable and the resume value unconsumed.
+    So the answer travels in the resume value and the tool is what stores it."""
+    definitions = InMemoryDefinitionStore()
+    deps = make_deps(script=asking(), definitions=definitions)
+
+    agent, config, _, _ = start(deps)
+    result = agent.invoke(
+        Command(resume={"answers": {"LGB": "low gross basket"}}), config
+    )
+
+    assert not paused(result)
+    assert all_definitions(definitions, "exec")["lgb"] == "low gross basket"
+
+
+def test_a_declined_term_is_recorded_as_assumed(make_deps):
+    """"You decide" is not an answer to store, and the disclosure is what makes
+    it safe: `assumption_note` reads this on the way out."""
+    definitions = InMemoryDefinitionStore()
+    deps = make_deps(script=asking(), definitions=definitions)
+
+    agent, config, capture, _ = start(deps)
+    agent.invoke(Command(resume={"answers": {}}), config)
+
+    assert "LGB" in capture.assumed_terms
+    assert all_definitions(definitions, "exec") == {}
+
+
+def test_cancelling_a_later_term_keeps_an_earlier_terms_answer(make_deps):
+    """`_settle_definitions` asks about a batch of terms one at a time and
+    resumes once. Cancelling on the second must not undo the first: the old
+    CLI wrote each answer to the store as it was chosen, so an answer given
+    for term one survived a later cancel on term two — it only stopped
+    asking, it did not un-decide what was already agreed. All writes are now
+    deferred to the tool, so the resume value itself has to carry every
+    answer collected so far, not just the ones for terms still open."""
+    from .test_repl_turn import FakeConsole
+    from retail_agent.cli.chat import _settle_definitions
+
+    definitions = InMemoryDefinitionStore()
+    deps = make_deps(
+        script=[
+            [("ask_for_definitions", {"terms": ["top", "LGB"]})],
+            {"definitions": ["the 10 highest by revenue"]},  # propose() for "top"
+            {"definitions": ["low gross basket"]},  # propose() for "LGB"
+            "All set.",
+        ],
+        definitions=definitions,
+    )
+
+    agent, config, capture, result = start(deps)
+    assert paused(result)
+
+    # The executive types an answer for "top", then presses enter on "LGB" —
+    # the CLI's cancel path, distinct from the numbered hand-back option.
+    console = FakeConsole(["the 10 highest by revenue", ""])
+    resume = _settle_definitions(console, deps, capture, {"terms": ["top", "LGB"]})
+    result = agent.invoke(Command(resume=resume), config)
+
+    assert not paused(result)
+    kept = all_definitions(definitions, "exec")
+    assert kept["top"] == "the 10 highest by revenue", (
+        "term one's answer must survive the cancel on term two"
+    )
+    assert "lgb" not in kept

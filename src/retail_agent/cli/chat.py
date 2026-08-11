@@ -399,19 +399,13 @@ def _answer(console, deps, saver, user, session_id, question):
                 {"messages": [{"role": "user", "content": question}]}, config
             )
 
-        # Two things pause the agent before a tool runs: a destructive call, and
-        # a question whose terms nobody has settled. Both were resolved
-        # read-only by the gate, so what is shown is exactly what stopped it.
+        # Two things pause a turn: `delete_reports` and `ask_for_definitions`,
+        # both interrupting themselves now, so `_decide` returns exactly the
+        # value each one expects back — nothing here has to reshape it.
         while _pending(result):
-            decision = _decide(console, deps, result, capture, user)
+            resume = _decide(console, deps, result, capture)
             with console.status("working…"):
-                result = agent.invoke(
-                    # A dict with `decisions`, not a bare list: the middleware
-                    # subscripts the resume value by name, and a list resumes
-                    # with a TypeError that surfaces as a failed turn.
-                    Command(resume={"decisions": [decision]}),
-                    config,
-                )
+                result = agent.invoke(Command(resume=resume), config)
     except Exception as err:  # the REPL must survive anything
         # Full detail goes to the log; the user gets one actionable line. The
         # turn id makes a complaint a single lookup rather than an
@@ -467,43 +461,41 @@ def _pending(result) -> bool:
     return bool(result.get("__interrupt__"))
 
 
-def _decide(console, deps, result, capture, user) -> dict:
-    """Turn a pause into the decision the middleware resumes with.
+def _payload(result) -> dict:
+    """What the tool asked for."""
+    value = result["__interrupt__"][0].value
+    return value if isinstance(value, dict) else {}
 
-    Dispatching on the tool rather than on a mode flag: the two gates are
-    configured in one middleware and either can be the reason a turn stopped, so
-    the request itself is the only honest source of which one it was.
+
+def _decide(console, deps, result, capture) -> dict:
+    """Turn a pause into the value the tool resumes with.
+
+    Dispatching on the payload's own `kind`: the tool that asked is the tool
+    that named the question, so there is nothing to infer.
     """
-    request = _first_request(result)
-    if request.get("name") == "ask_for_definitions":
-        return _settle_definitions(console, deps, capture, user, request)
+    payload = _payload(result)
+    if payload.get("kind") == "ask_for_definitions":
+        return _settle_definitions(console, deps, capture, payload)
 
-    if _confirm(console, request.get("description", ""), capture):
-        return {"type": "approve"}
-    return {
-        "type": "reject",
-        "message": "The executive did not confirm. Nothing was deleted.",
-    }
-
-
-def _first_request(result) -> dict:
-    interrupt = result["__interrupt__"][0]
-    value = interrupt.value if isinstance(interrupt.value, dict) else {}
-    requests = value.get("action_requests", [])
-    return requests[0] if requests else {}
+    if _confirm(console, payload):
+        return {
+            "approved": True,
+            "report_ids": list(payload["report_ids"]),
+            "token": payload["token"],
+        }
+    return {"approved": False}
 
 
-def _confirm(console, description, capture) -> bool:
+def _confirm(console, payload) -> bool:
     """Show the manifest and take a typed answer.
 
     The typed token rather than a bare y/n: `DELETE 7` cannot be produced by
     someone who has not read how many reports they are about to lose.
     """
-    render_confirmation(console, description)
+    render_confirmation(console, payload.get("manifest", ""))
 
     typed = console.input("[bold yellow]›[/bold yellow] ").strip()
-    expected = capture.pending.token if capture.pending else "y"
-    if typed == expected:
+    if typed == payload.get("token", "y"):
         return True
 
     console.print("[dim]Cancelled — nothing was deleted.[/dim]")
@@ -516,66 +508,57 @@ def _confirm(console, description, capture) -> bool:
 _HAND_BACK = object()
 
 
-def _settle_definitions(console, deps, capture, user, request) -> dict:
+def _settle_definitions(console, deps, capture, payload) -> dict:
     """Ask about each open term, then resume once.
 
     In question order and one at a time: each prompt stays a simple choice, and
     the options for the second term are generated knowing how the first was
     settled — otherwise a definition of `top` can quietly contradict the `loyal`
     just agreed.
+
+    Collects answers rather than writing them: the CLI must not write to the
+    store before resuming, because the tool body replays on resume and its own
+    lookup would then find a store that already changed, leaving the
+    `interrupt()` call unreachable and this resume value unconsumed. So the
+    answers travel back in the resume value, and `ask_for_definitions` is what
+    stores them.
     """
     from retail_agent.agent.schema import render_schema_outline
     from retail_agent.knowledge.proposals import propose
 
-    pending = capture.pending_definition
-    settled: dict[str, str] = {}
+    terms = payload.get("terms") or []
+    answers: dict[str, str] = {}
     # The outline, not the SQL rendering: the options are plain English, so the
     # values a column holds buy nothing and would cost a metadata scan per table
     # every time a term came up.
     schema = render_schema_outline(deps)
 
-    for term in pending.terms if pending else ():
+    for term in terms:
         options = propose(
             deps,
             question=capture.question,
             term=term,
             schema=schema,
-            settled=settled,
+            settled=answers,
         )
         chosen = _ask_definition(console, term, options)
 
         if chosen is _HAND_BACK:
             # Applies to everything still open, not just this term: "you decide"
-            # is not an answer that gets asked again for the next word.
-            #
-            # A reject rather than an edit. The tool body never runs, so this is
-            # the only place that knows the terms went unanswered — hence the
-            # recording here, which `assumption_note` reads on the way out to
-            # force the disclosure into the answer.
-            remaining = [t for t in pending.terms if t not in settled]
-            capture.record_assumptions(remaining)
-            return {
-                "type": "reject",
-                "message": (
-                    "The executive asked you to decide. Do not ask again. "
-                    f"Choose one concrete, defensible rule for: {', '.join(remaining)} "
-                    "— a threshold, a window or a ranking — use it, and state "
-                    "the rule you applied in your answer."
-                ),
-            }
+            # is not an answer that gets asked again for the next word. The
+            # remaining terms — this one and any after it — are simply absent
+            # from `answers`; the tool records them as assumed on resume.
+            return {"answers": answers}
         if not chosen:
-            return {
-                "type": "reject",
-                "message": (
-                    f"The executive did not define {term!r}, so nothing was "
-                    "queried. Ask them what it should mean."
-                ),
-            }
+            # Stops asking, but does not undo what was already agreed: a term
+            # settled earlier in this same batch was answered, and cancelling
+            # on a later one must not erase it — only what's still open here
+            # goes unanswered, same as a hand-back.
+            return {"answers": answers}
 
-        _remember(console, deps, user, term, chosen)
-        settled[term] = chosen
+        answers[term] = chosen
 
-    return {"type": "approve"}
+    return {"answers": answers}
 
 
 def _ask_definition(console, term, options):
@@ -643,28 +626,6 @@ def _vet_definition(console, term, typed) -> str | None:
         )
         return None
     return typed[:MAX_DEFINITION_CHARS]
-
-
-def _remember(console, deps, user, term, definition) -> None:
-    """Keep the answer, and say so. Never fails the turn it just unblocked.
-
-    Announced rather than left implicit: the executive has just changed what the
-    agent will do on every future question containing this word, and `/definitions
-    forget` is only a remedy if they know there is something to forget.
-    """
-    try:
-        deps.definitions.remember(user_id=user, term=term, definition=definition)
-    except Exception as err:
-        logging.getLogger(__name__).warning(
-            "could not save the definition of %r (%s)", term, err
-        )
-        console.print(
-            f"[dim]Using {definition!r} for this question; I could not save it.[/dim]"
-        )
-        return
-
-    console.print(f"[dim]Remembered: {term} = {definition}[/dim]")
-    console.print(f"[dim]/definitions forget {term} to be asked again.[/dim]")
 
 
 def _trace(console, deps, user, last_trace, command) -> None:

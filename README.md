@@ -109,7 +109,8 @@ your question
      │                     its body back into the conversation
      ├─ describe_schema    cached metadata, no SQL
      ├─ list_reports
-     ├─ delete_reports     ⟵ interrupts for approval BEFORE it runs
+     ├─ delete_reports     ⟵ resolves the delete, then interrupts for approval
+     │                       BEFORE writing anything
      ├─ ask_for_definitions ⟵ interrupts to ask, in the CLI
      └─ remember_definition · note_preference · forget_preference
      └─ the trace
@@ -129,7 +130,7 @@ definitions your analytics team agreed first, then in your own. Only a word
 neither covers reaches you. Lookup is on whole words, so "loyal customers"
 finds the agreed meaning of `loyal` while "disloyal customers" does not.
 
-In the CLI the tool interrupts before its body runs, so the turn *pauses*: you
+In the CLI the tool resolves which terms still need asking, then interrupts from inside itself, so the turn *pauses*: you
 are offered a few candidate meanings, can type your own, or can hand the
 decision back and be told what was assumed. What you pick is remembered, so the
 question is asked once. Headless callers — the eval harness, Studio — cannot

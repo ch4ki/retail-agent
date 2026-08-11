@@ -22,6 +22,8 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from langgraph.errors import GraphBubbleUp
+
 from retail_agent.obs.traces import MAX_ANSWER_CHARS, TraceRecord
 from retail_agent.safety.frame import MaskedFrame
 
@@ -37,34 +39,18 @@ class Step:
 class PendingDelete:
     """A destructive operation resolved against the store, awaiting approval.
 
-    Resolved by the interrupt's `when` predicate — read-only — and read back by
-    the tool on the far side of the approval, so what the user was shown is
-    exactly what gets deleted. Resolving twice would leave a gap, however small,
-    between the manifest and the act.
+    Resolved by the tool itself — once before the pause, to build the manifest
+    `interrupt()` shows the user, and again on replay after resume, so what
+    gets deleted is recomputed against the store rather than trusted from
+    before the pause. What crosses the interrupt boundary is the resume value,
+    not this object; resolving twice would otherwise leave a gap, however
+    small, between the manifest and the act.
     """
 
     action_id: str
     report_ids: tuple[str, ...]
     titles: tuple[str, ...]
     token: str  # what the user must type back, verbatim
-
-
-@dataclass(frozen=True)
-class PendingDefinition:
-    """Terms the model asked about that this user has not already answered.
-
-    Resolved by the interrupt's `when` predicate — read-only, and without a
-    model call — and read back by the CLI, which asks about them in order. The
-    same discipline as `PendingDelete`: what stops the turn is decided once, and
-    what the user is then shown is exactly what stopped it.
-
-    Which words are worth asking about is the model's judgement, made by calling
-    `ask_for_definitions` at all. The filtering this holds is the other half:
-    whichever of those words are already on file, dropped before anyone is
-    interrupted, so a definition given last week is never asked for twice.
-    """
-
-    terms: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -116,8 +102,6 @@ class TurnCapture:
     # recorder middleware; a turn that died before it never has a figure.
     context_tokens: int = 0
     status: str = "ok"
-    pending: PendingDelete | None = None
-    pending_definition: PendingDefinition | None = None
     # The corpus retrieval for this turn's question, run once and read by both
     # sides of the definition interrupt. Only this half is cached: the trio
     # corpus cannot change mid-turn, but the personal definition store can —
@@ -131,13 +115,28 @@ class TurnCapture:
         Wrapping at the call site rather than inside each tool body means a tool
         added later is traced by virtue of being called, the way the graph's
         `_traced` wrapper made a new node traced by virtue of being registered.
+
+        A tool that calls `interrupt()` raises `GraphBubbleUp` (the base LangGraph
+        gives `GraphInterrupt`) out of this `with` block on the pre-pause pass, and
+        `interrupt()` re-executes the node from the top on resume — so a plain
+        `finally` here would file the pre-pause pass as a completed step with an
+        empty detail, then file the real one again on replay, doubling every paused
+        tool's trace. Bubble-up is let through unrecorded and uncounted instead; a
+        genuine tool failure is not `GraphBubbleUp` and is still filed below.
         """
         started = time.perf_counter()
         step = Step()
         self.calls += 1
         try:
             yield step
-        finally:
+        except GraphBubbleUp:
+            self.calls -= 1
+            raise
+        except BaseException:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            self.events.append((name, elapsed_ms, step.detail))
+            raise
+        else:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             self.events.append((name, elapsed_ms, step.detail))
 

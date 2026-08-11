@@ -22,7 +22,9 @@ from retail_agent.agent.schema import build_schema_tool
 from retail_agent.agent.subagents import build_subagents
 
 
-def build_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
+def build_tools(
+    deps: AgentDeps, capture: TurnCapture, *, pause_for_definitions: bool = False
+) -> list[BaseTool]:
     """Every capability the agent has, in one list.
 
     Adding one is a `@tool` in the relevant builder — that is the extensibility
@@ -33,7 +35,7 @@ def build_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
         *build_subagents(deps, capture),
         *build_schema_tool(deps, capture),
         *build_report_tools(deps, capture),
-        *build_memory_tools(deps, capture),
+        *build_memory_tools(deps, capture, pause_for_definitions=pause_for_definitions),
     ]
 
 
@@ -57,9 +59,7 @@ def build_agent(
     """
     return create_agent(
         model=deps.llm,
-        tools=build_tools(deps, capture),
-        middleware=supervisor_middleware(
-            deps, capture, pause_for_definitions=pause_for_definitions
-        ),
+        tools=build_tools(deps, capture, pause_for_definitions=pause_for_definitions),
+        middleware=supervisor_middleware(deps, capture),
         checkpointer=checkpointer,
     )

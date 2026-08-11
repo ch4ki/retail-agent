@@ -177,12 +177,14 @@ def settled_meanings(deps: AgentDeps, capture: TurnCapture) -> dict[str, str]:
     model's context, so an answer that used them cannot show a trace that
     claims it used none.
 
-    One function because there are two places that must agree on whether a word
-    needs asking about, and they run on opposite sides of an interrupt. The
-    tool body decides it for headless callers; the gate's `when` predicate
-    decides it for the CLI, *before* that body runs. They disagreed once — the
-    CLI stopped to ask what "loyal" meant while the trio defining it sat in the
-    same turn's retrieval — and the reason was that each had its own lookup.
+    One function because `ask_for_definitions` calls it twice in the same
+    turn — once before the pause, to decide whether there is anything left to
+    ask, and again on replay after resume, to answer with whatever the
+    executive just settled — and those two calls must agree on what already
+    counts as known. They disagreed once, back when the check lived in two
+    places instead of one: the CLI stopped to ask what "loyal" meant while the
+    trio defining it sat in the same turn's retrieval, because each side had
+    its own lookup.
 
     Retrieval runs once per turn, cached on the capture, because it is the
     expensive half — with dense retrieval configured it is an embedding round
@@ -205,9 +207,10 @@ def partition_terms(
 ) -> tuple[dict[str, str], list[str]]:
     """Split the asked-about terms into settled (term → meaning) and still open.
 
-    One partition because the gate's `when` predicate and the tool body must
-    make the same call for every term — a stripping or matching rule applied
-    in one and not the other is how they came to disagree about "loyal".
+    One partition because `ask_for_definitions` calls it on both sides of its
+    own interrupt and both calls must make the same call for every term — a
+    stripping or matching rule applied in one and not the other is how they
+    once came to disagree about "loyal".
     """
     settled: dict[str, str] = {}
     still_open: list[str] = []

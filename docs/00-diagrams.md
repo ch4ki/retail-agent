@@ -296,7 +296,7 @@ names the search term; it never decides which reports match. Detail in
 ```mermaid
 sequenceDiagram
     actor U as Executive
-    participant G as Agent (approval gate)
+    participant G as Agent (delete_reports)
     participant M as Model
     participant P as Postgres
 
@@ -306,12 +306,13 @@ sequenceDiagram
     Note over G,M: The model names the term.<br/>It never decides which reports match.
     G->>P: SELECT id, title FROM reports<br/>WHERE owner_id = :me AND deleted_at IS NULL<br/>AND search @@ to_tsquery('Client X')
     P-->>G: 7 rows
+    G-->>G: interrupt() from inside delete_reports,<br/>before any write; the manifest is the interrupt payload
     G->>U: manifest — the exact 7 titles, and the count
-    G-->>G: interrupt before the tool runs<br/>manifest held as pending(action_id)
 
     alt user types DELETE 7
         U->>G: DELETE 7
-        G->>P: UPDATE reports SET deleted_at = now()<br/>WHERE id = ANY(:ids) AND owner_id = :me
+        Note over G: resume replays delete_reports from the top,<br/>re-resolving the manifest against the store
+        G->>P: UPDATE reports SET deleted_at = now()<br/>WHERE id = ANY(:ids) AND owner_id = :me AND deleted_at IS NULL
         G->>P: INSERT INTO report_audit<br/>(who, ids, when, token, action_id)
         G->>U: 7 reports deleted. /undo to reverse.
     else anything else
@@ -319,5 +320,5 @@ sequenceDiagram
         G->>U: aborted, nothing changed
     end
 
-    Note over G,P: Replaying a consumed action_id is a no-op,<br/>so a double-resume cannot delete twice.
+    Note over G,P: A double-resume still cannot delete twice —<br/>the UPDATE only matches rows where deleted_at IS NULL,<br/>so a report already deleted is left alone.
 ```

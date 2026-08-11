@@ -101,8 +101,13 @@ def test_handing_it_back_records_nothing_and_the_agent_says_what_it_assumed(make
 
 
 def test_an_empty_answer_cancels_without_querying(make_deps):
-    """Someone who does not want to settle it now must not be billed for a
-    query against a meaning nobody agreed."""
+    """An empty answer does not hard-stop the turn any more than a hand-back
+    does: the term stays open, and the tool's `NOBODY_TO_ASK` tells the model
+    to pick a defensible rule and disclose it rather than refuse — the same
+    bargain `assumption_note` enforces everywhere else. What this script
+    actually shows is a model that, given that instruction, chooses not to
+    query rather than assume; that is the model's call, not a guarantee this
+    design makes on its behalf."""
     turns = [
         [("ask_for_definitions", {"terms": ["loyal"]})],
         OPTIONS,
@@ -113,7 +118,11 @@ def test_an_empty_answer_cancels_without_querying(make_deps):
     assert "3 or more completed orders, ever" in console.text(), "it did ask"
     assert source.executed == []
     assert definitions.lookup(user_id="dana", term="loyal") is None
-    assert "did not define" in deps.llm.prompts[-1], (
+    # The CLI no longer crafts its own reject message — a cancel resumes with
+    # `{"answers": answers}` (empty here: the one term in this script was never
+    # settled), same shape as a hand-back, and it is the tool's own
+    # `NOBODY_TO_ASK` that tells the model why the analyst did not run.
+    assert "Nobody is available to settle: loyal" in deps.llm.prompts[-1], (
         "the model has to be told why the analyst did not run"
     )
 

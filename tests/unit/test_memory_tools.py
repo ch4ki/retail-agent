@@ -302,10 +302,11 @@ def test_a_corpus_settled_term_is_recorded_in_the_trace():
 
 
 def test_one_turn_runs_retrieval_once_however_many_places_ask():
-    """The gate's `when` predicate and the tool body both need the settled set,
-    and with dense retrieval configured every run costs an embedding round
-    trip. The corpus cannot change mid-turn, so the second asker reads the
-    first one's result."""
+    """`ask_for_definitions` calls `settled_meanings` on both sides of its own
+    interrupt — once before the pause, again on replay after resume — and with
+    dense retrieval configured every run costs an embedding round trip. The
+    corpus cannot change mid-turn, so the second call reads the first one's
+    cached result."""
     from retail_agent.agent.tools import settled_meanings
 
     calls = []
@@ -326,8 +327,12 @@ def test_one_turn_runs_retrieval_once_however_many_places_ask():
 
 
 def test_a_definition_stored_during_the_pause_is_seen_after_it():
-    """Only the corpus half may be cached: the gate runs, the executive answers,
-    the store gains a row, and the tool body on `approve` must read it back."""
+    """Only the corpus half of `settled_meanings` may be cached: the personal
+    store can change between two calls in the same turn — a sibling
+    `remember_definition` call, not a write from inside this pause itself,
+    since `interrupt()` replays the whole tool body and a write during the
+    pause would make the replayed `still_open` differ and leave the
+    `interrupt()` unreachable — and the next caller must see it."""
     from retail_agent.agent.tools import settled_meanings
 
     _, deps, capture = tools_for("report on 10 LGB customers")
@@ -343,8 +348,9 @@ def test_a_definition_stored_during_the_pause_is_seen_after_it():
 
 
 def test_partition_splits_the_settled_from_the_still_open():
-    """One partition, used by the gate and the tool body — they diverged once
-    and the CLI asked about a term the corpus had already settled."""
+    """One partition, called by `ask_for_definitions` on both sides of its own
+    interrupt — the two calls diverged once and the CLI asked about a term the
+    corpus had already settled."""
     from retail_agent.agent.tools import partition_terms
 
     settled, still_open = partition_terms(

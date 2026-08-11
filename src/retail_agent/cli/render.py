@@ -62,9 +62,10 @@ def render_reports(console: Console, reports) -> None:
 def render_confirmation(console: Console, description: str) -> None:
     """Show exactly what is about to be deleted, in full.
 
-    Every title is printed — the manifest is built by the approval gate, which
-    resolved the target set against the store. A truncated list would mean
-    asking someone to confirm a deletion they cannot see.
+    Every title is printed — the manifest is built by `delete_reports` itself,
+    which resolved the target set against the store before pausing. A
+    truncated list would mean asking someone to confirm a deletion they cannot
+    see.
     """
     console.print(Panel(description, title="Confirm deletion", style="yellow"))
 

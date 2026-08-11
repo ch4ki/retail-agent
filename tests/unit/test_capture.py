@@ -162,3 +162,18 @@ def test_report_ids_reach_the_trace_but_bodies_do_not():
 
     assert trace.report_ids == ["7f3a"]
     assert "412,880" not in repr(trace)
+
+
+def test_the_capture_carries_no_interrupt_coordination():
+    """Both gates ask from inside the tool that needs the answer now, so there
+    is no value to hand across an interrupt boundary. A2 migrates every field
+    here into graph state; these two would have had nowhere to go, because a
+    `when` predicate cannot write state at all."""
+    from dataclasses import fields
+
+    from retail_agent.agent.capture import TurnCapture
+
+    names = {f.name for f in fields(TurnCapture)}
+
+    assert "pending" not in names
+    assert "pending_definition" not in names

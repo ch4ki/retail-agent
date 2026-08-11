@@ -105,7 +105,8 @@ def test_a_shared_capture_follows_the_turns_actual_question(make_deps):
 def test_the_sync_hook_leaves_a_per_turn_capture_alone(make_deps):
     """The CLI and the eval build a fresh capture per turn with the question
     already set. Same question, nothing to drop — the mid-turn cache must
-    survive, or the gate's retrieval is thrown away before the tool reads it."""
+    survive, or `settled_meanings`' retrieval is thrown away before the
+    replayed tool body reads it."""
     from retail_agent.agent.middleware import _turn_sync
 
     capture = TurnCapture(user_id="exec", question="How many loyal customers?")

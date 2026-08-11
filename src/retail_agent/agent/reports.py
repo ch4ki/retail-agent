@@ -1,10 +1,10 @@
 """The saved report library, as tools.
 
-`delete_reports` is the destructive one and the only tool behind the human
-approval gate. The gate is `HumanInTheLoopMiddleware`, which interrupts *before*
-the tool runs — so the write cannot have happened when the user is asked. The
-graph got the same property by putting `apply_delete` on the far side of a
-breakpoint; this gets it with one fewer node and no state to carry across it.
+`delete_reports` is the destructive one and asks for its own confirmation: it
+calls `interrupt()` itself, before the write, so the write cannot have
+happened when the user is asked. The graph got the same property by putting
+`apply_delete` on the far side of a breakpoint; this gets it with one fewer
+node and no state to carry across it.
 
 Listing is not gated. The brief asks for a strict confirmation flow "without
 breaking UX", and confirming a read is how a confirmation prompt becomes
@@ -19,6 +19,7 @@ import logging
 import uuid
 
 from langchain_core.tools import BaseTool, tool
+from langgraph.types import interrupt
 
 from retail_agent.agent.capture import PendingDelete, TurnCapture
 from retail_agent.agent.deps import AgentDeps
@@ -37,9 +38,11 @@ def resolve_delete(
 ) -> PendingDelete | None:
     """What a delete would take, resolved read-only.
 
-    Called from the interrupt's `when` predicate so the manifest the user
-    approves is the manifest that gets deleted, and so a delete matching
-    nothing never raises an approval prompt at all.
+    Called by `delete_reports` itself: once before the pause, to build the
+    manifest, and again on replay once the executive answers — `interrupt()`
+    re-executes everything before it, so this runs twice. That is why its
+    result decides only what to show and whether to ask at all, never what to
+    delete; the ids that actually get removed come back in the resume value.
     """
     targets = deps.reports.resolve(
         owner_id=capture.user_id,
@@ -95,9 +98,10 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
         they mean the reports made in this conversation.
         """
         with capture.step("delete_reports") as step:
-            # Resolved by the approval gate, so what was shown is what goes. A
-            # resolution here would reopen the gap between manifest and act.
-            pending = capture.pending or resolve_delete(
+            # Resolved here and nowhere else. On resume this whole body replays,
+            # so this runs a second time — which is why its result decides only
+            # whether to ask and what to show, never what to remove.
+            pending = resolve_delete(
                 deps, capture, term=term, session_scoped=session_scoped
             )
             if pending is None:
@@ -105,13 +109,26 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
                 step.detail = "nothing matched"
                 return f"I found no reports{described} to delete."
 
+            decision = interrupt(
+                {
+                    "kind": "delete_reports",
+                    "manifest": render_manifest(pending),
+                    "report_ids": list(pending.report_ids),
+                    "token": pending.token,
+                }
+            )
+            if not decision.get("approved"):
+                step.detail = "rejected"
+                return "Nothing was deleted."
+
+            # Ids and token from the resume value, not from `pending`: what the
+            # executive approved is what goes, whatever the replay re-resolved.
             deleted = deps.reports.soft_delete(
                 owner_id=capture.user_id,
-                report_ids=pending.report_ids,
+                report_ids=tuple(decision["report_ids"]),
                 action_id=pending.action_id,
-                token=pending.token,
+                token=decision["token"],
             )
-            capture.pending = None
             step.detail = f"deleted {deleted}"
             if deleted == 0:
                 return "Nothing to delete — those reports are already gone."

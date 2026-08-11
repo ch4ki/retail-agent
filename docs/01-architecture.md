@@ -99,7 +99,7 @@ restart mid-conversation loses nothing.
 | Query budget, repair, empty-result hint | **Built** | `agent/middleware.py`, `agent/tools.py` | resilience |
 | Provider chain (retry + fallback middleware) | **Built** | `agent/middleware.py`, `llm/resilience.py` | resilience |
 | Saved reports, audit trail, `/undo` | **Built** | `store/reports.py`, `agent/reports.py` | oversight |
-| Confirmation gate | **Built** | `HumanInTheLoopMiddleware` in `agent/middleware.py` | oversight |
+| Confirmation gate | **Built** | `interrupt()` in `agent/reports.py` and `agent/memory.py` | oversight |
 | Golden Bucket + hybrid retrieval | **Built** | `knowledge/` | hybrid intelligence |
 | Preference notes | **Partial** | `store/preferences.py`, `agent/memory.py` | learning loop (user) |
 | Traces, `/trace`, `/metrics` | **Built** | `obs/traces.py`, `agent/capture.py` | observability |
@@ -191,7 +191,6 @@ an instruction in a prompt.
 | `dynamic_prompt` | supervisor | persona body + safety rules + this user's preference notes, read per model call |
 | `PIIMiddleware` ×3 | both | email, credit_card, ip; redact; `apply_to_tool_results` |
 | `SummarizationMiddleware` | supervisor | trigger 30k tokens, keep 20 messages, a prompt that forbids restating figures |
-| `HumanInTheLoopMiddleware` | supervisor | `delete_reports` and `ask_for_definitions`, both resolved read-only before the tool runs |
 | `ToolCallLimitMiddleware` | analyst | `run_sql`, capped at `max_analysis_steps + repair_budget + diagnose_budget` = 14 |
 | `ModelCallLimitMiddleware` | both | `run_limit=30`, `exit_behavior="end"` |
 | `ToolErrorMiddleware` | both | guard violations and warehouse errors returned to the model as tool results |
