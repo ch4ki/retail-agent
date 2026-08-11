@@ -62,14 +62,26 @@ def test_no_tool_leaks_its_runtime_into_the_model_facing_schema():
     override `bind_tools` and never run real schema conversion, so only a test
     that calls `convert_to_openai_tool` directly, as this one does, can catch
     it.
+
+    Covers every tool the process can bind to a model, not just the ten
+    supervisor tools `build_tools` returns. `run_sql` and `lookup_definitions`
+    come from `build_analyst_tools` and are bound to the nested analyst
+    agent's own model (`subagents.py`'s `analyst` tool), a second `bind_tools`
+    call this suite would otherwise never exercise. Reinstating
+    `runtime: ToolRuntime | None = None` on `run_sql` alone — the original
+    defect from Task 1 — passed the whole suite at 872 with this loop scoped
+    to `build_tools` only; only widening the loop here catches it.
     """
     from langchain_core.utils.function_calling import convert_to_openai_tool
 
     from retail_agent.agent.capture import TurnCapture
     from retail_agent.agent.supervisor import build_tools
+    from retail_agent.agent.tools import build_analyst_tools
 
     deps = build_deps(_settings(), llm=_bindable(), source=_schema_only())
-    for tool in build_tools(deps, TurnCapture()):
+    capture = TurnCapture()
+    tools = [*build_tools(deps, capture), *build_analyst_tools(deps, capture)]
+    for tool in tools:
         assert "runtime" not in tool.tool_call_schema.model_fields, (
             f"{tool.name} leaks `runtime` into its model-facing schema"
         )

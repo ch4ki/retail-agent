@@ -23,7 +23,7 @@ from langchain_core.tools import BaseTool, tool
 from langgraph.types import interrupt
 
 from retail_agent.agent.capture import PendingDelete, TurnCapture
-from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.deps import AgentDeps, TurnContext
 
 log = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """The library tools, bound to one turn's owner and session."""
 
     @tool
-    def list_reports(runtime: ToolRuntime) -> str:
+    def list_reports(runtime: ToolRuntime[TurnContext, object]) -> str:
         """List the reports this executive has saved."""
         with capture.step("list_reports") as step:
             saved = deps.reports.list_reports(owner_id=runtime.context.user_id)
@@ -97,7 +97,9 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
 
     @tool
     def delete_reports(
-        runtime: ToolRuntime, term: str = "", session_scoped: bool = False
+        runtime: ToolRuntime[TurnContext, object],
+        term: str = "",
+        session_scoped: bool = False,
     ) -> str:
         """Delete saved reports. Destructive, and confirmed with the user first.
 

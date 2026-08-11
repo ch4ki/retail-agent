@@ -302,6 +302,23 @@ supplies both, and passing our own is a hard error under `langgraph dev`.
 `langgraph build` requires Docker. It is not covered by the test suite for that
 reason; run it before claiming a change is deployable.
 
+**Every turn needs an identity, including in Studio.** Every identity-scoped
+tool reads `user_id` off the run's `context`, not off how the graph was
+built, so a request that supplies none fails loudly with
+`MissingTurnIdentity` on its first tool call rather than silently acting as
+a shared empty-string user. Supply it one of two ways, never both in the
+same request (the server 400s if you do):
+
+- a top-level `context` on the run, e.g. `{"context": {"user_id": "dana"}}`; or
+- `configurable.user_id`, e.g. `{"configurable": {"user_id": "dana"}}` — the
+  server copies `configurable` into `context` when no top-level `context` is
+  given, so this is the channel to use when you also need another
+  `configurable` key (a `thread_id`, say) alongside identity.
+
+In the Studio UI itself, set `user_id` in the run's **Configurable** panel
+before sending a message; the default run with nothing set will fail every
+turn.
+
 ---
 
 ## Optional: semantic retrieval, and tracing

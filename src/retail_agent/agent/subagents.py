@@ -25,7 +25,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, tool
 
 from retail_agent.agent.capture import TurnCapture
-from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.middleware import analyst_middleware
 from retail_agent.agent.prompts import (
     ANALYST_PROMPT,
@@ -64,7 +64,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """
 
     @tool
-    def analyst(question: str, runtime: ToolRuntime) -> str:
+    def analyst(question: str, runtime: ToolRuntime[TurnContext, object]) -> str:
         """Query the retail data and report what it found.
 
         Pass the executive's question in full, keeping every business term
@@ -111,7 +111,10 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
 
     @tool
     def report_writer(
-        brief: str, title: str, runtime: ToolRuntime, show_to_executive: bool = True
+        brief: str,
+        title: str,
+        runtime: ToolRuntime[TurnContext, object],
+        show_to_executive: bool = True,
     ) -> str:
         """Write a report from findings, save it, and show it to the executive.
 
@@ -172,7 +175,9 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             )
 
     @tool
-    def ask_about_report(report_id: str, question: str, runtime: ToolRuntime) -> str:
+    def ask_about_report(
+        report_id: str, question: str, runtime: ToolRuntime[TurnContext, object]
+    ) -> str:
         """Answer a question about a report the executive has saved.
 
         Use this for anything about an existing report — what it concluded,

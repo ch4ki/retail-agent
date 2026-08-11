@@ -14,6 +14,7 @@ from langgraph.types import Command
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import TurnContext
+from retail_agent.agent.middleware import MissingTurnIdentity
 from retail_agent.agent.reports import build_report_tools, confirmation_token
 from retail_agent.agent.subagents import build_subagents
 from retail_agent.agent.supervisor import build_agent
@@ -131,6 +132,40 @@ def test_approving_deletes_exactly_what_was_shown(make_deps, saved):
 
     remaining = [r.title for r in saved.list_reports(owner_id="exec")]
     assert remaining == ["Beta Q1"]
+
+
+def test_a_resumed_approval_with_no_identity_is_refused_not_silent(make_deps, saved):
+    """The LangGraph server's exact exposure: a resume posted with no
+    `context` in its body coerces to `TurnContext()` — every field `""`
+    rather than `None` — via `_coerce_context`. Before the identity guard
+    moved to `wrap_tool_call`, that shape sailed straight through: the
+    replayed `delete_reports` body called `resolve_delete` for owner `""`,
+    found nothing, returned early, and the approval the executive just typed
+    by hand was discarded with no error and nothing said. `before_agent`
+    cannot catch this — it is a completed checkpoint node, so
+    `Command(resume=...)` never re-runs it; only a hook that lives inside
+    the replayed tools node itself can.
+    """
+    deps = make_deps(
+        script=[[("delete_reports", {"term": "Acme"})], "Deleted 1 report."]
+    )
+    agent, capture, config, result = run(deps, "delete all reports mentioning Acme")
+    payload = result["__interrupt__"][0].value
+
+    with pytest.raises(MissingTurnIdentity):
+        agent.invoke(
+            Command(
+                resume={
+                    "approved": True,
+                    "report_ids": payload["report_ids"],
+                    "token": payload["token"],
+                }
+            ),
+            config,
+            context=TurnContext(),
+        )
+
+    assert len(saved.list_reports(owner_id="exec")) == 2, "nothing was deleted"
 
 
 def test_a_paused_delete_traces_exactly_one_event(make_deps, saved):
@@ -467,23 +502,43 @@ def test_one_compiled_agent_serves_two_users(make_deps, reports):
     agent was built, so a single compiled graph could only ever act for one
     executive. Sub-project E made the server rebuild per request, which hid the
     symptom; this removes the reason.
+
+    Built ONCE — `build_agent` is called a single time, exactly like a
+    long-lived server process compiles it once — and invoked twice with
+    different `TurnContext`s. Calling a tool's raw `.func` directly, as this
+    test used to, bypasses `context_schema`, the whole middleware stack and
+    the framework's runtime injection: it would keep passing with
+    `context_schema=TurnContext` deleted from `build_agent`, with
+    `_identity_guard`/`_turn_sync` removed from the middleware stack, and
+    with runtime injection broken outright, because none of those are on the
+    path a bare function call takes. Driving the compiled graph through
+    `agent.invoke(..., context=...)`, the way the CLI and the server both
+    actually call it, is what exercises all three.
     """
-    from retail_agent.agent.deps import TurnContext
-
     body = "## Summary\nDenim fell in Q1."
-    deps = make_deps(script=[body, body])
-    capture = TurnCapture(question="write it up")
-    write = {t.name: t.func for t in build_subagents(deps, capture)}["report_writer"]
-
-    write(
-        brief="denim findings",
-        title="Ada's report",
-        runtime=_runtime_with(TurnContext(user_id="ada", session_id="s1")),
+    deps = make_deps(
+        script=[
+            [("report_writer", {"brief": "denim findings", "title": "Ada's report"})],
+            body,
+            "Written up for Ada.",
+            [("report_writer", {"brief": "denim findings", "title": "Bo's report"})],
+            body,
+            "Written up for Bo.",
+        ]
     )
-    write(
-        brief="denim findings",
-        title="Bo's report",
-        runtime=_runtime_with(TurnContext(user_id="bo", session_id="s2")),
+    agent = build_agent(
+        deps, TurnCapture(question="write it up"), checkpointer=MemorySaver()
+    )
+
+    agent.invoke(
+        {"messages": [{"role": "user", "content": "write it up"}]},
+        {"configurable": {"thread_id": "ada-thread"}},
+        context=TurnContext(user_id="ada", session_id="s1", turn_id="t1"),
+    )
+    agent.invoke(
+        {"messages": [{"role": "user", "content": "write it up"}]},
+        {"configurable": {"thread_id": "bo-thread"}},
+        context=TurnContext(user_id="bo", session_id="s2", turn_id="t2"),
     )
 
     assert [r.title for r in reports.list_reports(owner_id="ada")] == ["Ada's report"]

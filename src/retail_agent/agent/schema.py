@@ -15,7 +15,7 @@ from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, tool
 
 from retail_agent.agent.capture import TurnCapture
-from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.prompts import SCHEMA_PROMPT
 from retail_agent.datasources.column_values import enumerable_columns, with_values
 from retail_agent.knowledge.conventions import notes_for
@@ -32,7 +32,7 @@ def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """
 
     @tool
-    def describe_schema(runtime: ToolRuntime) -> str:
+    def describe_schema(runtime: ToolRuntime[TurnContext, object]) -> str:
         """Describe the data available: tables, columns and what they support.
 
         Runs no query and costs nothing. Use this for questions about what can

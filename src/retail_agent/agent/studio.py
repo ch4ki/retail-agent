@@ -79,23 +79,19 @@ def _deps(*, llm=None, source=None) -> AgentDeps:
     )
 
 
-def build_studio_graph(
-    *, llm=None, source=None, user_id: str = "studio", session_id: str = "studio"
-):
+def build_studio_graph(*, llm=None, source=None):
     """`llm` and `source` are injectable so this path can be tested without
     credentials — the drift that broke Studio was invisible precisely because
     nothing could construct it in a test.
 
-    `user_id`/`session_id` are accepted but unused now: identity moved off
-    `TurnCapture` entirely — `to_trace` reads it from parameters, not `self` —
-    and this function never invokes the graph it builds, so there is no
-    `runtime.context` here to put them on either. They stay on the signature,
-    and `make_graph` keeps resolving them from `configurable`, only because a
-    real per-caller Studio identity needs the two-parameter `ServerRuntime`
-    form this codebase does not build against yet — see `make_graph`.
-    Whoever calls `.invoke`/`.ainvoke` on the graph this returns must still
-    pass `context=TurnContext(user_id=...)` for any tool to act as anyone,
-    and for the trace to say who.
+    No `user_id`/`session_id` parameters: identity is not a property of how
+    this graph is built, it is a property of how it is *run*. This function
+    never invokes the graph it returns, so there is no `runtime.context` here
+    to put anything on. Whoever calls `.invoke`/`.ainvoke` against the graph
+    this returns must supply identity there — see `make_graph` for the two
+    routes that actually reach it — or every identity-scoped tool call fails
+    loudly with `MissingTurnIdentity` (`middleware.py`) rather than silently
+    acting as an empty-string user.
     """
     return build_agent(
         _deps(llm=llm, source=source),
@@ -108,26 +104,42 @@ def make_graph(config):
 
     One parameter, named `config`: `_factory_utils.py:91-140` classifies a
     factory by its signature, and a second parameter would be read as a
-    `ServerRuntime`.
+    `ServerRuntime`. Left unused otherwise — this used to resolve `user_id`
+    and `thread_id` out of `config["configurable"]` and thread them into
+    `build_studio_graph`, but no tool has read anything off that path since
+    identity moved to `runtime.context`; the resolution was dead code feeding
+    parameters nothing consumed. Both are gone now.
 
-    `user_id` is read from `configurable` and threaded through to
-    `build_studio_graph`, but nothing acts on it any more — not a tool, and
-    not the trace either, now that `TurnCapture.to_trace` takes identity as
-    parameters instead of reading `self`. Tool-facing identity, and the trace
-    label, are both a property of the *run*, not of how this graph was built:
-    every identity-scoped tool (and the recorder middleware that writes the
-    trace) reads `runtime.context.user_id`, which comes from
-    `context=TurnContext(...)` on the `invoke`/`ainvoke` call the caller makes
-    against the graph this returns, not from anything resolved here.
-    `supervisor_middleware`'s `before_agent` hook refuses to start a turn
-    whose context is missing or carries an empty `user_id`, so a caller of
-    this graph still has to supply one — just not through `configurable`.
-    Real per-user attribution — reading `configurable` at all — needs the
-    two-parameter `ServerRuntime` form and auth configured behind it; neither
-    exists yet, and `"studio"` is the honest default until they do.
+    Tool-facing identity, and the trace label, are a property of the *run*,
+    not of how this graph was built: every identity-scoped tool, and the
+    recorder middleware that writes the trace, read `runtime.context.user_id`
+    — set by whatever the caller passes as `context` (or has synced into
+    `context` for it — see below) on the `invoke`/`ainvoke` call made against
+    the graph this returns, never by anything resolved in this function.
+    `_identity_guard` (`middleware.py`, a `wrap_tool_call` hook so it also
+    covers a resumed turn) refuses to run any tool for a turn whose context
+    is missing or carries an empty `user_id`, on the first call and on every
+    resume alike.
+
+    There is a route through `configurable` that reaches `TurnContext`, and
+    it is worth stating precisely because it is easy to get backwards: this
+    docstring used to claim a caller "still has to supply one — just not
+    through `configurable`", which is false, verified against the installed
+    `langgraph_api`. `models/run.py:229` reads `context = payload.get(
+    "context") or {}`; when that is empty, `:257-261` falls back to
+    `context = configurable.copy()`, and `stream.py:193-201` filters that
+    against the graph's declared `context_schema` before the run starts. So
+    posting `{"configurable": {"user_id": "..."}}` with no top-level
+    `context` in the body DOES reach `TurnContext.user_id`. What does not
+    work is supplying both in the same request: `models/run.py:232-236`
+    returns 400 if a body carries both `configurable` and `context`, so a
+    caller that also needs some other `configurable` key has exactly one
+    channel open for identity too — `configurable` — not two.
+
+    No silent default is restored for a caller that supplies neither. A
+    Studio run started with no identity now fails loudly with
+    `MissingTurnIdentity` on its first tool call — the same failure every
+    other caller of this graph gets, and the correct behaviour, not a
+    regression to patch around with `"studio"`.
     """
-    configurable = (config or {}).get("configurable", {})
-    return build_studio_graph(
-        user_id=configurable.get("user_id") or "studio",
-        session_id=configurable.get("thread_id") or "studio",
-    )
+    return build_studio_graph()

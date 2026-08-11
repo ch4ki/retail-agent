@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from typing import Any
 
 from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, tool
@@ -70,7 +71,7 @@ def build_analyst_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]
     """
 
     @tool
-    def run_sql(sql: str, runtime: ToolRuntime) -> str:
+    def run_sql(sql: str, runtime: ToolRuntime[Any, Any]) -> str:
         """Run a read-only BigQuery query against theLook and return the rows.
 
         Write exactly one SELECT statement. Do not add a LIMIT; one is applied
@@ -121,7 +122,7 @@ def build_analyst_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]
             return _render(frame)
 
     @tool
-    def lookup_definitions(question: str, runtime: ToolRuntime) -> str:
+    def lookup_definitions(question: str, runtime: ToolRuntime[Any, Any]) -> str:
         """Look up how the business defines the terms in a question.
 
         Use this when a term's meaning is a business decision rather than a

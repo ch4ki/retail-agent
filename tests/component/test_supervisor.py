@@ -78,6 +78,36 @@ def test_a_turn_with_an_empty_user_id_fails_the_same_way(make_deps):
         )
 
 
+def test_a_dict_context_is_coerced_into_a_real_turncontext(make_deps):
+    """The shape the LangGraph server actually sends: a run's `context` is
+    parsed from the JSON request body, so it arrives as a plain `dict`, never
+    a `TurnContext` instance. LangGraph only turns that dict into the
+    dataclass because `build_agent` declares `context_schema=TurnContext` —
+    nothing pins that line. Delete it and `_coerce_context(None, {...})`
+    returns the dict unchanged (verified directly against the installed
+    `langgraph` package), so every tool's `runtime.context.user_id` becomes
+    an `AttributeError` on its first identity-scoped call: a dict has no such
+    attribute. Every other test in this suite passes a `TurnContext`
+    instance to `context=`, so this is the only one that would notice.
+
+    `list_reports` is the probe: it reads `runtime.context.user_id` and
+    nothing else, so the turn completing at all — through a real tool call,
+    not just agent construction — is the proof the coercion ran.
+    """
+    deps = make_deps(script=[[("list_reports", {})], "You have no saved reports yet."])
+    capture = TurnCapture(question="what have I saved")
+    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": "what have I saved"}]},
+        {"configurable": {"thread_id": "s1"}},
+        context={"user_id": "exec", "session_id": "s1", "turn_id": "t1"},
+    )
+
+    assert final_text(result) == "You have no saved reports yet."
+    assert capture.events and capture.events[0][0] == "list_reports"
+
+
 def test_a_question_answerable_from_the_conversation_needs_no_tool(make_deps):
     """A greeting is answered directly, without reaching for the analyst."""
     deps = make_deps(script=["Hello — ask me about orders or revenue."])

@@ -36,7 +36,7 @@ from langchain_core.tools import BaseTool, tool
 from langgraph.types import interrupt
 
 from retail_agent.agent.capture import TurnCapture
-from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.tools import partition_terms, settled_meanings
 from retail_agent.store.definitions import MAX_DEFINITION_CHARS
 from retail_agent.store.preferences import (
@@ -88,7 +88,9 @@ def build_memory_tools(
     """Bound to one turn, because both tools write against its user."""
 
     @tool
-    def remember_definition(term: str, definition: str, runtime: ToolRuntime) -> str:
+    def remember_definition(
+        term: str, definition: str, runtime: ToolRuntime[TurnContext, object]
+    ) -> str:
         """Record what a business term means for this executive.
 
         Call this when they tell you — for example "loyal means three or more
@@ -122,7 +124,9 @@ def build_memory_tools(
             )
 
     @tool
-    def ask_for_definitions(terms: list[str], runtime: ToolRuntime) -> str:
+    def ask_for_definitions(
+        terms: list[str], runtime: ToolRuntime[TurnContext, object]
+    ) -> str:
         """Ask the executive what a business term means, before querying.
 
         Use this when the question turns on a word whose meaning is a business
@@ -177,7 +181,9 @@ def build_memory_tools(
             return "\n\n".join(parts) or "There was nothing to settle."
 
     @tool
-    def note_preference(preference: str, evidence: str, runtime: ToolRuntime) -> str:
+    def note_preference(
+        preference: str, evidence: str, runtime: ToolRuntime[TurnContext, object]
+    ) -> str:
         """Record how this executive wants answers written.
 
         `preference` is the request in plain words — "keep answers under three
@@ -221,7 +227,9 @@ def build_memory_tools(
             return f"Saved: {note}. I will follow that from now on. Apply it now."
 
     @tool
-    def forget_preference(preference: str, runtime: ToolRuntime) -> str:
+    def forget_preference(
+        preference: str, runtime: ToolRuntime[TurnContext, object]
+    ) -> str:
         """Drop a preference this executive no longer wants.
 
         Pass the saved wording as closely as you can; the match ignores case and

@@ -15,11 +15,13 @@ part is in `test_repl_turn`.
 """
 
 import pandas as pd
+import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import TurnContext
+from retail_agent.agent.middleware import MissingTurnIdentity
 from retail_agent.agent.supervisor import build_agent
 from retail_agent.knowledge.seeds import SEED_TRIOS
 from retail_agent.store.definitions import InMemoryDefinitionStore, all_definitions
@@ -302,6 +304,35 @@ def test_a_declined_term_is_recorded_as_assumed(make_deps):
 
     assert "LGB" in capture.assumed_terms
     assert all_definitions(definitions, "exec") == {}
+
+
+def test_a_resumed_answer_with_no_identity_is_refused_not_misfiled(make_deps):
+    """`before_agent` is a completed checkpoint node; `Command(resume=...)`
+    re-runs only the pending task — the tools node — so a guard that only
+    lived in `before_agent` never saw this resume at all.
+
+    In-process, omitting `context=` on the resume the way this test does
+    used to reach `runtime.context is None` inside the replayed
+    `ask_for_definitions` body and die with a raw `AttributeError` at
+    `memory.py` reading `.user_id` off `None` — not `MissingTurnIdentity`,
+    and not before the answer would otherwise have been written. The
+    `wrap_tool_call` guard (`_IdentityGuardMiddleware`) is what actually
+    fires on this replay, and it must raise the named error instead.
+    """
+    definitions = InMemoryDefinitionStore()
+    deps = make_deps(script=asking(), definitions=definitions)
+
+    agent, config, capture, _ = start(deps)
+
+    with pytest.raises(MissingTurnIdentity):
+        agent.invoke(Command(resume={"answers": {"LGB": "low gross basket"}}), config)
+
+    assert all_definitions(definitions, "exec") == {}, (
+        "nothing was written for the real user"
+    )
+    assert all_definitions(definitions, "") == {}, (
+        "and nothing landed under the empty-string bucket either"
+    )
 
 
 def test_cancelling_a_later_term_keeps_an_earlier_terms_answer(make_deps):

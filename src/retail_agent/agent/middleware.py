@@ -35,6 +35,7 @@ from langchain.agents.middleware import (
     before_agent,
     dynamic_prompt,
 )
+from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
@@ -73,8 +74,9 @@ class MissingTurnIdentity(RuntimeError):
     dataclass's defaults). Nothing about that raises — every tool would
     simply read and write against the empty-string user, a shared bucket for
     every caller who forgot. That is worse than a crash, so this is the
-    crash: caught once, at turn start, instead of as a silent
-    misattribution discovered later.
+    crash: raised before every tool call this turn makes — the first one and
+    any a resume replays — instead of a silent misattribution discovered
+    later. See `_IdentityGuardMiddleware`.
     """
 
 # Redacted rather than blocked: blocking raises and kills the turn, and a turn
@@ -119,7 +121,12 @@ def supervisor_middleware(
     deps: AgentDeps, capture: TurnCapture
 ) -> list[AgentMiddleware]:
     """The stack that bounds the turn."""
-    stack: list[AgentMiddleware] = [_turn_sync(capture), _prompt(deps), *_pii()]
+    stack: list[AgentMiddleware] = [
+        _identity_guard(),
+        _turn_sync(capture),
+        _prompt(deps),
+        *_pii(),
+    ]
 
     # After `_pii()`, and that placement is the guarantee rather than a
     # preference. Both hook `before_model` and those run in list order; the
@@ -275,9 +282,44 @@ def _summarization(deps: AgentDeps) -> AgentMiddleware | None:
     )
 
 
+class _IdentityGuardMiddleware(AgentMiddleware):
+    """Refuse to run any tool body for a turn with no caller identity.
+
+    This is the guard that actually holds on resume, and the reason it is a
+    `wrap_tool_call` hook rather than a second `before_agent` check: LangGraph
+    checkpoints `before_agent` as a completed node, so `Command(resume=...)`
+    — which re-runs only the pending task, the tools node — never fires
+    `before_agent` again. `wrap_tool_call` is not a node; it is baked into the
+    tools node's own execution (`ToolNode(wrap_tool_call=...)` in
+    `langchain.agents.factory`), so it runs on every tool call the tools node
+    ever makes, including the replayed one a resume produces. `context` is
+    supplied per `invoke`/`ainvoke` call and is not checkpointed, so a resume
+    that omits it — exactly the shape the LangGraph server sends when a run
+    was posted with no `context` in its body — must be caught here, before
+    the tool body (in particular a paused gate's replayed body, which runs
+    again on the way back from `interrupt()`) reads or writes against an
+    empty-string user.
+
+    Listed first in the stack so it is outermost among the middleware that
+    wrap tool calls: it must run — and raise — before `ToolErrorMiddleware`
+    or anything else gets a chance to touch the call.
+    """
+
+    def wrap_tool_call(self, request: ToolCallRequest, handler):
+        _require_identity(request.runtime)
+        return handler(request)
+
+    async def awrap_tool_call(self, request: ToolCallRequest, handler):
+        _require_identity(request.runtime)
+        return await handler(request)
+
+
+def _identity_guard() -> AgentMiddleware:
+    return _IdentityGuardMiddleware()
+
+
 def _turn_sync(capture: TurnCapture) -> AgentMiddleware:
-    """Point a long-lived capture at the turn actually being run, and refuse
-    to run one with nobody to act as.
+    """Point a long-lived capture at the turn actually being run.
 
     The CLI and the eval build a fresh capture per turn, question already set,
     and this hook changes nothing there. Studio compiles the agent once and
@@ -289,9 +331,15 @@ def _turn_sync(capture: TurnCapture) -> AgentMiddleware:
     after the definition pause is the same question, and `settled_meanings`'
     retrieval must survive it for the replayed tool body to read.
 
-    The identity check runs first and unconditionally — on the initial call
-    and every resume — because it guards every tool below, not just the
-    question sync.
+    This also runs `_require_identity` on the initial call, as a fail-fast: a
+    turn started with no identity is rejected before a model call is even
+    made, rather than after paying for one. That is a cost optimisation only
+    — `before_agent` is a completed checkpoint node and never runs again on
+    `Command(resume=...)`, so it cannot be what makes the guarantee hold. The
+    guarantee — on the initial call, on every resume, before every tool —
+    belongs to `_identity_guard` (`wrap_tool_call`) above, which is why that
+    one is listed first in `supervisor_middleware` regardless of what this
+    hook does.
     """
 
     @before_agent

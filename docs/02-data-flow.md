@@ -87,7 +87,7 @@ untouched.
 ```python
 @dataclass
 class TurnCapture:
-    user_id: str; session_id: str; question: str; turn_id: str
+    question: str
 
     frame: MaskedFrame | None        # the last successful result. Only ever masked.
     executed_sql: str                # the query that ran, not the first draft
@@ -106,6 +106,14 @@ class TurnCapture:
 One capture per turn, created by the caller and closed over by the tools.
 Deliberately not global: eval cases run sequentially today, but a shared capture
 would attribute case 4's rows to case 3 the moment that stopped being true.
+
+`user_id`, `session_id` and `turn_id` are not here. Identity is fixed for a
+run and set by the caller, never accumulated or merged, which is what
+LangGraph runtime context is for — it lives on a frozen `TurnContext`,
+supplied per call as `context=TurnContext(user_id=..., session_id=...,
+turn_id=...)` on `agent.invoke()`/`.ainvoke()`, and every identity-scoped
+tool reads it off `runtime.context` rather than off this capture. One
+compiled agent can then serve every user, instead of one per build.
 
 `intent` is not stored — it is derived from which tools ran. The graph asked a
 model to classify the turn before doing any of it; which tools were actually
