@@ -1,14 +1,27 @@
 """The supervisor's middleware stack, as a list whose order is a guarantee."""
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 from langchain.agents.middleware import PIIMiddleware, SummarizationMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.middleware import _recorder, _summarization, supervisor_middleware
 from retail_agent.agent.prompts import CONVERSATION_SUMMARY_PROMPT
+
+
+def _runtime(user_id: str):
+    """A stand-in for `_turn_sync`'s `runtime` argument, good enough for
+    `_require_identity`'s `runtime.context.user_id` read.
+
+    `sync.before_agent(state, runtime)` is called directly here, bypassing
+    the framework, the same way tests elsewhere call a tool's raw `.func` —
+    so the identity guard needs something to read.
+    """
+    return SimpleNamespace(context=TurnContext(user_id=user_id))
 
 
 def tuned(deps, settings, **overrides):
@@ -95,7 +108,8 @@ def test_a_shared_capture_follows_the_turns_actual_question(make_deps):
 
     sync = _turn_sync(capture)
     sync.before_agent(
-        {"messages": [HumanMessage(content="How many loyal customers?")]}, None
+        {"messages": [HumanMessage(content="How many loyal customers?")]},
+        _runtime("studio"),
     )
 
     assert capture.question == "How many loyal customers?"
@@ -114,7 +128,8 @@ def test_the_sync_hook_leaves_a_per_turn_capture_alone(make_deps):
 
     sync = _turn_sync(capture)
     sync.before_agent(
-        {"messages": [HumanMessage(content="How many loyal customers?")]}, None
+        {"messages": [HumanMessage(content="How many loyal customers?")]},
+        _runtime("exec"),
     )
 
     assert capture.recalled_trios == ["kept"]

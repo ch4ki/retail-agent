@@ -129,7 +129,9 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             # store, the preference store and the trio corpus, and a retried
             # attempt should resend the same prompt rather than re-read all
             # three on every attempt.
-            system_prompt = report_writer_system_prompt(deps, capture)
+            system_prompt = report_writer_system_prompt(
+                deps, capture, user_id=runtime.context.user_id
+            )
             # A plain call, not an agent: with no tools there is no loop for a
             # graph to run, and `resilient_call` supplies the retry and
             # fallback that `create_agent`'s middleware supplied to the others.
@@ -213,12 +215,21 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     return [analyst, report_writer, ask_about_report]
 
 
-def report_writer_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
+def report_writer_system_prompt(
+    deps: AgentDeps, capture: TurnCapture, *, user_id: str
+) -> str:
     """The report writer's system prompt for one call.
 
     A plain function rather than only a literal inside the tool closure, for
     the same reason `supervisor_system_prompt` exists in `middleware.py`: so a
     test can ask what reaches the model without building a model call.
+
+    `capture` is still needed here — for `capture.trio_ids`, which is
+    accumulation, not identity, and out of this task's scope — but the
+    identity half is now a parameter like `settled_meanings`' is, rather than
+    read off the capture: this function is called from inside a tool, and
+    the tool reads identity from `runtime.context`, not from how the agent
+    was built.
 
     `.strip()` on the result, not just on the template — `REPORT_WRITER_PROMPT`
     ends `{examples}\n\n{style}`, and `style_examples` and `preference_block`
@@ -237,7 +248,7 @@ def report_writer_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
         persona=active_body(deps.personas) or PERSONA_DEFAULT,
         safety=SAFETY_RULES,
         examples=style_examples(consulted),
-        style=preference_block(notes_for(deps.preferences, capture.user_id)),
+        style=preference_block(notes_for(deps.preferences, user_id)),
     ).strip()
 
 

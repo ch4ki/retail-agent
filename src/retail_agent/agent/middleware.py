@@ -59,6 +59,24 @@ from retail_agent.store.preferences import notes_for, preference_block
 
 log = logging.getLogger(__name__)
 
+
+class MissingTurnIdentity(RuntimeError):
+    """A turn started with no caller identity to act as.
+
+    Every identity-scoped tool (`list_reports`, `remember_definition`,
+    `report_writer`, `delete_reports`, and the rest) now reads
+    `runtime.context.user_id` rather than a value closed over when the graph
+    was built. `TurnContext`'s fields default to `""`, and on the LangGraph
+    server a run posted with no `context` in its body is coerced to
+    `TurnContext()` rather than left `None` (`create_valid_run` turns a
+    missing context into `{}`, and `_coerce_context` turns `{}` into the
+    dataclass's defaults). Nothing about that raises — every tool would
+    simply read and write against the empty-string user, a shared bucket for
+    every caller who forgot. That is worse than a crash, so this is the
+    crash: caught once, at turn start, instead of as a silent
+    misattribution discovered later.
+    """
+
 # Redacted rather than blocked: blocking raises and kills the turn, and a turn
 # that dies is an agent failure rather than the leak it was. This is the second
 # line anyway — `mask_dataframe` stops PII entering context at all, and the SQL
@@ -254,7 +272,8 @@ def _summarization(deps: AgentDeps) -> AgentMiddleware | None:
 
 
 def _turn_sync(capture: TurnCapture) -> AgentMiddleware:
-    """Point a long-lived capture at the turn actually being run.
+    """Point a long-lived capture at the turn actually being run, and refuse
+    to run one with nobody to act as.
 
     The CLI and the eval build a fresh capture per turn, question already set,
     and this hook changes nothing there. Studio compiles the agent once and
@@ -265,10 +284,16 @@ def _turn_sync(capture: TurnCapture) -> AgentMiddleware:
     The mid-turn cache is dropped only when the question changed: a resume
     after the definition pause is the same question, and `settled_meanings`'
     retrieval must survive it for the replayed tool body to read.
+
+    The identity check runs first and unconditionally — on the initial call
+    and every resume — because it guards every tool below, not just the
+    question sync.
     """
 
     @before_agent
     def sync(state, runtime) -> None:
+        _require_identity(runtime)
+
         for message in reversed(state.get("messages", []) or []):
             if isinstance(message, HumanMessage):
                 question = message_text(message).strip()
@@ -279,6 +304,24 @@ def _turn_sync(capture: TurnCapture) -> AgentMiddleware:
         return None
 
     return sync
+
+
+def _require_identity(runtime) -> None:
+    """Fail the turn loudly, at the start, rather than let every tool below
+    silently read and write against the empty-string user.
+
+    See `MissingTurnIdentity` for why a run can reach this point with
+    `runtime.context` looking populated but empty rather than `None`.
+    """
+    context = runtime.context
+    if context is None or not getattr(context, "user_id", ""):
+        raise MissingTurnIdentity(
+            "This turn has no caller identity. Pass "
+            "context=TurnContext(user_id=..., session_id=..., turn_id=...) "
+            "to agent.invoke()/.ainvoke() — every tool that reads or writes "
+            "report, definition or preference data reads it from "
+            "runtime.context.user_id now, not from how the agent was built."
+        )
 
 
 def _recorder(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:

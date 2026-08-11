@@ -35,6 +35,44 @@ def run(deps, question, user="exec"):
     return final_text(result), capture
 
 
+def test_a_turn_with_no_context_fails_loudly(make_deps):
+    """The regression this guards: on the LangGraph server a run posted with
+    no `context` is coerced to `TurnContext()`, not left `None` — so without
+    this check every identity-scoped tool would silently read and write
+    against the empty-string user rather than fail. Checked here with no
+    context passed at all, which — in a direct in-process `invoke` — leaves
+    `runtime.context` `None`, the other shape this guard has to catch."""
+    from retail_agent.agent.middleware import MissingTurnIdentity
+
+    deps = make_deps(script=["Hello."])
+    capture = TurnCapture(user_id="exec", session_id="s1", question="hello")
+    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+
+    with pytest.raises(MissingTurnIdentity):
+        agent.invoke(
+            {"messages": [{"role": "user", "content": "hello"}]},
+            {"configurable": {"thread_id": "s1"}},
+        )
+
+
+def test_a_turn_with_an_empty_user_id_fails_the_same_way(make_deps):
+    """The server-coerced shape: a `TurnContext` that exists but carries no
+    `user_id`, which `_coerce_context` produces from a request body that sent
+    `context: {}` — this must fail exactly like no context at all."""
+    from retail_agent.agent.middleware import MissingTurnIdentity
+
+    deps = make_deps(script=["Hello."])
+    capture = TurnCapture(user_id="exec", session_id="s1", question="hello")
+    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+
+    with pytest.raises(MissingTurnIdentity):
+        agent.invoke(
+            {"messages": [{"role": "user", "content": "hello"}]},
+            {"configurable": {"thread_id": "s1"}},
+            context=TurnContext(user_id="", session_id="s1"),
+        )
+
+
 def test_a_question_answerable_from_the_conversation_needs_no_tool(make_deps):
     """A greeting is answered directly, without reaching for the analyst."""
     deps = make_deps(script=["Hello — ask me about orders or revenue."])
@@ -287,6 +325,7 @@ async def test_an_async_turn_falls_over_too(make_deps):
     result = await agent.ainvoke(
         {"messages": [{"role": "user", "content": "hello"}]},
         {"configurable": {"thread_id": "s1"}},
+        context=TurnContext(user_id="exec", session_id="s1", turn_id=capture.turn_id),
     )
 
     assert final_text(result) == "Hello."

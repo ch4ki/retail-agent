@@ -80,7 +80,9 @@ def test_the_report_writer_prompt_carries_the_users_notes():
     preferences = InMemoryPreferenceStore()
     add_note(preferences, user_id="dana", note="show prices in euros")
 
-    prompt = report_writer_system_prompt(deps_with(preferences), capture_for())
+    prompt = report_writer_system_prompt(
+        deps_with(preferences), capture_for(), user_id="dana"
+    )
 
     assert "show prices in euros" in prompt
 
@@ -90,7 +92,7 @@ def test_a_user_with_no_notes_gets_a_report_writer_prompt_with_no_dangling_tail(
     (and here, an empty `examples`, since no trio was consulted) must not leave
     the blank lines they'd otherwise weld onto the end of the prompt."""
     prompt = report_writer_system_prompt(
-        deps_with(InMemoryPreferenceStore()), capture_for()
+        deps_with(InMemoryPreferenceStore()), capture_for(), user_id="dana"
     )
 
     assert not prompt.endswith("\n"), "no dangling separator where the block was"

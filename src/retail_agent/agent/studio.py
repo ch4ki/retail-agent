@@ -84,7 +84,13 @@ def build_studio_graph(
 ):
     """`llm` and `source` are injectable so this path can be tested without
     credentials — the drift that broke Studio was invisible precisely because
-    nothing could construct it in a test."""
+    nothing could construct it in a test.
+
+    `user_id`/`session_id` seed the `TurnCapture` this compiled agent closes
+    over, which only labels the trace now — see `make_graph`. Whoever calls
+    `.invoke`/`.ainvoke` on the graph this returns must still pass
+    `context=TurnContext(user_id=...)` for any tool to act as anyone.
+    """
     return build_agent(
         _deps(llm=llm, source=source),
         TurnCapture(user_id=user_id, session_id=session_id),
@@ -99,9 +105,19 @@ def make_graph(config):
     `ServerRuntime`.
 
     `user_id` comes from `configurable` rather than from an authenticated
-    identity. Real per-user attribution needs the two-parameter `ServerRuntime`
-    form and auth configured behind it; neither exists yet, and `"studio"` is
-    the honest default until they do.
+    identity, and it only labels the trace this run produces
+    (`TurnCapture.to_trace`, still read from the closed-over capture) — no
+    tool acts as it. Tool-facing identity is a property of the *run*, not of
+    how this graph was built: every identity-scoped tool now reads
+    `runtime.context.user_id`, which comes from `context=TurnContext(...)` on
+    the `invoke`/`ainvoke` call the caller makes against the graph this
+    returns, not from anything resolved here. `supervisor_middleware`'s
+    `before_agent` hook refuses to start a turn whose context is missing or
+    carries an empty `user_id`, so a caller of this graph still has to supply
+    one — just not through `configurable`. Real per-user attribution for the
+    trace label needs the two-parameter `ServerRuntime` form and auth
+    configured behind it; neither exists yet, and `"studio"` is the honest
+    default until they do.
     """
     configurable = (config or {}).get("configurable", {})
     return build_studio_graph(
