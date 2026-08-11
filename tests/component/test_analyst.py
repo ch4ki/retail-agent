@@ -393,6 +393,70 @@ def test_two_parallel_run_sql_calls_in_one_turn_do_not_crash_it(make_deps):
     assert result["calls"] == 2
     assert result["frame"] is not None, "one of the two parallel writes survived"
     assert result["executed_sql"].startswith(("SELECT 1", "SELECT 2"))
+    # Known, documented gap rather than a silent one: every tool call in a
+    # parallel batch reads `runtime.state["attempts"]` before the super-step
+    # that contains all of them has applied anything, so both compute the
+    # same `index` and both attempts are numbered `q1` — unlike the
+    # sequential `q1, q2, q3` in `test_three_queries_accumulate_three_attempts`
+    # above. This does not corrupt `/metrics` (`compute_metrics` only reads
+    # `attempts[0]`), but `/trace` would print two rows both saying `q1`.
+    # There is no per-super-step running counter for a reducer to read, so
+    # fixing this would need a different numbering scheme entirely — out of
+    # scope for the crash this test guards against.
+    assert [a["step_id"] for a in result["attempts"]] == ["q1", "q1"]
+
+
+def test_a_failed_query_is_repaired_through_the_wired_stack(make_deps):
+    """Proves `_SqlFailureRecorder` is actually installed, not just that the
+    class works — `test_tools.py`'s `test_a_failed_query_is_recorded_and_repaired`
+    already proves the class itself by calling `wrap_tool_call` directly, and
+    that test would stay green even if `analyst_middleware` never listed
+    `_SqlFailureRecorder()` at all.
+
+    `_SqlFailureRecorder` replaced `ToolErrorMiddleware(on_error=describe_
+    failure)` in `analyst_middleware`'s stack rather than joining it, so if
+    that line were ever deleted there would be *no* handler left for
+    `QuerySyntaxError` in the analyst loop: the raise would propagate straight
+    out of `agent.invoke`, and the whole turn would die on a failure the loop
+    is supposed to repair. Only a test that drives a real failing query
+    through the real, fully assembled `analyst_middleware(deps)` stack can
+    catch that — this is that test.
+    """
+    import pandas as pd
+
+    from langchain.agents import create_agent
+
+    from retail_agent.agent.middleware import analyst_middleware
+    from retail_agent.agent.state import TurnState
+    from retail_agent.agent.tools import build_analyst_tools
+    from .conftest import FakeSource
+
+    source = FakeSource(frames={"default": pd.DataFrame({"n": [1]})}, failing={"bad"})
+    deps = make_deps(
+        script=[
+            [("run_sql", {"sql": "SELECT bad FROM users"})],
+            [("run_sql", {"sql": "SELECT n FROM users"})],
+            "One.",
+        ],
+        src=source,
+    )
+    agent = create_agent(
+        model=deps.llm,
+        tools=build_analyst_tools(deps),
+        state_schema=TurnState,
+        middleware=analyst_middleware(deps),
+    )
+
+    # If _SqlFailureRecorder is missing from the stack, this raises
+    # QuerySyntaxError instead of returning — the turn dies instead of
+    # completing with a repaired second attempt.
+    result = agent.invoke({"messages": [{"role": "user", "content": "how many?"}]})
+
+    assert [a["step_id"] for a in result["attempts"]] == ["q1", "q2"]
+    assert result["attempts"][0]["error"], "the failed first attempt is recorded"
+    assert result["attempts"][1]["row_count"] == 1, "the repaired second attempt ran"
+    assert result["calls"] == 2
+    assert result["messages"][-1].content == "One."
 
 
 def test_two_analyst_calls_in_one_turn_do_not_collide_on_step_id(make_deps):

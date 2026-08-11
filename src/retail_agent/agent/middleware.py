@@ -38,7 +38,6 @@ from langchain.agents.middleware import (
 from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
-from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from retail_agent.agent.deps import AgentDeps
@@ -249,11 +248,16 @@ class _SqlFailureRecorder(AgentMiddleware):
     """
 
     def wrap_tool_call(self, request: ToolCallRequest, handler):
+        # No `except GraphBubbleUp: raise` here, unlike `ToolErrorMiddleware`.
+        # There it is load-bearing — that middleware catches bare `Exception`,
+        # which a `GraphBubbleUp` control-flow signal (an interrupt, a parent
+        # `Command`) would otherwise be swallowed by. This `except` only ever
+        # catches `GuardRejection`/`DataSourceError`, and `GraphBubbleUp` is
+        # not a subclass of either, so it was never reachable here and would
+        # have read as a safety net this middleware does not need.
         started = time.perf_counter()
         try:
             return handler(request)
-        except GraphBubbleUp:
-            raise
         except (GuardRejection, DataSourceError) as exc:
             return _sql_failure_command(request, exc, started)
 
@@ -261,8 +265,6 @@ class _SqlFailureRecorder(AgentMiddleware):
         started = time.perf_counter()
         try:
             return await handler(request)
-        except GraphBubbleUp:
-            raise
         except (GuardRejection, DataSourceError) as exc:
             return _sql_failure_command(request, exc, started)
 
@@ -281,6 +283,13 @@ def _sql_failure_command(
     running `attempts` — the same count `run_sql`'s success path numbers
     against — so a rejected first query and a successful second one still
     read `q1`, `q2` rather than both claiming `q1`.
+
+    Hardcodes `step_event("run_sql", ...)` and reads `args["sql"]` because
+    `GuardRejection`/`DataSourceError` are, today, exactly the two types only
+    `run_sql` can raise (`test_only_run_sql_reads_the_warehouse`). A future
+    analyst tool that raised either would file a phantom `run_sql` attempt
+    with `sql=""` — fine to widen with a tool-name check if that ever
+    happens, not needed while the invariant holds.
     """
     text = describe_failure(exc, request) or str(exc)
     state = request.state or {}

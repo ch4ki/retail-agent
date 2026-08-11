@@ -120,6 +120,32 @@ def test_a_guard_violation_is_recorded_by_the_middleware_that_catches_it(
     assert "rewrite it" in _content(command).lower()
 
 
+def test_run_sql_tolerates_a_runtime_with_no_state(make_deps, source):
+    """`_runtime()` above always passes `state={}`, like every test in this
+    file, so nothing here pinned the `state=None` shape itself — `run_sql`
+    used to read `runtime.state.get(...)` directly, which raises
+    `AttributeError` the moment `state` is `None` rather than an empty dict.
+    Every other tool already reads `(runtime.state or {})`; this is the same
+    fix, made for `run_sql`, and this is what pins it.
+    """
+    from langchain.tools import ToolRuntime
+
+    deps = make_deps(src=source)
+    tool = build_analyst_tools(deps)[0]  # run_sql
+    runtime = ToolRuntime(
+        state=None,
+        context=TurnContext(user_id="exec", session_id="s1"),
+        config={},
+        stream_writer=None,
+        tool_call_id="test",
+        store=None,
+    )
+
+    command = tool.func("SELECT id, spend FROM users", runtime=runtime)
+
+    assert command.update["attempts"][0]["step_id"] == "q1"
+
+
 def test_restricted_columns_are_dropped_before_the_model_sees_them(make_deps):
     """`email` is in the policy, so the rendered table cannot contain it."""
     source = FakeSource(
