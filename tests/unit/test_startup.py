@@ -41,11 +41,48 @@ def test_the_agent_can_be_built_from_them():
     A model that can `bind_tools` is required where the graph needed nothing —
     `create_agent` binds the tool schemas when the agent is compiled.
     """
-    from retail_agent.agent.capture import TurnCapture
     from retail_agent.agent.supervisor import build_agent
 
     deps = build_deps(_settings(), llm=_bindable(), source=_schema_only())
-    assert build_agent(deps, TurnCapture())
+    assert build_agent(deps)
+
+
+def test_no_tool_leaks_its_runtime_into_the_model_facing_schema():
+    """`ToolRuntime` must never reach the model.
+
+    A tool takes it by adding a parameter literally named `runtime` — nothing
+    marks it `Annotated` or optional — and the framework strips that parameter
+    from `tool_call_schema` and injects a real value at call time. If a tool's
+    `runtime` parameter is ever given a default (to make some other caller's
+    life easier, say), the strip stops working: `langchain_core`'s injection
+    check does not unwrap `Optional`, so `runtime` stays in the schema, and
+    schema conversion for every real provider then crashes on `ToolRuntime`'s
+    non-serialisable `stream_writer`. The fakes used elsewhere in this suite
+    override `bind_tools` and never run real schema conversion, so only a test
+    that calls `convert_to_openai_tool` directly, as this one does, can catch
+    it.
+
+    Covers every tool the process can bind to a model, not just the ten
+    supervisor tools `build_tools` returns. `run_sql` and `lookup_definitions`
+    come from `build_analyst_tools` and are bound to the nested analyst
+    agent's own model (`subagents.py`'s `analyst` tool), a second `bind_tools`
+    call this suite would otherwise never exercise. Reinstating
+    `runtime: ToolRuntime | None = None` on `run_sql` alone — the original
+    defect from Task 1 — passed the whole suite at 872 with this loop scoped
+    to `build_tools` only; only widening the loop here catches it.
+    """
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    from retail_agent.agent.supervisor import build_tools
+    from retail_agent.agent.tools import build_analyst_tools
+
+    deps = build_deps(_settings(), llm=_bindable(), source=_schema_only())
+    tools = [*build_tools(deps), *build_analyst_tools(deps)]
+    for tool in tools:
+        assert "runtime" not in tool.tool_call_schema.model_fields, (
+            f"{tool.name} leaks `runtime` into its model-facing schema"
+        )
+        convert_to_openai_tool(tool)  # must not raise
 
 
 def test_an_unreachable_database_degrades_rather_than_raising():
@@ -120,7 +157,7 @@ def test_both_entry_points_use_the_same_wiring():
 # `langgraph_api` invokes a graph factory once per request
 # (langgraph_api/graph.py:390), passing that run's config. These tests pin the
 # three properties that depend on: one dependency container per process, one
-# capture per run, and no persistence of our own.
+# freshly compiled agent per run, and no persistence of our own.
 
 
 def test_the_factory_takes_exactly_a_config():
@@ -162,43 +199,41 @@ def _fake_deps(monkeypatch):
     studio._process_deps.cache_clear()
 
 
-def test_each_run_gets_its_own_capture(_fake_deps, monkeypatch):
-    """The defect this replaces: one capture shared by every Studio thread, so
-    two conversations wrote their events, reports and pending approvals into
-    the same object."""
+def test_each_run_gets_its_own_compiled_agent(_fake_deps, monkeypatch):
+    """The defect this replaces: one long-lived capture shared by every Studio
+    thread, so two conversations wrote their events, reports and pending
+    approvals into the same object.
+
+    There is no such object to share any more — a turn's record lives in
+    checkpointed `TurnState`, and identity lives on `TurnContext`, both set by
+    whoever calls `.invoke` against the graph this returns, per run. What
+    remains to pin here is that `make_graph` still compiles a fresh agent on
+    every call rather than reusing one across runs; object identity of what
+    `build_agent` returns is the only thing left to check that on, and it is
+    also the only thing the defect it replaces was ever really about.
+    """
     studio = _fake_deps
 
     seen = []
-    monkeypatch.setattr(
-        studio, "build_agent", lambda deps, capture, **kw: seen.append(capture)
-    )
+    real_build_agent = studio.build_agent
+
+    def spy(deps, **kw):
+        built = real_build_agent(deps, **kw)
+        seen.append(built)
+        return built
+
+    monkeypatch.setattr(studio, "build_agent", spy)
 
     studio.make_graph({"configurable": {"thread_id": "thread-a"}})
     studio.make_graph({"configurable": {"thread_id": "thread-b"}})
 
     assert seen[0] is not seen[1]
-    assert (seen[0].session_id, seen[1].session_id) == ("thread-a", "thread-b")
-
-
-def test_the_user_comes_from_the_config_when_given(_fake_deps, monkeypatch):
-    studio = _fake_deps
-
-    seen = []
-    monkeypatch.setattr(
-        studio, "build_agent", lambda deps, capture, **kw: seen.append(capture)
-    )
-
-    studio.make_graph({"configurable": {"thread_id": "t", "user_id": "regional-3"}})
-    studio.make_graph({"configurable": {"thread_id": "t"}})
-
-    assert seen[0].user_id == "regional-3"
-    assert seen[1].user_id == "studio", "the default when nothing identifies the caller"
 
 
 def test_the_expensive_dependencies_are_built_once(_fake_deps, monkeypatch):
     """Per-run construction must not mean per-run BigQuery and model clients."""
     studio = _fake_deps
-    monkeypatch.setattr(studio, "build_agent", lambda deps, capture, **kw: None)
+    monkeypatch.setattr(studio, "build_agent", lambda deps, **kw: None)
 
     studio.make_graph({"configurable": {"thread_id": "one"}})
     studio.make_graph({"configurable": {"thread_id": "two"}})

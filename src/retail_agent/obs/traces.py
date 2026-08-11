@@ -1,8 +1,8 @@
 """Turn traces: what the agent did, kept so it can be explained afterwards.
 
 The record is deliberately flat and already-masked. Everything in it comes from
-the turn's `TurnCapture`, and the result frame — the only place row values live
-— is not among the fields. A trace cannot become a second disclosure path.
+the turn's `TurnState`, and the result frame — the only place row values live —
+is not among the fields. A trace cannot become a second disclosure path.
 
 Metrics live behind the same protocol as storage because "how often does SQL
 pass the guard first time" is a question about stored turns, and answering it in
@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
-# (step, duration_ms, detail) — one tool call. Built by `TurnCapture`, which is
-# where a turn's timings are accumulated; nothing here reads agent internals.
+from retail_agent.agent.state import intent_from_events
+
+# (step, duration_ms, detail) — one tool call. Built from `TurnState["events"]`,
+# where a turn's timings are accumulated; nothing here reads agent internals
+# beyond that plain list of dicts.
 Event = tuple[str, int, str]
 
 MAX_ANSWER_CHARS = 4_000
@@ -51,6 +54,67 @@ class TraceRecord:
     # whole on every model call, so this is the figure a summarisation trigger
     # has to be set against — and it was previously invisible.
     context_tokens: int = 0
+
+
+def trace_from_state(
+    state: dict[str, Any], answer: str, *, user_id: str, session_id: str, turn_id: str
+) -> TraceRecord:
+    """Reduce a turn's checkpointed `TurnState` to its trace.
+
+    `state` is whatever a caller has on hand — the dict `agent.invoke()`
+    returns for a turn that finished, or `agent.get_state(config).values`
+    read back off the checkpointer for one that died before returning. Both
+    carry the same keys, because every tool writes them the same way
+    regardless of how the turn ends.
+
+    `status` is not read from `state` — no tool ever writes it, so a
+    checkpoint carries no opinion on whether the turn it recorded succeeded.
+    It defaults to `"ok"` here; a caller recording a turn that died overrides
+    it with `dataclasses.replace(trace, status="failed")` afterwards.
+    """
+    events = state.get("events") or []
+    attempts = state.get("attempts") or []
+    return TraceRecord(
+        turn_id=turn_id,
+        session_id=session_id,
+        owner_id=user_id,
+        question=_last_human_text(state.get("messages") or []),
+        intent=intent_from_events(events),
+        status="ok",
+        answer=answer[:MAX_ANSWER_CHARS],
+        redactions=state.get("redactions", 0),
+        bytes_billed=sum(a.get("bytes_billed") or 0 for a in attempts),
+        duration_ms=sum(event["ms"] for event in events),
+        events=[(event["name"], event["ms"], event["detail"]) for event in events],
+        attempts=list(attempts),
+        trios=list(state.get("trio_ids") or []),
+        assumptions=list(state.get("assumed_terms") or []),
+        preference_changes=[
+            (change["action"], change["note"])
+            for change in (state.get("preference_changes") or [])
+        ],
+        report_ids=[
+            report["report_id"] for report in (state.get("reports_written") or [])
+        ],
+        context_tokens=state.get("context_tokens", 0),
+    )
+
+
+def _last_human_text(messages) -> str:
+    """This turn's question, the last `HumanMessage` in the thread.
+
+    Identity and the transcript both live in graph state, so this reads the
+    same fact `note_preference` does (`memory.py`'s own `_last_human_text`)
+    rather than a value synced onto a closure at the top of every turn.
+    """
+    from langchain_core.messages import HumanMessage
+
+    from retail_agent.llm.messages import message_text
+
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return message_text(message)
+    return ""
 
 
 @runtime_checkable

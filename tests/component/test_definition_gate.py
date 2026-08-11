@@ -15,10 +15,12 @@ part is in `test_repl_turn`.
 """
 
 import pandas as pd
+import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
-from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.deps import TurnContext
+from retail_agent.agent.middleware import MissingTurnIdentity
 from retail_agent.agent.supervisor import build_agent
 from retail_agent.knowledge.seeds import SEED_TRIOS
 from retail_agent.store.definitions import InMemoryDefinitionStore, all_definitions
@@ -49,14 +51,27 @@ def straight_to_analysis(question=QUESTION):
     ]
 
 
+def context_for(user_id: str = "exec", session_id: str = "s1", turn_id: str = "t1") -> TurnContext:
+    """The runtime context for a test's identity.
+
+    The tools read identity from `runtime.context`, which `invoke` never
+    fills in unless the caller passes it — so both the initial invoke and
+    every resume below have to carry it, the same as `cli/chat.py` does.
+    """
+    return TurnContext(user_id=user_id, session_id=session_id, turn_id=turn_id)
+
+
 def start(deps, question=QUESTION, arm=True, script=None):
-    capture = TurnCapture(user_id="exec", session_id="s1", question=question)
     agent = build_agent(
-        deps, capture, checkpointer=MemorySaver(), pause_for_definitions=arm
+        deps, checkpointer=MemorySaver(), pause_for_definitions=arm
     )
     config = {"configurable": {"thread_id": "s1"}}
-    result = agent.invoke({"messages": [{"role": "user", "content": question}]}, config)
-    return agent, config, capture, result
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": question}]},
+        config,
+        context=context_for(),
+    )
+    return agent, config, result
 
 
 def paused(result) -> bool:
@@ -66,8 +81,8 @@ def paused(result) -> bool:
 def open_terms(result) -> list[str]:
     """The terms named by the pause itself — our own payload shape now, not
     `HumanInTheLoopMiddleware`'s `action_requests`, and not a side channel on
-    the capture (`_approval_gate` is gone; nothing sets `pending_definition`
-    any more)."""
+    anything long-lived (`_approval_gate` is gone; nothing sets
+    `pending_definition` any more)."""
     return result["__interrupt__"][0].value["terms"]
 
 
@@ -77,7 +92,7 @@ def test_asking_pauses_the_turn_before_a_query_is_spent(make_deps):
     source = FakeSource(frames={"default": pd.DataFrame({"id": [1]})})
     deps = make_deps(script=asking(), src=source, definitions=InMemoryDefinitionStore())
 
-    _, _, _, result = start(deps)
+    _, _, result = start(deps)
 
     assert paused(result)
     assert source.executed == [], "no query before the term is settled"
@@ -88,7 +103,7 @@ def test_the_pause_names_the_term_the_model_could_not_settle(make_deps):
     """A word no list ever contained. This is the case the regex missed."""
     deps = make_deps(script=asking(), definitions=InMemoryDefinitionStore())
 
-    _, _, _, result = start(deps)
+    _, _, result = start(deps)
 
     assert "LGB" in open_terms(result)
 
@@ -101,7 +116,7 @@ def test_a_term_the_executive_already_defined_is_not_asked_again(make_deps):
     source = FakeSource(frames={"default": pd.DataFrame({"id": [1]})})
     deps = make_deps(script=asking(), src=source, definitions=definitions)
 
-    _, _, _, result = start(deps)
+    _, _, result = start(deps)
 
     assert not paused(result)
     assert source.executed, "the analyst ran"
@@ -127,7 +142,7 @@ def test_a_term_the_corpus_defines_does_not_pause_the_turn(make_deps):
         trios=list(SEED_TRIOS),
     )
 
-    _, _, _, result = start(deps, question="how many loyal customers do we have?")
+    _, _, result = start(deps, question="how many loyal customers do we have?")
 
     assert not paused(result), "the analytics team already defined 'loyal'"
     assert source.executed, "the analyst ran"
@@ -139,7 +154,7 @@ def test_a_term_no_trio_covers_still_pauses(make_deps):
         script=asking(), definitions=InMemoryDefinitionStore(), trios=list(SEED_TRIOS)
     )
 
-    _, _, _, result = start(deps)
+    _, _, result = start(deps)
 
     assert paused(result)
     assert open_terms(result) == ["LGB"]
@@ -152,7 +167,7 @@ def test_only_the_unsettled_terms_reach_the_pause(make_deps):
         script=asking(terms=("top", "LGB")), definitions=definitions
     )
 
-    _, _, _, result = start(deps)
+    _, _, result = start(deps)
 
     assert paused(result)
     assert open_terms(result) == ["LGB"]
@@ -165,9 +180,11 @@ def test_approving_lets_the_analyst_run_in_the_same_turn(make_deps):
     source = FakeSource(frames={"default": pd.DataFrame({"id": [1]})})
     deps = make_deps(script=asking(), src=source, definitions=definitions)
 
-    agent, config, _, _ = start(deps)
+    agent, config, _ = start(deps)
     result = agent.invoke(
-        Command(resume={"answers": {"LGB": "low gross basket"}}), config
+        Command(resume={"answers": {"LGB": "low gross basket"}}),
+        config,
+        context=context_for(),
     )
 
     assert not paused(result)
@@ -180,8 +197,12 @@ def test_the_answer_reaches_the_model_that_asked(make_deps):
     definitions = InMemoryDefinitionStore()
     deps = make_deps(script=asking(), definitions=definitions)
 
-    agent, config, _, _ = start(deps)
-    agent.invoke(Command(resume={"answers": {"LGB": "low gross basket"}}), config)
+    agent, config, _ = start(deps)
+    agent.invoke(
+        Command(resume={"answers": {"LGB": "low gross basket"}}),
+        config,
+        context=context_for(),
+    )
 
     assert any("low gross basket" in prompt for prompt in deps.llm.prompts)
 
@@ -194,7 +215,7 @@ def test_a_question_the_model_understood_is_never_paused(make_deps):
         script=straight_to_analysis(), src=source, definitions=InMemoryDefinitionStore()
     )
 
-    _, _, _, result = start(deps)
+    _, _, result = start(deps)
 
     assert not paused(result)
     assert source.executed
@@ -206,10 +227,10 @@ def test_the_gate_is_off_unless_the_caller_arms_it(make_deps):
     answer with a disclosure, not an interrupt."""
     deps = make_deps(script=asking(), definitions=InMemoryDefinitionStore())
 
-    _, _, capture, result = start(deps, arm=False)
+    _, _, result = start(deps, arm=False)
 
     assert not paused(result)
-    assert capture.assumed_terms == ["LGB"], "assumed rather than asked"
+    assert result["assumed_terms"] == ["LGB"], "assumed rather than asked"
 
 
 def test_the_eval_harness_answers_an_undefined_term_rather_than_pausing(make_deps):
@@ -242,7 +263,7 @@ def test_with_no_definition_store_there_is_nothing_to_ask_into(make_deps):
     turn, which is worse than assuming and saying so."""
     deps = make_deps(script=asking(), definitions=None)
 
-    _, _, _, result = start(deps)
+    _, _, result = start(deps)
 
     assert not paused(result)
 
@@ -255,9 +276,11 @@ def test_the_tool_writes_the_definition_the_executive_gave(make_deps):
     definitions = InMemoryDefinitionStore()
     deps = make_deps(script=asking(), definitions=definitions)
 
-    agent, config, _, _ = start(deps)
+    agent, config, _ = start(deps)
     result = agent.invoke(
-        Command(resume={"answers": {"LGB": "low gross basket"}}), config
+        Command(resume={"answers": {"LGB": "low gross basket"}}),
+        config,
+        context=context_for(),
     )
 
     assert not paused(result)
@@ -270,11 +293,42 @@ def test_a_declined_term_is_recorded_as_assumed(make_deps):
     definitions = InMemoryDefinitionStore()
     deps = make_deps(script=asking(), definitions=definitions)
 
-    agent, config, capture, _ = start(deps)
-    agent.invoke(Command(resume={"answers": {}}), config)
+    agent, config, _ = start(deps)
+    result = agent.invoke(
+        Command(resume={"answers": {}}), config, context=context_for()
+    )
 
-    assert "LGB" in capture.assumed_terms
+    assert "LGB" in result["assumed_terms"]
     assert all_definitions(definitions, "exec") == {}
+
+
+def test_a_resumed_answer_with_no_identity_is_refused_not_misfiled(make_deps):
+    """`before_agent` is a completed checkpoint node; `Command(resume=...)`
+    re-runs only the pending task — the tools node — so a guard that only
+    lived in `before_agent` never saw this resume at all.
+
+    In-process, omitting `context=` on the resume the way this test does
+    used to reach `runtime.context is None` inside the replayed
+    `ask_for_definitions` body and die with a raw `AttributeError` at
+    `memory.py` reading `.user_id` off `None` — not `MissingTurnIdentity`,
+    and not before the answer would otherwise have been written. The
+    `wrap_tool_call` guard (`_IdentityGuardMiddleware`) is what actually
+    fires on this replay, and it must raise the named error instead.
+    """
+    definitions = InMemoryDefinitionStore()
+    deps = make_deps(script=asking(), definitions=definitions)
+
+    agent, config, _ = start(deps)
+
+    with pytest.raises(MissingTurnIdentity):
+        agent.invoke(Command(resume={"answers": {"LGB": "low gross basket"}}), config)
+
+    assert all_definitions(definitions, "exec") == {}, (
+        "nothing was written for the real user"
+    )
+    assert all_definitions(definitions, "") == {}, (
+        "and nothing landed under the empty-string bucket either"
+    )
 
 
 def test_cancelling_a_later_term_keeps_an_earlier_terms_answer(make_deps):
@@ -299,14 +353,14 @@ def test_cancelling_a_later_term_keeps_an_earlier_terms_answer(make_deps):
         definitions=definitions,
     )
 
-    agent, config, capture, result = start(deps)
+    agent, config, result = start(deps)
     assert paused(result)
 
     # The executive types an answer for "top", then presses enter on "LGB" —
     # the CLI's cancel path, distinct from the numbered hand-back option.
     console = FakeConsole(["the 10 highest by revenue", ""])
-    resume = _settle_definitions(console, deps, capture, {"terms": ["top", "LGB"]})
-    result = agent.invoke(Command(resume=resume), config)
+    resume = _settle_definitions(console, deps, QUESTION, {"terms": ["top", "LGB"]})
+    result = agent.invoke(Command(resume=resume), config, context=context_for())
 
     assert not paused(result)
     kept = all_definitions(definitions, "exec")

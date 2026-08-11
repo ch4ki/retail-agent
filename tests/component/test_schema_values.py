@@ -116,9 +116,22 @@ def test_the_structural_schema_carries_no_conventions(make_deps):
     """`describe_schema` answers "what data do you have" from table shape.
     Business conventions belong to the query writer, and that path pays
     nothing."""
-    from retail_agent.agent.capture import TurnCapture
+    from langchain.tools import ToolRuntime
+
+    from retail_agent.agent.deps import TurnContext
     from retail_agent.agent.schema import build_schema_tool
 
-    describe = build_schema_tool(make_deps(src=ValueSource()), TurnCapture())[0].func
+    describe = build_schema_tool(make_deps(src=ValueSource()))[0].func
+    runtime = ToolRuntime(
+        state=None,
+        context=TurnContext(),
+        config={},
+        stream_writer=None,
+        tool_call_id="test",
+        store=None,
+    )
 
-    assert "NOT IN" not in describe()
+    result = describe(runtime=runtime)
+    rendered = result.update["messages"][0].content
+
+    assert "NOT IN" not in rendered

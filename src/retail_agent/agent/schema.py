@@ -10,19 +10,23 @@ something about to write a literal into a WHERE clause.
 from __future__ import annotations
 
 import logging
+import time
 
+from langchain.tools import ToolRuntime
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, tool
+from langgraph.types import Command
 
-from retail_agent.agent.capture import TurnCapture
-from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.prompts import SCHEMA_PROMPT
+from retail_agent.agent.state import step_event
 from retail_agent.datasources.column_values import enumerable_columns, with_values
 from retail_agent.knowledge.conventions import notes_for
 
 log = logging.getLogger(__name__)
 
 
-def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
+def build_schema_tool(deps: AgentDeps) -> list[BaseTool]:
     """"What data do you have?" answered without spending anything.
 
     A tool rather than a subagent: there is no loop to run and nothing to
@@ -31,18 +35,27 @@ def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """
 
     @tool
-    def describe_schema() -> str:
+    def describe_schema(runtime: ToolRuntime[TurnContext, object]) -> Command:
         """Describe the data available: tables, columns and what they support.
 
         Runs no query and costs nothing. Use this for questions about what can
         be asked rather than about the numbers themselves.
         """
-        with capture.step("describe_schema") as step:
-            schemas = deps.source.describe_all()
-            step.detail = f"{len(schemas)} table(s)"
-            return SCHEMA_PROMPT.format(
-                schema="\n\n".join(schema.to_ddl() for schema in schemas)
-            )
+        started = time.perf_counter()
+        schemas = deps.source.describe_all()
+        detail = f"{len(schemas)} table(s)"
+        answer = SCHEMA_PROMPT.format(
+            schema="\n\n".join(schema.to_ddl() for schema in schemas)
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(content=answer, tool_call_id=runtime.tool_call_id)
+                ],
+                "events": [step_event("describe_schema", started, detail)],
+                "calls": 1,
+            }
+        )
 
     return [describe_schema]
 

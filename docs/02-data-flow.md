@@ -78,34 +78,58 @@ not retrieve.
 
 ## What one turn records
 
-There is no `TurnState`. An agent has a message list, and the rows it saw were
-rendered into a `ToolMessage` string; re-parsing that string to score or trace it
-would measure how the tool formatted its output. So the tools write what they did
-into a `TurnCapture` on the way past, and the eval and the trace read it back
-untouched.
+An agent has a message list, and the rows it saw were rendered into a
+`ToolMessage` string; re-parsing that string to score or trace it would
+measure how the tool formatted its output. So every tool writes what it did
+into `TurnState`, LangGraph's own checkpointed state, by returning a
+`Command(update={...})` alongside its `ToolMessage` — and the eval and the
+trace read those fields back untouched.
 
 ```python
-@dataclass
-class TurnCapture:
-    user_id: str; session_id: str; question: str; turn_id: str
-
-    frame: MaskedFrame | None        # the last successful result. Only ever masked.
-    executed_sql: str                # the query that ran, not the first draft
-    attempts: list[dict]             # every try, with the guard's verdict and outcome
-    events: list[tuple[str, int, str]]   # (step, ms, what it decided) — for /trace
-    trio_ids: list[str]              # what the Golden Bucket settled
-    assumed_terms: list[str]         # what it had to decide alone
-    redactions: int
-    calls: int
-    preference_changes: list[tuple[str, str]]   # the CLI announces these itself
-    reports_written: list[WrittenReport]        # bodies included, so the CLI can print them
+class TurnState(AgentState):
+    attempts: Annotated[list[dict], operator.add]          # every try, with the guard's verdict and outcome
+    events: Annotated[list[dict], operator.add]             # {name, ms, detail} — for /trace
+    trio_ids: Annotated[list[str], _dedupe_ordered]          # what the Golden Bucket settled
+    assumed_terms: Annotated[list[str], _dedupe_ordered]     # what it had to decide alone
+    preference_changes: Annotated[list[dict], operator.add]  # the CLI announces these itself
+    reports_written: Annotated[list[dict], operator.add]     # ids only; bodies live in the report store
+    redactions: Annotated[int, operator.add]
+    calls: Annotated[int, operator.add]
     context_tokens: int              # what this thread costs every later turn
-    status: str                      # "ok" or "failed"
+    frame: Annotated[dict | None, _keep_last]   # the last successful result, as plain values. Only ever masked.
+    executed_sql: Annotated[str, _keep_last]    # the query that ran, not the first draft
+    status: str
 ```
 
-One capture per turn, created by the caller and closed over by the tools.
-Deliberately not global: eval cases run sequentially today, but a shared capture
-would attribute case 4's rows to case 3 the moment that stopped being true.
+Every field but `frame`, `executed_sql`, `context_tokens` and `status`
+accumulates: a reducer combines what a tool call writes with whatever earlier
+tool calls in the same turn already wrote, rather than replacing it, because
+LangGraph applies every super-step's writes through the field's reducer. Two
+shapes of reducer are in play. `operator.add` — plain concatenation — is right
+for `attempts` and `events`, where the model looking something up twice is two
+things that happened. `_dedupe_ordered` is an order-preserving union instead
+for `trio_ids` and `assumed_terms`, because the model looking the same term up
+twice is one fact about what it consulted, not two. `frame` and `executed_sql`
+are single-value fields rather than accumulators, but they still need an
+explicit reducer — `_keep_last`, which just takes the newest write — because a
+bare field with none raises `InvalidUpdateError` the moment two tool calls in
+the same super-step both write it, which parallel tool calls (routine for both
+Gemini and OpenAI) do.
+
+Checkpointed, unlike the closure this replaced: a conversation resumed from a
+checkpoint now carries what its tools had done, not just its messages. Nothing
+in `TurnState` is a custom class — LangGraph round-trips dataclasses today but
+warns that deserializing unregistered types will be blocked in a future
+version, and state is checkpointed on every super-step, so `MaskedFrame`
+appears here only as the plain dict `frame_to_state` turns it into.
+
+`user_id`, `session_id` and `turn_id` are not here. Identity is fixed for a
+run and set by the caller, never accumulated or merged, which is what
+LangGraph runtime context is for — it lives on a frozen `TurnContext`,
+supplied per call as `context=TurnContext(user_id=..., session_id=...,
+turn_id=...)` on `agent.invoke()`/`.ainvoke()`, and every identity-scoped
+tool reads it off `runtime.context` rather than off `TurnState`. One compiled
+agent can then serve every user, instead of one per build.
 
 `intent` is not stored — it is derived from which tools ran. The graph asked a
 model to classify the turn before doing any of it; which tools were actually
@@ -143,19 +167,24 @@ graph it has no use for. `report_writer` and `ask_about_report` are that
 second shape:
 
 ```python
-def build_subagents(deps, capture):
+def build_subagents(deps):
     @tool
-    def analyst(question: str) -> str:
+    def analyst(question: str, runtime: ToolRuntime[TurnContext, object]) -> Command:
         """Query the retail data and report what it found."""
         ...
-        agent = create_agent(model=deps.llm, tools=..., middleware=...)
-        return final_text(agent.invoke(...))
+        agent = create_agent(model=deps.llm, tools=..., state_schema=TurnState, middleware=...)
+        result = agent.invoke(...)
+        # The nested invoke returns the analyst subgraph's own TurnState, not
+        # merged into this turn's — this tool lifts every field it produced
+        # into the Command below.
+        return Command(update={"messages": [...], "attempts": result["attempts"], ...})
 
     @tool
-    def report_writer(brief: str, title: str) -> str:
+    def report_writer(brief: str, title: str, runtime: ToolRuntime[TurnContext, object]) -> Command:
         """Write a report from findings, save it, and show it to the executive."""
         ...
-        return resilient_call(deps, lambda model: model.invoke(...))
+        reply = resilient_call(deps, lambda model: model.invoke(...))
+        return Command(update={"messages": [...], "reports_written": [...]})
 
     return [analyst, report_writer, ask_about_report]
 ```

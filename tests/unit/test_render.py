@@ -7,9 +7,10 @@ assertions pass on output a user cannot read.
 
 import io
 
+from langchain_core.messages import HumanMessage
 from rich.console import Console
 
-from retail_agent.agent.capture import TurnCapture, WrittenReport
+from retail_agent.agent.state import attempt_record, step_event
 from retail_agent.cli.render import (
     render_answer,
     render_confirmation,
@@ -18,7 +19,7 @@ from retail_agent.cli.render import (
     render_reports,
     render_trace,
 )
-from retail_agent.safety.frame import MaskedFrame
+from retail_agent.obs.traces import trace_from_state
 
 
 def recorder():
@@ -29,27 +30,47 @@ def text(console) -> str:
     return console.export_text(clear=False)
 
 
-def frame(redactions=0, row_count=1):
-    return MaskedFrame(
-        columns=("n",), rows=((1,),), row_count=row_count, redactions=redactions
+def state_with(**overrides) -> dict:
+    base = {
+        "messages": [],
+        "attempts": [],
+        "events": [],
+        "trio_ids": [],
+        "assumed_terms": [],
+        "preference_changes": [],
+        "reports_written": [],
+        "redactions": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+def trace_for(question, answer, **overrides):
+    state = state_with(messages=[HumanMessage(content=question)], **overrides)
+    return trace_from_state(
+        state, answer, user_id="dana", session_id="s1", turn_id="t1"
     )
 
 
 def test_an_empty_answer_prints_nothing():
     """A failed turn already rendered its error; a blank panel under it is noise."""
     console = recorder()
-    render_answer(console, "", TurnCapture())
+    render_answer(console, "", state_with())
 
     assert text(console).strip() == ""
 
 
 def test_the_footnote_admits_masking_and_retries():
     console = recorder()
-    capture = TurnCapture()
-    capture.record_attempt("bad", error="boom")
-    capture.record_attempt("good", executed_sql="good", frame=frame(redactions=2))
+    state = state_with(
+        redactions=2,
+        attempts=[
+            attempt_record(sql="bad", error="boom"),
+            attempt_record(sql="good", executed_sql="good", row_count=1, index=1),
+        ],
+    )
 
-    render_answer(console, "Two customers.", capture)
+    render_answer(console, "Two customers.", state)
 
     printed = text(console)
     assert "2 personal-data values masked" in printed
@@ -59,10 +80,9 @@ def test_the_footnote_admits_masking_and_retries():
 def test_a_clean_single_query_turn_has_no_footnote():
     """The footnote is a signal. Printed on every turn it stops being one."""
     console = recorder()
-    capture = TurnCapture()
-    capture.record_attempt("q", executed_sql="q", frame=frame())
+    state = state_with(attempts=[attempt_record(sql="q", executed_sql="q", row_count=1)])
 
-    render_answer(console, "One.", capture)
+    render_answer(console, "One.", state)
 
     assert "query attempts" not in text(console)
 
@@ -71,12 +91,16 @@ def test_the_footnote_can_be_turned_off():
     from retail_agent.store.preferences import Preferences
 
     console = recorder()
-    capture = TurnCapture()
-    capture.record_attempt("a", error="x")
-    capture.record_attempt("b", executed_sql="b", frame=frame(redactions=1))
+    state = state_with(
+        redactions=1,
+        attempts=[
+            attempt_record(sql="a", error="x"),
+            attempt_record(sql="b", executed_sql="b", row_count=1, index=1),
+        ],
+    )
 
     render_answer(
-        console, "One.", capture, prefs=Preferences(show_attempt_footnote=False)
+        console, "One.", state, prefs=Preferences(show_attempt_footnote=False)
     )
 
     assert "masked" not in text(console)
@@ -107,18 +131,25 @@ def test_trace_before_any_turn_explains_itself():
 
 def test_the_trace_shows_every_attempt_and_the_query_that_ran():
     console = recorder()
-    capture = TurnCapture(user_id="dana", session_id="s1", question="how many?")
-    capture.record_attempt("SELECT *", violations=("SELECT * is not allowed.",))
-    capture.record_attempt(
-        "SELECT n FROM t",
-        executed_sql="SELECT n FROM `ds.t`",
-        frame=frame(),
-        bytes_billed=2_048,
+    state = state_with(
+        messages=[HumanMessage(content="how many?")],
+        attempts=[
+            attempt_record(sql="SELECT *", violations=["SELECT * is not allowed."]),
+            attempt_record(
+                sql="SELECT n FROM t",
+                executed_sql="SELECT n FROM `ds.t`",
+                row_count=1,
+                bytes_billed=2_048,
+                index=1,
+            ),
+        ],
+        events=[step_event("run_sql", 0.0, "1 row(s)")],
     )
-    with capture.step("run_sql") as step:
-        step.detail = "1 row(s)"
 
-    render_trace(console, capture.to_trace("One."))
+    render_trace(
+        console,
+        trace_from_state(state, "One.", user_id="dana", session_id="s1", turn_id="t1"),
+    )
 
     printed = text(console)
     assert "SELECT * is not allowed." in printed
@@ -131,9 +162,8 @@ def test_the_trace_shows_the_answer_it_stored():
     """Stored, truncated and read back, then never shown. `/trace <id>` on an
     older turn could say what ran but not what was said."""
     console = recorder()
-    capture = TurnCapture(user_id="dana", question="how many?")
 
-    render_trace(console, capture.to_trace("Nine customers."))
+    render_trace(console, trace_for("how many?", "Nine customers."))
 
     assert "Nine customers." in text(console)
 
@@ -142,9 +172,8 @@ def test_a_turn_that_called_no_tool_says_so_rather_than_printing_an_empty_table(
     """Easy to reach on a follow-up the model answers from the conversation.
     Headers with nothing under them read as a broken renderer."""
     console = recorder()
-    capture = TurnCapture(user_id="dana", question="and the month before?")
 
-    render_trace(console, capture.to_trace("It was 11."))
+    render_trace(console, trace_for("and the month before?", "It was 11."))
 
     printed = text(console)
     assert "no tools" in printed
@@ -153,14 +182,18 @@ def test_a_turn_that_called_no_tool_says_so_rather_than_printing_an_empty_table(
 
 def test_the_trace_names_the_definitions_used_and_the_terms_assumed():
     console = recorder()
-    capture = TurnCapture(user_id="dana", question="who is loyal?")
-    capture.record_definitions(["trio-loyalty"])
-    capture.record_assumptions(["loyal"])
-    capture.preference_changes.append(("answer_format", "bullets"))
-    with capture.step("analyst") as step:
-        step.detail = "1 trio(s)"
+    state = state_with(
+        messages=[HumanMessage(content="who is loyal?")],
+        trio_ids=["trio-loyalty"],
+        assumed_terms=["loyal"],
+        preference_changes=[{"action": "answer_format", "note": "bullets"}],
+        events=[step_event("analyst", 0.0, "1 trio(s)")],
+    )
 
-    render_trace(console, capture.to_trace("Nine."))
+    render_trace(
+        console,
+        trace_from_state(state, "Nine.", user_id="dana", session_id="s1", turn_id="t1"),
+    )
 
     printed = text(console)
     assert "trio-loyalty" in printed
@@ -198,7 +231,7 @@ def test_metrics_name_the_window_they_are_over():
 
 
 def written(title="Q1 Denim", body="## Summary\nDenim fell 11.8% in Q1.", show=True):
-    return WrittenReport(report_id="7f3a", title=title, body=body, show=show)
+    return {"report_id": "7f3a", "title": title, "body": body, "show": show}
 
 
 def test_the_report_is_printed_whole_with_where_it_was_saved():

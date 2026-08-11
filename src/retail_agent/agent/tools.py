@@ -14,12 +14,18 @@ true as tools are added.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Sequence
+from typing import Any
 
+from langchain.tools import ToolRuntime
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, tool
+from langgraph.types import Command
 
-from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.state import attempt_record, frame_to_state, step_event
+from retail_agent.datasources.base import DataSourceError
 from retail_agent.knowledge.retrieval import retrieve
 from retail_agent.knowledge.trios import (
     agreed_definitions,
@@ -54,73 +60,102 @@ EMPTY_HINT = (
 class GuardRejection(Exception):
     """The query never ran.
 
-    Carries the violations so `ToolErrorMiddleware` can hand them back to the
-    model, which is what the graph's repair edge did.
+    `run_sql` still raises this rather than returning a `Command` — a tool
+    cannot do both, and the exception is what lets `describe_failure`
+    recognise the failure and `_SqlFailureRecorder` (`middleware.py`) catch
+    it. `violations` is set on the instance, right where it is raised, so
+    that middleware can write the same rejected attempt into `TurnState`
+    that this tool cannot write itself on a path that raises.
     """
 
+    violations: list[str]
 
-def build_analyst_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
-    """Tools bound to one turn's capture.
 
-    Closures rather than methods so each one can hold the turn's `deps` and
-    `capture`, and `@tool` rather than a bare function so the name, the argument
-    schema and the description the model reads are derived from the definition
-    itself — there is no second place to keep them in step.
+def build_analyst_tools(deps: AgentDeps) -> list[BaseTool]:
+    """Tools bound to one turn's `deps`.
+
+    Closures rather than methods so each one can hold the turn's `deps`, and
+    `@tool` rather than a bare function so the name, the argument schema and
+    the description the model reads are derived from the definition itself —
+    there is no second place to keep them in step.
     """
 
     @tool
-    def run_sql(sql: str) -> str:
+    def run_sql(sql: str, runtime: ToolRuntime[Any, Any]) -> Command:
         """Run a read-only BigQuery query against theLook and return the rows.
 
         Write exactly one SELECT statement. Do not add a LIMIT; one is applied
         for you. If the query is rejected or fails you will be told why and may
         try again.
         """
-        with capture.step("run_sql") as step:
-            verdict = check_sql(
-                sql,
-                allowed_tables=deps.settings.allowed_tables,
-                restricted_columns=deps.policy.restricted_columns(),
-                default_limit=deps.settings.max_row_limit,
-                max_limit=deps.settings.max_row_limit,
-                qualify_with=deps.settings.bq_dataset,
-            )
-            if not verdict.ok:
-                capture.record_attempt(sql, violations=verdict.violations)
-                step.detail = f"guard rejected — {'; '.join(verdict.violations)}"
-                raise GuardRejection("; ".join(verdict.violations))
+        started = time.perf_counter()
+        verdict = check_sql(
+            sql,
+            allowed_tables=deps.settings.allowed_tables,
+            restricted_columns=deps.policy.restricted_columns(),
+            default_limit=deps.settings.max_row_limit,
+            max_limit=deps.settings.max_row_limit,
+            qualify_with=deps.settings.bq_dataset,
+        )
+        if not verdict.ok:
+            error = GuardRejection("; ".join(verdict.violations))
+            error.violations = verdict.violations
+            raise error
 
-            try:
-                deps.source.assert_within_budget(verdict.sql)
-                result = deps.source.execute(verdict.sql)
-            except Exception as err:
-                capture.record_attempt(
-                    sql, executed_sql=verdict.sql, error=str(err)
-                )
-                step.detail = str(err)
-                raise
+        try:
+            deps.source.assert_within_budget(verdict.sql)
+            result = deps.source.execute(verdict.sql)
+        except DataSourceError as err:
+            # `verdict.sql` is only known here — the qualified, limited query
+            # that actually reached the warehouse, not the model's first
+            # draft. `_SqlFailureRecorder` reads it back off the exception to
+            # record the same `executed_sql` a successful attempt would.
+            err.executed_sql = verdict.sql
+            raise
 
-            masked, report = mask_dataframe(
-                result.rows, deps.policy, salt=deps.settings.pii_salt
-            )
-            frame = MaskedFrame.from_dataframe(
-                masked,
-                row_count=result.row_count,
-                redactions=report.redactions,
-                dropped_columns=report.dropped_columns,
-                truncated=result.row_count > len(masked),
-            )
-            capture.record_attempt(
-                sql,
-                executed_sql=verdict.sql,
-                frame=frame,
-                bytes_billed=result.bytes_billed,
-            )
-            step.detail = f"{frame.row_count} row(s), {result.bytes_billed} bytes"
-            return _render(frame)
+        masked, report = mask_dataframe(
+            result.rows, deps.policy, salt=deps.settings.pii_salt
+        )
+        frame = MaskedFrame.from_dataframe(
+            masked,
+            row_count=result.row_count,
+            redactions=report.redactions,
+            dropped_columns=report.dropped_columns,
+            truncated=result.row_count > len(masked),
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=_render(frame),
+                        tool_call_id=runtime.tool_call_id,
+                    )
+                ],
+                "attempts": [
+                    attempt_record(
+                        sql=sql,
+                        executed_sql=verdict.sql,
+                        row_count=frame.row_count,
+                        bytes_billed=result.bytes_billed,
+                        index=len((runtime.state or {}).get("attempts", [])),
+                    )
+                ],
+                "events": [
+                    step_event(
+                        "run_sql",
+                        started,
+                        f"{frame.row_count} row(s), {result.bytes_billed} bytes",
+                    )
+                ],
+                "frame": frame_to_state(frame),
+                "executed_sql": verdict.sql,
+                "redactions": report.redactions,
+                "calls": 1,
+            }
+        )
 
     @tool
-    def lookup_definitions(question: str) -> str:
+    def lookup_definitions(question: str, runtime: ToolRuntime[Any, Any]) -> Command:
         """Look up how the business defines the terms in a question.
 
         Use this when a term's meaning is a business decision rather than a
@@ -128,20 +163,29 @@ def build_analyst_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]
         purpose: one used to be here, and it taught the model to recognise
         exactly those words and nothing else.
         """
-        with capture.step("lookup_definitions") as step:
-            found = recall(deps, question)
-            capture.record_definitions([trio.id for trio in found])
-            step.detail = (
-                f"{len(found)} trio(s): {', '.join(t.id for t in found)}"
-                if found
-                else "no trio matched"
-            )
+        started = time.perf_counter()
+        found = recall(deps, question)
+        detail = (
+            f"{len(found)} trio(s): {', '.join(t.id for t in found)}"
+            if found
+            else "no trio matched"
+        )
 
-            block = definitions_block(found)
-            # An empty string reads to a model as a definition of nothing, and
-            # it will proceed as though the term were settled. Saying so is the
-            # whole protection the graph got from its undefined-term branch.
-            return block.strip() or NOTHING_DEFINED
+        block = definitions_block(found)
+        # An empty string reads to a model as a definition of nothing, and
+        # it will proceed as though the term were settled. Saying so is the
+        # whole protection the graph got from its undefined-term branch.
+        content = block.strip() or NOTHING_DEFINED
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(content=content, tool_call_id=runtime.tool_call_id)
+                ],
+                "trio_ids": [trio.id for trio in found],
+                "events": [step_event("lookup_definitions", started, detail)],
+                "calls": 1,
+            }
+        )
 
     return [run_sql, lookup_definitions]
 
@@ -164,7 +208,9 @@ def recall(deps: AgentDeps, question: str) -> list:
         return []
 
 
-def settled_meanings(deps: AgentDeps, capture: TurnCapture) -> dict[str, str]:
+def settled_meanings(
+    deps: AgentDeps, question: str, *, user_id: str, cache: dict
+) -> dict[str, str]:
     """Every definition already in play this turn, as term → meaning.
 
     The agreed corpus for this question, then whatever this executive has
@@ -173,9 +219,9 @@ def settled_meanings(deps: AgentDeps, capture: TurnCapture) -> dict[str, str]:
     trio merged later must not silently break that promise. The corpus fills
     gaps; it never overrides.
 
-    The trios consulted are recorded on the capture: their meanings reach the
-    model's context, so an answer that used them cannot show a trace that
-    claims it used none.
+    The trios consulted are read back out of `cache["trios"]` by the caller —
+    their meanings reach the model's context, so an answer that used them
+    cannot show a trace that claims it used none.
 
     One function because `ask_for_definitions` calls it twice in the same
     turn — once before the pause, to decide whether there is anything left to
@@ -186,19 +232,24 @@ def settled_meanings(deps: AgentDeps, capture: TurnCapture) -> dict[str, str]:
     trio defining it sat in the same turn's retrieval, because each side had
     its own lookup.
 
-    Retrieval runs once per turn, cached on the capture, because it is the
+    Retrieval runs once per turn, cached in `cache`, because it is the
     expensive half — with dense retrieval configured it is an embedding round
     trip — and its inputs are fixed for the turn. Two independent runs would
     also mean the two sides of the interrupt could, in principle, see two
     different corpora. The personal store is read fresh every call: the pause
     exists so the executive can write to it.
+
+    `cache` is a plain dict the caller owns — `build_memory_tools` creates one
+    per call, which is once per turn since every real caller rebuilds the
+    agent per turn, so it lives exactly one turn and needs no identity of its
+    own: it is never read after the turn ends and never shared between turns,
+    and nothing in it is checkpointed, traced or scored.
     """
-    if capture.recalled_trios is None:
-        capture.recalled_trios = recall(deps, capture.question)
-    found = capture.recalled_trios
-    capture.record_definitions([trio.id for trio in found])
+    if cache.get("trios") is None:
+        cache["trios"] = recall(deps, question)
+    found = cache["trios"]
     merged = dict(agreed_definitions(found))
-    merged.update(all_definitions(deps.definitions, capture.user_id))
+    merged.update(all_definitions(deps.definitions, user_id))
     return merged
 
 

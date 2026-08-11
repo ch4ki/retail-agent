@@ -18,13 +18,15 @@ attention.
 from __future__ import annotations
 
 import logging
+import time
 
 from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain.tools import ToolRuntime
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
+from langgraph.types import Command
 
-from retail_agent.agent.capture import TurnCapture
-from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.middleware import analyst_middleware
 from retail_agent.agent.prompts import (
     ANALYST_PROMPT,
@@ -34,6 +36,7 @@ from retail_agent.agent.prompts import (
     SAFETY_RULES,
 )
 from retail_agent.agent.schema import render_schema_for_sql
+from retail_agent.agent.state import TurnState, step_event
 from retail_agent.agent.tools import build_analyst_tools, recall
 from retail_agent.knowledge.trios import (
     assumption_note,
@@ -52,7 +55,7 @@ from retail_agent.store.preferences import notes_for, preference_block
 log = logging.getLogger(__name__)
 
 
-def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
+def build_subagents(deps: AgentDeps) -> list[BaseTool]:
     """The subagent tools, bound to one turn.
 
     Built per turn rather than per process because the definitions, the persona
@@ -63,7 +66,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """
 
     @tool
-    def analyst(question: str) -> str:
+    def analyst(question: str, runtime: ToolRuntime[TurnContext, object]) -> Command:
         """Query the retail data and report what it found.
 
         Pass the executive's question in full, keeping every business term
@@ -71,44 +74,86 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
         defined, call `ask_for_definitions` before this, not after — a query
         written against a guess has already been paid for.
         """
-        with capture.step("analyst") as step:
-            found = recall(deps, question)
-            capture.record_definitions([trio.id for trio in found])
+        started = time.perf_counter()
+        found = recall(deps, question)
 
-            # Everything this executive has ever defined, not a lookup of terms
-            # picked out of the question. Nothing picks terms out of a question
-            # any more, and the whole set costs one read.
-            known = all_definitions(deps.definitions, capture.user_id)
-            # Written by `ask_for_definitions` when nobody was there to answer.
-            # Read rather than recomputed: this subagent no longer decides what
-            # is unsettled, so the only honest source is what actually happened
-            # earlier in the turn.
-            assumed = list(capture.assumed_terms)
-            step.detail = _describe(found, known, assumed)
+        # Everything this executive has ever defined, not a lookup of terms
+        # picked out of the question. Nothing picks terms out of a question
+        # any more, and the whole set costs one read.
+        known = all_definitions(deps.definitions, runtime.context.user_id)
+        # Written by `ask_for_definitions` when nobody was there to answer.
+        # Read off this turn's own state rather than recomputed: this
+        # subagent no longer decides what is unsettled, so the only honest
+        # source is what an earlier tool call this turn actually recorded.
+        assumed = list((runtime.state or {}).get("assumed_terms", []))
+        detail = _describe(found, known, assumed)
 
-            agent = create_agent(
-                model=deps.llm,
-                tools=build_analyst_tools(deps, capture),
-                system_prompt=ANALYST_PROMPT.format(
-                    definitions=_definitions(found, known, assumed),
-                    schema=render_schema_for_sql(deps),
-                    dataset=deps.settings.bq_dataset,
+        agent = create_agent(
+            model=deps.llm,
+            tools=build_analyst_tools(deps),
+            system_prompt=ANALYST_PROMPT.format(
+                definitions=_definitions(found, known, assumed),
+                schema=render_schema_for_sql(deps),
+                dataset=deps.settings.bq_dataset,
+            ),
+            middleware=analyst_middleware(deps),
+            state_schema=TurnState,
+        )
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": question}]},
+            config=runtime.config,
+        )
+
+        answer = final_text(result)
+        if assumed:
+            # The disclosure travels with the findings so the supervisor
+            # cannot report the number without it.
+            answer += f"\n\n{assumption_note(assumed)}"
+        answer = answer or "I could not produce an answer to that."
+
+        # A nested `agent.invoke` returns the analyst subgraph's own final
+        # state rather than merging it into this one — `run_sql` and
+        # `lookup_definitions` wrote their record there, not here. This tool
+        # is the only place that holds both that record and this turn's own,
+        # so it lifts every field the nested run produced into the `Command`
+        # below, alongside `found`'s own trio ids and this call's own event —
+        # the two things only this wrapper, not the nested run, knows about.
+        #
+        # `attempts` is renumbered rather than lifted as-is: the subgraph's
+        # own state starts empty on every nested invoke, so its `run_sql`
+        # calls always number their own `step_id` from `q1` — correct within
+        # one `analyst` call, wrong the moment a turn calls `analyst` twice,
+        # where the second call's queries collide with the first's instead of
+        # continuing `q3, q4…`. Only this lift knows the parent turn's own
+        # running total, so this is the only place that can fix it.
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(content=answer, tool_call_id=runtime.tool_call_id)
+                ],
+                "attempts": _renumber_attempts(
+                    result.get("attempts", []),
+                    offset=len((runtime.state or {}).get("attempts", [])),
                 ),
-                middleware=analyst_middleware(deps),
-            )
-            result = agent.invoke({"messages": [{"role": "user", "content": question}]})
-
-            answer = final_text(result)
-            if assumed:
-                # The disclosure travels with the findings so the supervisor
-                # cannot report the number without it.
-                answer += f"\n\n{assumption_note(assumed)}"
-            return answer or "I could not produce an answer to that."
+                "events": [
+                    *result.get("events", []),
+                    step_event("analyst", started, detail),
+                ],
+                "trio_ids": [trio.id for trio in found] + result.get("trio_ids", []),
+                "redactions": result.get("redactions", 0),
+                "calls": result.get("calls", 0) + 1,
+                "frame": result.get("frame"),
+                "executed_sql": result.get("executed_sql", ""),
+            }
+        )
 
     @tool
     def report_writer(
-        brief: str, title: str, show_to_executive: bool = True
-    ) -> str:
+        brief: str,
+        title: str,
+        runtime: ToolRuntime[TurnContext, object],
+        show_to_executive: bool = True,
+    ) -> Command:
         """Write a report from findings, save it, and show it to the executive.
 
         Pass everything the analyst told you, including the figures. This tool
@@ -119,54 +164,76 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
         covering sentence — do not repeat the report. Set `show_to_executive`
         false only for a draft you are about to rework.
         """
-        with capture.step("report_writer") as step:
-            # Built once, outside the lambda `resilient_call` may invoke more
-            # than once: `report_writer_system_prompt` reads the persona
-            # store, the preference store and the trio corpus, and a retried
-            # attempt should resend the same prompt rather than re-read all
-            # three on every attempt.
-            system_prompt = report_writer_system_prompt(deps, capture)
-            # A plain call, not an agent: with no tools there is no loop for a
-            # graph to run, and `resilient_call` supplies the retry and
-            # fallback that `create_agent`'s middleware supplied to the others.
-            reply = resilient_call(
-                deps,
-                lambda model: model.invoke(
-                    [
-                        SystemMessage(system_prompt),
-                        HumanMessage(brief),
-                    ]
-                ),
-            )
+        started = time.perf_counter()
+        # Built once, outside the lambda `resilient_call` may invoke more than
+        # once: `report_writer_system_prompt` reads the persona store, the
+        # preference store and the trio corpus, and a retried attempt should
+        # resend the same prompt rather than re-read all three on every
+        # attempt. The trio ids come off this turn's own state
+        # (`TurnState["trio_ids"]`).
+        system_prompt = report_writer_system_prompt(
+            deps,
+            (runtime.state or {}).get("trio_ids", []),
+            user_id=runtime.context.user_id,
+        )
+        # A plain call, not an agent: with no tools there is no loop for a
+        # graph to run, and `resilient_call` supplies the retry and fallback
+        # that `create_agent`'s middleware supplied to the others.
+        reply = resilient_call(
+            deps,
+            lambda model: model.invoke(
+                [
+                    SystemMessage(system_prompt),
+                    HumanMessage(brief),
+                ]
+            ),
+        )
 
-            # The last sweep before the text is shown or stored, and it happens
-            # here rather than at save time because those are now the same
-            # moment for one copy of the text. A report is read long after the
-            # conversation that produced it, by people who were not in it.
-            scanned = scan_text(message_text(reply))
-            report = deps.reports.save(
-                owner_id=capture.user_id,
-                session_id=capture.session_id,
-                title=title or "Untitled report",
-                body=scanned.text,
-            )
-            capture.record_report(
-                report.id, report.title, report.body, show=show_to_executive
-            )
+        # The last sweep before the text is shown or stored, and it happens
+        # here rather than at save time because those are now the same
+        # moment for one copy of the text. A report is read long after the
+        # conversation that produced it, by people who were not in it.
+        scanned = scan_text(message_text(reply))
+        report = deps.reports.save(
+            owner_id=runtime.context.user_id,
+            session_id=runtime.context.session_id,
+            title=title or "Untitled report",
+            body=scanned.text,
+        )
 
-            step.detail = f"{len(report.body)} chars, saved {report.id}"
-            shown = (
-                "The executive has been shown it."
-                if show_to_executive
-                else "It was not shown to the executive."
-            )
-            return (
-                f"Report {report.id} '{report.title}' written "
-                f"({len(report.body)} chars).\n{shown}"
-            )
+        detail = f"{len(report.body)} chars, saved {report.id}"
+        shown = (
+            "The executive has been shown it."
+            if show_to_executive
+            else "It was not shown to the executive."
+        )
+        answer = (
+            f"Report {report.id} '{report.title}' written "
+            f"({len(report.body)} chars).\n{shown}"
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(content=answer, tool_call_id=runtime.tool_call_id)
+                ],
+                # No body — the report store's copy is the one that gets
+                # read, and state is checkpointed on every super-step.
+                "reports_written": [
+                    {
+                        "report_id": report.id,
+                        "title": report.title,
+                        "show": show_to_executive,
+                    }
+                ],
+                "events": [step_event("report_writer", started, detail)],
+                "calls": 1,
+            }
+        )
 
     @tool
-    def ask_about_report(report_id: str, question: str) -> str:
+    def ask_about_report(
+        report_id: str, question: str, runtime: ToolRuntime[TurnContext, object]
+    ) -> Command:
         """Answer a question about a report the executive has saved.
 
         Use this for anything about an existing report — what it concluded,
@@ -174,47 +241,72 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
         from `list_reports`. Report text is not kept in this conversation, so
         this is the only way to read one.
         """
-        with capture.step("ask_about_report") as step:
-            # Owner-scoped by the store's own query, so an id guessed or
-            # carried over from another session reads nothing.
-            report = deps.reports.get(
-                owner_id=capture.user_id, report_id=report_id
+        started = time.perf_counter()
+        # Owner-scoped by the store's own query, so an id guessed or carried
+        # over from another session reads nothing.
+        report = deps.reports.get(
+            owner_id=runtime.context.user_id, report_id=report_id
+        )
+        if report is None:
+            detail = f"no report {report_id}"
+            answer = (
+                f"No report {report_id} in your library. Use list_reports "
+                f"to see what is saved."
             )
-            if report is None:
-                step.detail = f"no report {report_id}"
-                return (
-                    f"No report {report_id} in your library. Use list_reports "
-                    f"to see what is saved."
-                )
+            return Command(
+                update={
+                    "messages": [
+                        ToolMessage(content=answer, tool_call_id=runtime.tool_call_id)
+                    ],
+                    "events": [step_event("ask_about_report", started, detail)],
+                    "calls": 1,
+                }
+            )
 
-            step.detail = f"{report.id}, {len(report.body)} chars"
-            reply = resilient_call(
-                deps,
-                lambda model: model.invoke(
-                    [
-                        SystemMessage(
-                            REPORT_QA_PROMPT.format(
-                                persona=active_body(deps.personas) or PERSONA_DEFAULT,
-                                safety=SAFETY_RULES,
-                                title=report.title,
-                                report=report.body,
-                            )
-                        ),
-                        HumanMessage(question),
-                    ]
-                ),
-            )
-            return message_text(reply) or "I could not find that in the report."
+        detail = f"{report.id}, {len(report.body)} chars"
+        reply = resilient_call(
+            deps,
+            lambda model: model.invoke(
+                [
+                    SystemMessage(
+                        REPORT_QA_PROMPT.format(
+                            persona=active_body(deps.personas) or PERSONA_DEFAULT,
+                            safety=SAFETY_RULES,
+                            title=report.title,
+                            report=report.body,
+                        )
+                    ),
+                    HumanMessage(question),
+                ]
+            ),
+        )
+        answer = message_text(reply) or "I could not find that in the report."
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(content=answer, tool_call_id=runtime.tool_call_id)
+                ],
+                "events": [step_event("ask_about_report", started, detail)],
+                "calls": 1,
+            }
+        )
 
     return [analyst, report_writer, ask_about_report]
 
 
-def report_writer_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
+def report_writer_system_prompt(
+    deps: AgentDeps, trio_ids, *, user_id: str
+) -> str:
     """The report writer's system prompt for one call.
 
     A plain function rather than only a literal inside the tool closure, for
     the same reason `supervisor_system_prompt` exists in `middleware.py`: so a
     test can ask what reaches the model without building a model call.
+
+    `trio_ids` is this turn's own `TurnState["trio_ids"]`, and like the
+    identity half is a plain parameter rather than read off anything
+    longer-lived: this function is called from inside a tool, and the tool
+    reads both off `runtime`, not from how the agent was built.
 
     `.strip()` on the result, not just on the template — `REPORT_WRITER_PROMPT`
     ends `{examples}\n\n{style}`, and `style_examples` and `preference_block`
@@ -228,13 +320,28 @@ def report_writer_system_prompt(deps: AgentDeps, capture: TurnCapture) -> str:
     # finding — split by cohort, compare against a baseline, close with
     # numbered actions — and that is a property of the writing, so it belongs
     # here rather than in the SQL loop.
-    consulted = [trio for trio in live_trios(deps.trios) if trio.id in capture.trio_ids]
+    consulted = [trio for trio in live_trios(deps.trios) if trio.id in trio_ids]
     return REPORT_WRITER_PROMPT.format(
         persona=active_body(deps.personas) or PERSONA_DEFAULT,
         safety=SAFETY_RULES,
         examples=style_examples(consulted),
-        style=preference_block(notes_for(deps.preferences, capture.user_id)),
+        style=preference_block(notes_for(deps.preferences, user_id)),
     ).strip()
+
+
+def _renumber_attempts(attempts: list[dict], *, offset: int) -> list[dict]:
+    """`attempts` with `step_id` renumbered against the parent turn's count.
+
+    The subagent's own `step_id`s always start at `q1` (see the call site's
+    comment); `offset` is how many the parent turn had already recorded
+    before this `analyst` call started, so the result reads `q{offset+1},
+    q{offset+2}, …` — continuing the turn's own sequence rather than
+    restarting it.
+    """
+    return [
+        {**attempt, "step_id": f"q{offset + index + 1}"}
+        for index, attempt in enumerate(attempts)
+    ]
 
 
 def _definitions(found: list, known: dict[str, str], assumed: list[str]) -> str:

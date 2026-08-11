@@ -13,17 +13,17 @@ from __future__ import annotations
 from langchain.agents import create_agent
 from langchain_core.tools import BaseTool
 
-from retail_agent.agent.capture import TurnCapture
-from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.memory import build_memory_tools
 from retail_agent.agent.middleware import supervisor_middleware
 from retail_agent.agent.reports import build_report_tools
 from retail_agent.agent.schema import build_schema_tool
+from retail_agent.agent.state import TurnState
 from retail_agent.agent.subagents import build_subagents
 
 
 def build_tools(
-    deps: AgentDeps, capture: TurnCapture, *, pause_for_definitions: bool = False
+    deps: AgentDeps, *, pause_for_definitions: bool = False
 ) -> list[BaseTool]:
     """Every capability the agent has, in one list.
 
@@ -32,23 +32,23 @@ def build_tools(
     function or another `create_agent` behind one.
     """
     return [
-        *build_subagents(deps, capture),
-        *build_schema_tool(deps, capture),
-        *build_report_tools(deps, capture),
-        *build_memory_tools(deps, capture, pause_for_definitions=pause_for_definitions),
+        *build_subagents(deps),
+        *build_schema_tool(deps),
+        *build_report_tools(deps),
+        *build_memory_tools(deps, pause_for_definitions=pause_for_definitions),
     ]
 
 
 def build_agent(
     deps: AgentDeps,
-    capture: TurnCapture,
     checkpointer=None,
     *,
     pause_for_definitions: bool = False,
 ):
     """The compiled agent for one turn.
 
-    Bound to a capture because the tools write what they did into it, and a turn
+    What the tools do is written into checkpointed graph state (`TurnState`)
+    rather than into anything the caller builds and hands in, and that state
     is the unit the eval scores and the trace records.
 
     `pause_for_definitions` says there is a person on the other end who can
@@ -59,7 +59,9 @@ def build_agent(
     """
     return create_agent(
         model=deps.llm,
-        tools=build_tools(deps, capture, pause_for_definitions=pause_for_definitions),
-        middleware=supervisor_middleware(deps, capture),
+        tools=build_tools(deps, pause_for_definitions=pause_for_definitions),
+        middleware=supervisor_middleware(deps),
         checkpointer=checkpointer,
+        context_schema=TurnContext,
+        state_schema=TurnState,
     )

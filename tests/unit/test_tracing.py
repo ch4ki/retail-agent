@@ -107,6 +107,51 @@ def test_context_metrics_ignore_turns_that_were_never_measured():
     assert metrics["context_tokens_p50"] == 2_000
 
 
+def test_duration_ms_sums_every_events_timing():
+    """Previously untested: `duration_ms=sum(event["ms"] for event in events)`
+    in `trace_from_state` would pass every other test unchanged if it summed
+    nothing, or only the first event, instead of all of them."""
+    from retail_agent.obs.traces import trace_from_state
+
+    state = {
+        "messages": [],
+        "events": [
+            {"name": "lookup_definitions", "ms": 40, "detail": ""},
+            {"name": "run_sql", "ms": 120, "detail": ""},
+            {"name": "run_sql", "ms": 80, "detail": ""},
+        ],
+        "attempts": [],
+    }
+
+    trace = trace_from_state(
+        state, "answer", user_id="exec", session_id="s1", turn_id="t1"
+    )
+
+    assert trace.duration_ms == 240
+
+
+def test_bytes_billed_sums_every_attempts_billing():
+    """Previously untested: `bytes_billed=sum(a.get("bytes_billed") or 0 for a
+    in attempts)` would pass every other test unchanged if it summed nothing,
+    or only the first attempt's, instead of every query a turn ran."""
+    from retail_agent.obs.traces import trace_from_state
+
+    state = {
+        "messages": [],
+        "events": [],
+        "attempts": [
+            {"step_id": "q1", "sql": "SELECT 1", "bytes_billed": 1_000},
+            {"step_id": "q2", "sql": "SELECT 2", "bytes_billed": 500},
+        ],
+    }
+
+    trace = trace_from_state(
+        state, "answer", user_id="exec", session_id="s1", turn_id="t1"
+    )
+
+    assert trace.bytes_billed == 1_500
+
+
 def test_context_metrics_are_zero_with_nothing_measured():
     """`/metrics` must not divide by zero on a session of failed turns."""
     from retail_agent.obs.traces import TraceRecord, compute_metrics

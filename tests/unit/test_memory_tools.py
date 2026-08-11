@@ -12,8 +12,11 @@ were an instruction, which is the failure the proposal engine existed to
 prevent.
 """
 
-from retail_agent.agent.capture import TurnCapture
-from retail_agent.agent.deps import AgentDeps
+import functools
+
+from langchain_core.messages import HumanMessage
+
+from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.memory import build_memory_tools
 from retail_agent.config import Settings
 from retail_agent.knowledge.seeds import SEED_TRIOS
@@ -22,6 +25,48 @@ from retail_agent.safety.pii import PiiPolicy
 from retail_agent.store.definitions import InMemoryDefinitionStore
 from retail_agent.store.reports import InMemoryReportStore
 from retail_agent.store.preferences import InMemoryPreferenceStore
+
+
+def _runtime(question):
+    """A `ToolRuntime` good enough to call a tool's raw `.func` directly.
+
+    The framework only injects a real one when a tool runs through
+    `agent.invoke`; calling `.func` here bypasses that machinery entirely, so
+    the test has to build one itself. Six of `ToolRuntime`'s nine fields are
+    required — `tools`, `execution_info` and `server_info` have defaults.
+    `state` carries this turn's question as a `HumanMessage` — `note_preference`
+    reads it from there.
+    """
+    from langchain.tools import ToolRuntime
+
+    return ToolRuntime(
+        state={"messages": [HumanMessage(question)]},
+        context=TurnContext(user_id="dana", session_id="s1"),
+        config={},
+        stream_writer=None,
+        tool_call_id="test",
+        store=None,
+    )
+
+
+def _text(result):
+    """A tool's answer — the one `ToolMessage` on `update["messages"]` — the
+    same string a model would have seen."""
+    return result.update["messages"][0].content
+
+
+def _bound(tools, question):
+    """Every tool's `.func`, pre-bound to this file's identity.
+
+    Calling `.func` directly bypasses `BaseTool.run` and the runtime
+    injection that goes with it, so every call site would otherwise need its
+    own `runtime=` argument. Binding it once here keeps every existing call
+    site unchanged. Each call returns the raw `Command` the tool produced —
+    `_text(result)` reads the answer off it, `result.update[...]` reads
+    whatever `TurnState` fields that call contributed.
+    """
+    runtime = _runtime(question)
+    return {t.name: functools.partial(t.func, runtime=runtime) for t in tools}
 
 
 def tools_for(question, trios=(), dense=None):
@@ -37,12 +82,11 @@ def tools_for(question, trios=(), dense=None):
         trios=list(trios),
         dense=dense,
     )
-    capture = TurnCapture(user_id="dana", session_id="s1", question=question)
-    return {t.name: t.func for t in build_memory_tools(deps, capture)}, deps, capture
+    return _bound(build_memory_tools(deps), question), deps
 
 
 def test_a_quoted_preference_is_saved_in_the_users_own_words():
-    tools, deps, _ = tools_for("just keep it brief, I don't need the workings")
+    tools, deps = tools_for("just keep it brief, I don't need the workings")
 
     tools["note_preference"]("keep answers brief", "keep it brief")
 
@@ -52,11 +96,13 @@ def test_a_quoted_preference_is_saved_in_the_users_own_words():
 def test_the_change_is_recorded_so_the_interface_can_announce_it():
     """Applying immediately is defensible; applying *silently* is not. The CLI
     reads this rather than trusting the model to mention what it changed."""
-    tools, _, capture = tools_for("keep it brief")
+    tools, _ = tools_for("keep it brief")
 
-    tools["note_preference"]("keep answers brief", "keep it brief")
+    result = tools["note_preference"]("keep answers brief", "keep it brief")
 
-    assert capture.preference_changes == [("added", "keep answers brief")]
+    assert result.update["preference_changes"] == [
+        {"action": "added", "note": "keep answers brief"}
+    ]
 
 
 def test_evidence_the_user_never_typed_changes_nothing():
@@ -65,57 +111,60 @@ def test_evidence_the_user_never_typed_changes_nothing():
 
     This guard is the whole reason the tool may act rather than propose, so it
     outlived the enum validation that used to sit above it."""
-    tools, deps, capture = tools_for("why are sales down in Texas?")
+    tools, deps = tools_for("why are sales down in Texas?")
 
-    answer = tools["note_preference"]("keep answers brief", "keep it brief")
+    result = tools["note_preference"]("keep answers brief", "keep it brief")
 
-    assert "exact words" in answer
+    assert "exact words" in _text(result)
     assert deps.preferences.list_notes(user_id="dana") == []
-    assert capture.preference_changes == []
+    assert result.update.get("preference_changes", []) == []
 
 
 def test_a_preference_already_saved_is_not_saved_twice():
-    tools, deps, capture = tools_for("keep it brief")
-    tools["note_preference"]("keep answers brief", "keep it brief")
+    tools, deps = tools_for("keep it brief")
+    first = tools["note_preference"]("keep answers brief", "keep it brief")
 
-    answer = tools["note_preference"]("Keep answers brief", "keep it brief")
+    second = tools["note_preference"]("Keep answers brief", "keep it brief")
 
-    assert "already" in answer.lower()
+    assert "already" in _text(second).lower()
     assert deps.preferences.list_notes(user_id="dana") == ["keep answers brief"]
-    assert capture.preference_changes == [("added", "keep answers brief")], "announced once"
+    assert first.update["preference_changes"] == [
+        {"action": "added", "note": "keep answers brief"}
+    ]
+    assert second.update.get("preference_changes", []) == [], "announced once"
 
 
 def test_a_preference_past_the_cap_is_refused_with_a_way_out():
     from retail_agent.store.preferences import MAX_NOTES
 
-    tools, deps, capture = tools_for("keep it brief")
+    tools, deps = tools_for("keep it brief")
     deps.preferences.replace_notes(
         user_id="dana", notes=[f"preference {i}" for i in range(MAX_NOTES)]
     )
 
-    answer = tools["note_preference"]("keep answers brief", "keep it brief")
+    result = tools["note_preference"]("keep answers brief", "keep it brief")
 
-    assert "forget" in answer.lower(), "says how to make room"
+    assert "forget" in _text(result).lower(), "says how to make room"
     assert len(deps.preferences.list_notes(user_id="dana")) == MAX_NOTES
-    assert capture.preference_changes == []
+    assert result.update.get("preference_changes", []) == []
 
 
 def test_an_over_long_preference_is_refused_rather_than_cut_down():
     """A truncated note is a preference the user did not write."""
     from retail_agent.store.preferences import MAX_NOTE_CHARS
 
-    tools, deps, capture = tools_for("keep it brief")
+    tools, deps = tools_for("keep it brief")
 
-    answer = tools["note_preference"]("x" * (MAX_NOTE_CHARS + 1), "keep it brief")
+    result = tools["note_preference"]("x" * (MAX_NOTE_CHARS + 1), "keep it brief")
 
-    assert "shorter" in answer.lower()
+    assert "shorter" in _text(result).lower()
     assert deps.preferences.list_notes(user_id="dana") == []
-    assert capture.preference_changes == []
+    assert result.update.get("preference_changes", []) == []
 
 
 def test_a_store_failure_costs_the_preference_not_the_turn():
     """Losing a preference must not lose the answer it was about."""
-    _, deps, capture = tools_for("keep it brief")
+    _, deps = tools_for("keep it brief")
 
     class Broken:
         def list_notes(self, **_):
@@ -125,23 +174,25 @@ def test_a_store_failure_costs_the_preference_not_the_turn():
             raise RuntimeError("postgres is down")
 
     object.__setattr__(deps, "preferences", Broken())
-    tools = {t.name: t.func for t in build_memory_tools(deps, capture)}
+    tools = _bound(build_memory_tools(deps), "keep it brief")
 
-    answer = tools["note_preference"]("keep answers brief", "keep it brief")
+    result = tools["note_preference"]("keep answers brief", "keep it brief")
 
-    assert "could not save" in answer.lower()
-    assert capture.preference_changes == []
+    assert "could not save" in _text(result).lower()
+    assert result.update.get("preference_changes", []) == []
 
 
 def test_forgetting_removes_the_note_and_announces_it():
-    tools, deps, capture = tools_for("stop showing prices in euros")
+    tools, deps = tools_for("stop showing prices in euros")
     tools["note_preference"]("show prices in euros", "prices in euros")
 
-    answer = tools["forget_preference"]("show prices in euros")
+    result = tools["forget_preference"]("show prices in euros")
 
-    assert "removed" in answer.lower()
+    assert "removed" in _text(result).lower()
     assert deps.preferences.list_notes(user_id="dana") == []
-    assert capture.preference_changes[-1] == ("removed", "show prices in euros")
+    assert result.update["preference_changes"] == [
+        {"action": "removed", "note": "show prices in euros"}
+    ]
 
 
 def test_forgetting_announces_the_stored_wording_not_the_callers_casing():
@@ -149,46 +200,52 @@ def test_forgetting_announces_the_stored_wording_not_the_callers_casing():
     a note using different casing than what was actually saved. What gets
     announced — and eventually shown to the user — has to be what they wrote,
     not the model's paraphrase of its own case."""
-    tools, deps, capture = tools_for("stop calling me Manager, my name is Dana")
+    tools, deps = tools_for("stop calling me Manager, my name is Dana")
     deps.preferences.replace_notes(user_id="dana", notes=["Keep answers brief"])
 
-    tools["forget_preference"]("keep answers brief")
+    result = tools["forget_preference"]("keep answers brief")
 
     assert deps.preferences.list_notes(user_id="dana") == []
-    assert capture.preference_changes == [("removed", "Keep answers brief")]
+    assert result.update["preference_changes"] == [
+        {"action": "removed", "note": "Keep answers brief"}
+    ]
 
 
 def test_forgetting_something_that_was_never_saved_says_so():
-    tools, deps, capture = tools_for("stop showing prices in euros")
+    tools, _ = tools_for("stop showing prices in euros")
 
-    answer = tools["forget_preference"]("show prices in euros")
+    result = tools["forget_preference"]("show prices in euros")
 
-    assert "nothing" in answer.lower()
-    assert capture.preference_changes == []
+    assert "nothing" in _text(result).lower()
+    assert result.update.get("preference_changes", []) == []
 
 
 def test_editing_a_preference_is_a_forget_then_a_note():
     """There is no edit tool, so this is the path the model has to take —
     and both halves have to reach the announcement."""
-    tools, deps, capture = tools_for("make that under two sentences, not three")
+    tools, deps = tools_for("make that under two sentences, not three")
     deps.preferences.replace_notes(user_id="dana", notes=["keep answers under three sentences"])
 
-    tools["forget_preference"]("keep answers under three sentences")
-    tools["note_preference"]("keep answers under two sentences", "under two sentences")
+    forgot = tools["forget_preference"]("keep answers under three sentences")
+    noted = tools["note_preference"](
+        "keep answers under two sentences", "under two sentences"
+    )
 
     assert deps.preferences.list_notes(user_id="dana") == [
         "keep answers under two sentences"
     ]
-    assert capture.preference_changes == [
-        ("removed", "keep answers under three sentences"),
-        ("added", "keep answers under two sentences"),
+    assert forgot.update["preference_changes"] == [
+        {"action": "removed", "note": "keep answers under three sentences"}
+    ]
+    assert noted.update["preference_changes"] == [
+        {"action": "added", "note": "keep answers under two sentences"}
     ]
 
 
 def test_a_definition_is_remembered_under_the_term_the_analyst_looks_up():
     """`unresolved` yields lower-cased terms, so a stored 'Loyal' would never be
     found again and the agent would keep asking the same person the same thing."""
-    tools, deps, _ = tools_for("loyal means three orders in a year")
+    tools, deps = tools_for("loyal means three orders in a year")
 
     tools["remember_definition"]("Loyal", "three or more orders in a year")
 
@@ -197,18 +254,18 @@ def test_a_definition_is_remembered_under_the_term_the_analyst_looks_up():
 
 def test_a_definition_store_failure_costs_the_memory_not_the_turn():
     """The user has just unblocked the agent; failing now wastes that."""
-    _, deps, capture = tools_for("loyal means three orders")
+    _, deps = tools_for("loyal means three orders")
 
     class Broken:
         def remember(self, **_):
             raise RuntimeError("postgres is down")
 
     object.__setattr__(deps, "definitions", Broken())
-    tools = {t.name: t.func for t in build_memory_tools(deps, capture)}
+    tools = _bound(build_memory_tools(deps), "loyal means three orders")
 
-    answer = tools["remember_definition"]("loyal", "three orders")
+    result = tools["remember_definition"]("loyal", "three orders")
 
-    assert "could not save" in answer.lower()
+    assert "could not save" in _text(result).lower()
 
 
 # --- asking what a term means ---
@@ -218,25 +275,26 @@ def test_asking_reads_back_the_definition_the_executive_just_gave():
     """The pause happens before the tool body runs, and the CLI writes the
     answer to the store. So `approve` needs no rewritten arguments: the tool
     reads back what was just settled."""
-    tools, deps, _ = tools_for("report on 10 LGB customers")
+    tools, deps = tools_for("report on 10 LGB customers")
     deps.definitions.remember(user_id="dana", term="lgb", definition="low gross basket")
 
-    answer = tools["ask_for_definitions"](["LGB"])
+    result = tools["ask_for_definitions"](["LGB"])
 
-    assert "low gross basket" in answer
+    assert "low gross basket" in _text(result)
 
 
 def test_with_nobody_to_ask_the_agent_is_told_to_choose_and_disclose():
     """Headless — no interrupt armed, so the body runs against an empty store.
     Refusing here would fail the brief's own eval questions, so the bargain is
     the same one `assumption_note` makes: answer, and say what you assumed."""
-    tools, _, capture = tools_for("report on 10 LGB customers")
+    tools, _ = tools_for("report on 10 LGB customers")
 
-    answer = tools["ask_for_definitions"](["LGB"])
+    result = tools["ask_for_definitions"](["LGB"])
+    answer = _text(result)
 
     assert "LGB" in answer
     assert "state" in answer.lower(), "the disclosure is demanded, not optional"
-    assert capture.assumed_terms == ["LGB"], "and the trace records it"
+    assert result.update["assumed_terms"] == ["LGB"], "and the trace records it"
 
 
 def test_a_term_the_analytics_team_agreed_is_not_treated_as_unsettled():
@@ -249,12 +307,12 @@ def test_a_term_the_analytics_team_agreed_is_not_treated_as_unsettled():
     then received the agreed definition *and* an instruction to invent one, and
     answered on a threshold it made up.
     """
-    tools, _, capture = tools_for("How many loyal customers do we have?", SEED_TRIOS)
+    tools, _ = tools_for("How many loyal customers do we have?", SEED_TRIOS)
 
-    answer = tools["ask_for_definitions"](["loyal"])
+    result = tools["ask_for_definitions"](["loyal"])
 
-    assert capture.assumed_terms == [], "the corpus settles it; nothing was assumed"
-    assert "three or more completed orders" in answer.lower()
+    assert result.update["assumed_terms"] == [], "the corpus settles it; nothing was assumed"
+    assert "three or more completed orders" in _text(result).lower()
 
 
 def test_the_phrase_the_executive_used_finds_the_term_the_corpus_defines():
@@ -266,12 +324,12 @@ def test_the_phrase_the_executive_used_finds_the_term_the_corpus_defines():
     'There is no agreed definition for "loyal customers"' while the trio
     defining `loyal` sat in the same turn's retrieval.
     """
-    tools, _, capture = tools_for("How many loyal customers do we have?", SEED_TRIOS)
+    tools, _ = tools_for("How many loyal customers do we have?", SEED_TRIOS)
 
-    answer = tools["ask_for_definitions"](["loyal customers"])
+    result = tools["ask_for_definitions"](["loyal customers"])
 
-    assert capture.assumed_terms == []
-    assert "three or more completed orders" in answer.lower()
+    assert result.update["assumed_terms"] == []
+    assert "three or more completed orders" in _text(result).lower()
 
 
 def test_the_executives_own_definition_wins_over_the_corpus():
@@ -279,12 +337,13 @@ def test_the_executives_own_definition_wins_over_the_corpus():
     trio arriving later — or retrieved for the first time by a rephrased
     question — must not silently replace the definition this executive was
     promised is in force. The corpus fills gaps; it does not override."""
-    tools, deps, _ = tools_for("How many loyal customers do we have?", SEED_TRIOS)
+    tools, deps = tools_for("How many loyal customers do we have?", SEED_TRIOS)
     deps.definitions.remember(
         user_id="dana", term="loyal", definition="five or more orders"
     )
 
-    answer = tools["ask_for_definitions"](["loyal"])
+    result = tools["ask_for_definitions"](["loyal"])
+    answer = _text(result)
 
     assert "five or more orders" in answer
     assert "three or more completed orders" not in answer.lower()
@@ -294,11 +353,11 @@ def test_a_corpus_settled_term_is_recorded_in_the_trace():
     """The meaning is injected verbatim into the model's context, so the trio
     it came from must show in /trace — an answer that used a corpus definition
     cannot claim it used none."""
-    tools, _, capture = tools_for("How many loyal customers do we have?", SEED_TRIOS)
+    tools, _ = tools_for("How many loyal customers do we have?", SEED_TRIOS)
 
-    tools["ask_for_definitions"](["loyal"])
+    result = tools["ask_for_definitions"](["loyal"])
 
-    assert capture.trio_ids, "the consulted trio reaches the trace and the eval"
+    assert result.update["trio_ids"], "the consulted trio reaches the trace and the eval"
 
 
 def test_one_turn_runs_retrieval_once_however_many_places_ask():
@@ -316,12 +375,13 @@ def test_one_turn_runs_retrieval_once_however_many_places_ask():
             calls.append(question)
             return []
 
-    _, deps, capture = tools_for(
+    _, deps = tools_for(
         "How many loyal customers do we have?", SEED_TRIOS, dense=Dense()
     )
+    cache: dict = {}
 
-    settled_meanings(deps, capture)
-    settled_meanings(deps, capture)
+    settled_meanings(deps, "How many loyal customers do we have?", user_id="dana", cache=cache)
+    settled_meanings(deps, "How many loyal customers do we have?", user_id="dana", cache=cache)
 
     assert len(calls) == 1
 
@@ -335,13 +395,14 @@ def test_a_definition_stored_during_the_pause_is_seen_after_it():
     `interrupt()` unreachable — and the next caller must see it."""
     from retail_agent.agent.tools import settled_meanings
 
-    _, deps, capture = tools_for("report on 10 LGB customers")
+    _, deps = tools_for("report on 10 LGB customers")
+    cache: dict = {}
 
-    before = settled_meanings(deps, capture)
+    before = settled_meanings(deps, "report on 10 LGB customers", user_id="dana", cache=cache)
     deps.definitions.remember(
         user_id="dana", term="lgb", definition="low gross basket"
     )
-    after = settled_meanings(deps, capture)
+    after = settled_meanings(deps, "report on 10 LGB customers", user_id="dana", cache=cache)
 
     assert "lgb" not in before
     assert after["lgb"] == "low gross basket"
@@ -365,29 +426,29 @@ def test_a_phrase_is_not_settled_by_a_word_it_merely_contains():
     """The match is on whole words, and only where the defined term is the
     thing being asked about. Without that this degrades into substring
     matching, which would settle "disloyal customers" from `loyal`."""
-    tools, _, capture = tools_for("How many disloyal customers?", SEED_TRIOS)
+    tools, _ = tools_for("How many disloyal customers?", SEED_TRIOS)
 
-    tools["ask_for_definitions"](["disloyal customers"])
+    result = tools["ask_for_definitions"](["disloyal customers"])
 
-    assert capture.assumed_terms == ["disloyal customers"]
+    assert result.update["assumed_terms"] == ["disloyal customers"]
 
 
 def test_a_term_nobody_agreed_is_still_reported_unsettled():
     """The corpus lookup must not swallow the case it exists to protect: a word
     no trio covers still has to reach the executive."""
-    tools, _, capture = tools_for("report on 10 LGB customers", SEED_TRIOS)
+    tools, _ = tools_for("report on 10 LGB customers", SEED_TRIOS)
 
-    answer = tools["ask_for_definitions"](["LGB"])
+    result = tools["ask_for_definitions"](["LGB"])
 
-    assert capture.assumed_terms == ["LGB"]
-    assert "LGB" in answer
+    assert result.update["assumed_terms"] == ["LGB"]
+    assert "LGB" in _text(result)
 
 
 def test_a_term_still_open_is_reported_next_to_one_already_settled():
-    tools, deps, capture = tools_for("top LGB customers")
+    tools, deps = tools_for("top LGB customers")
     deps.definitions.remember(user_id="dana", term="lgb", definition="low gross basket")
 
-    answer = tools["ask_for_definitions"](["LGB", "top"])
+    result = tools["ask_for_definitions"](["LGB", "top"])
 
-    assert "low gross basket" in answer
-    assert capture.assumed_terms == ["top"], "only the unsettled one is assumed"
+    assert "low gross basket" in _text(result)
+    assert result.update["assumed_terms"] == ["top"], "only the unsettled one is assumed"

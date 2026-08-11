@@ -16,15 +16,38 @@ text for a model to alter on its way to the library.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
+from dataclasses import dataclass
 
+from langchain.tools import ToolRuntime
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, tool
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
 
-from retail_agent.agent.capture import PendingDelete, TurnCapture
-from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.deps import AgentDeps, TurnContext
+from retail_agent.agent.state import step_event
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PendingDelete:
+    """A destructive operation resolved against the store, awaiting approval.
+
+    Resolved by the tool itself — once before the pause, to build the manifest
+    `interrupt()` shows the user, and again on replay after resume, so what
+    gets deleted is recomputed against the store rather than trusted from
+    before the pause. What crosses the interrupt boundary is the resume value,
+    not this object; resolving twice would otherwise leave a gap, however
+    small, between the manifest and the act. Purely local to one call of
+    `delete_reports` — it never needs to survive outside this module.
+    """
+
+    action_id: str
+    report_ids: tuple[str, ...]
+    titles: tuple[str, ...]
+    token: str  # what the user must type back, verbatim
 
 
 def confirmation_token(count: int) -> str:
@@ -34,7 +57,12 @@ def confirmation_token(count: int) -> str:
 
 
 def resolve_delete(
-    deps: AgentDeps, capture: TurnCapture, *, term: str, session_scoped: bool
+    deps: AgentDeps,
+    *,
+    user_id: str,
+    session_id: str,
+    term: str,
+    session_scoped: bool,
 ) -> PendingDelete | None:
     """What a delete would take, resolved read-only.
 
@@ -45,9 +73,9 @@ def resolve_delete(
     delete; the ids that actually get removed come back in the resume value.
     """
     targets = deps.reports.resolve(
-        owner_id=capture.user_id,
+        owner_id=user_id,
         term=term or None,
-        session_id=capture.session_id if session_scoped else None,
+        session_id=session_id if session_scoped else None,
     )
     if not targets:
         return None
@@ -73,68 +101,96 @@ def render_manifest(pending: PendingDelete) -> str:
     )
 
 
-def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
+def build_report_tools(deps: AgentDeps) -> list[BaseTool]:
     """The library tools, bound to one turn's owner and session."""
 
     @tool
-    def list_reports() -> str:
+    def list_reports(runtime: ToolRuntime[TurnContext, object]) -> Command:
         """List the reports this executive has saved."""
-        with capture.step("list_reports") as step:
-            saved = deps.reports.list_reports(owner_id=capture.user_id)
-            step.detail = f"{len(saved)} report(s)"
-            if not saved:
-                return "You have no saved reports yet."
-            return "Saved reports:\n" + "\n".join(
+        started = time.perf_counter()
+        saved = deps.reports.list_reports(owner_id=runtime.context.user_id)
+        detail = f"{len(saved)} report(s)"
+        if not saved:
+            answer = "You have no saved reports yet."
+        else:
+            answer = "Saved reports:\n" + "\n".join(
                 f"- {r.title} (id {r.id}, saved {r.created_at:%Y-%m-%d})"
                 for r in saved
             )
+        return _reply(runtime, answer, "list_reports", started, detail)
 
     @tool
-    def delete_reports(term: str = "", session_scoped: bool = False) -> str:
+    def delete_reports(
+        runtime: ToolRuntime[TurnContext, object],
+        term: str = "",
+        session_scoped: bool = False,
+    ) -> Command:
         """Delete saved reports. Destructive, and confirmed with the user first.
 
         `term` selects reports whose text mentions it — leave it empty only if
         the executive means all of their reports. Set `session_scoped` only when
         they mean the reports made in this conversation.
         """
-        with capture.step("delete_reports") as step:
-            # Resolved here and nowhere else. On resume this whole body replays,
-            # so this runs a second time — which is why its result decides only
-            # whether to ask and what to show, never what to remove.
-            pending = resolve_delete(
-                deps, capture, term=term, session_scoped=session_scoped
-            )
-            if pending is None:
-                described = f" mentioning '{term}'" if term else ""
-                step.detail = "nothing matched"
-                return f"I found no reports{described} to delete."
+        started = time.perf_counter()
+        # Resolved here and nowhere else. On resume this whole body replays, so
+        # this runs a second time — which is why its result decides only
+        # whether to ask and what to show, never what to remove.
+        pending = resolve_delete(
+            deps,
+            user_id=runtime.context.user_id,
+            session_id=runtime.context.session_id,
+            term=term,
+            session_scoped=session_scoped,
+        )
+        if pending is None:
+            described = f" mentioning '{term}'" if term else ""
+            detail = "nothing matched"
+            answer = f"I found no reports{described} to delete."
+            return _reply(runtime, answer, "delete_reports", started, detail)
 
-            decision = interrupt(
-                {
-                    "kind": "delete_reports",
-                    "manifest": render_manifest(pending),
-                    "report_ids": list(pending.report_ids),
-                    "token": pending.token,
-                }
-            )
-            if not decision.get("approved"):
-                step.detail = "rejected"
-                return "Nothing was deleted."
+        decision = interrupt(
+            {
+                "kind": "delete_reports",
+                "manifest": render_manifest(pending),
+                "report_ids": list(pending.report_ids),
+                "token": pending.token,
+            }
+        )
+        if not decision.get("approved"):
+            detail = "rejected"
+            answer = "Nothing was deleted."
+            return _reply(runtime, answer, "delete_reports", started, detail)
 
-            # Ids and token from the resume value, not from `pending`: what the
-            # executive approved is what goes, whatever the replay re-resolved.
-            deleted = deps.reports.soft_delete(
-                owner_id=capture.user_id,
-                report_ids=tuple(decision["report_ids"]),
-                action_id=pending.action_id,
-                token=decision["token"],
-            )
-            step.detail = f"deleted {deleted}"
-            if deleted == 0:
-                return "Nothing to delete — those reports are already gone."
-            return (
+        # Ids and token from the resume value, not from `pending`: what the
+        # executive approved is what goes, whatever the replay re-resolved.
+        deleted = deps.reports.soft_delete(
+            owner_id=runtime.context.user_id,
+            report_ids=tuple(decision["report_ids"]),
+            action_id=pending.action_id,
+            token=decision["token"],
+        )
+        detail = f"deleted {deleted}"
+        if deleted == 0:
+            answer = "Nothing to delete — those reports are already gone."
+        else:
+            answer = (
                 f"Deleted {deleted} report(s). Tell the executive they can run "
                 f"/undo to restore them."
             )
+        return _reply(runtime, answer, "delete_reports", started, detail)
 
     return [list_reports, delete_reports]
+
+
+def _reply(
+    runtime: ToolRuntime, text: str, name: str, started: float, detail: str
+) -> Command:
+    """One `ToolMessage` plus this call's own `events` entry and `calls: 1` —
+    all either tool here contributes to `TurnState`."""
+    return Command(
+        update={
+            "messages": [ToolMessage(content=text, tool_call_id=runtime.tool_call_id)],
+            "events": [step_event(name, started, detail)],
+            "calls": 1,
+        }
+    )
