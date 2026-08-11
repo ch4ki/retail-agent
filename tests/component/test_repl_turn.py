@@ -138,15 +138,28 @@ def test_a_failing_turn_still_leaves_a_trace(make_deps, traces):
     assert traces.get(owner_id="dana", turn_id=trace.turn_id) is not None
 
 
-def test_the_answer_reaches_the_console_as_it_is_produced(make_deps):
-    """The spinner hid the whole turn. A question that spends three queries and
-    writes a report showed one unchanging line until it was completely done."""
+def test_the_answer_reaches_the_console_exactly_once(make_deps):
+    """`_stream_turn` prints the answer live as it arrives; `render_answer`
+    used to print the same text again afterward through `Markdown`, so it
+    appeared twice. This pins "exactly once" — the property this fake can
+    actually verify.
+
+    It does NOT pin that the answer arrives incrementally rather than in one
+    shot: `ScriptedChatModel` returns a whole message per turn, not token
+    chunks, so this fake cannot show the difference between streaming and
+    printing a finished string. That property is pinned by Task 3's boundary
+    test (`test_progress_from_inside_the_analyst_reaches_the_caller`), which
+    fails if the analyst goes back to invoking its subagent instead of
+    streaming it. Do not re-add a containment assertion here believing it
+    proves streaming — it would pass just as well against the old blocking
+    `_answer`.
+    """
     console = FakeConsole()
     deps = make_deps(script=["Denim fell 11.8% in Q1."])
 
     answer(console, deps, "how did denim do?")
 
-    assert "Denim fell 11.8% in Q1." in console.text()
+    assert console.text().count("Denim fell 11.8%") == 1
 
 
 def test_a_failed_turn_prints_no_report(make_deps, monkeypatch):

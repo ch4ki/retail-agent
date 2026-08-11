@@ -20,12 +20,29 @@ def render_answer(console: Console, answer: str, state=None, prefs=None) -> None
     `state` is the turn's checkpointed `TurnState` (or the dict `agent.invoke`
     returned) — the footnote reads `state["redactions"]` and
     `len(state["attempts"])` straight off it.
+
+    Split into two calls below: the streaming CLI path prints the answer live,
+    token by token, as it arrives — calling this afterward would print the
+    same text a second time through `Markdown`. It calls `render_footnote`
+    directly instead. This function still does both, unsplit, for anything
+    that has the whole answer in hand up front and wants one call.
     """
     if not answer:
         return
 
     console.print(Markdown(answer))
+    render_footnote(console, state, prefs)
 
+
+def render_footnote(console: Console, state=None, prefs=None) -> None:
+    """What the answer cost to produce — masked values, repaired queries.
+
+    Pulled out of `render_answer` so a caller that already printed the answer
+    itself (the streaming CLI path) can render just this part instead of
+    printing the answer a second time to get it. `render_answer` calls this
+    too, so the combined behaviour is unchanged for any caller that still
+    wants it in one shot.
+    """
     from retail_agent.store.preferences import DEFAULT_PREFERENCES
 
     prefs = prefs or DEFAULT_PREFERENCES

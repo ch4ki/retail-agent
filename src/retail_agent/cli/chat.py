@@ -27,12 +27,12 @@ from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.supervisor import build_agent
 from retail_agent.bootstrap import build_deps
 from retail_agent.cli.render import (
-    render_answer,
     render_banner,
     render_confirmation,
     render_definition_prompt,
     render_definitions,
     render_error,
+    render_footnote,
     render_metrics,
     render_persona,
     render_personas,
@@ -463,7 +463,13 @@ def _answer(console, deps, saver, user, session_id, question):
         # with no sign it was the wrong question.
         return _record_failure(deps, agent, config, context)
 
-    render_answer(console, answer, result, prefs=preferred(deps.preferences, user))
+    # `_stream_turn` already printed `answer` live, token by token, as it
+    # arrived — calling `render_answer` here would print it a second time
+    # through `Markdown`. Only the footnote (masking, repaired queries) still
+    # needs rendering, and only when there was an answer to attach it to,
+    # matching `render_answer`'s own `if not answer: return`.
+    if answer:
+        render_footnote(console, result, prefs=preferred(deps.preferences, user))
     # Printed here rather than left to the model, for the same reason the
     # preference note below is: what the executive was told is not something to
     # leave to whether the model remembered to say it. Below the answer, which
@@ -573,6 +579,9 @@ def _payload(snapshot) -> dict:
     turn's `result` is the checkpointed state, which never carries it — the
     interrupt itself only lives on the state snapshot `get_state` returns.
     """
+    # Not a state key: `__interrupt__` is only ever stamped onto `invoke()`'s
+    # return value, never written into the checkpoint, so there is no
+    # `snapshot.values["__interrupt__"]` to fall back to here.
     if not snapshot.interrupts:
         return {}
     value = snapshot.interrupts[0].value
