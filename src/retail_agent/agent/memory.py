@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 
 from langchain_core.tools import BaseTool, tool
+from langgraph.types import interrupt
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
@@ -77,7 +78,9 @@ REFUSALS = {
 }
 
 
-def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
+def build_memory_tools(
+    deps: AgentDeps, capture: TurnCapture, *, pause_for_definitions: bool = False
+) -> list[BaseTool]:
     """Bound to one turn, because both tools write against its user."""
 
     @tool
@@ -128,15 +131,34 @@ def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
         trace to a decision.
         """
         with capture.step("ask_for_definitions") as step:
-            # The same lookup and the same partition the CLI's gate uses, so a
-            # word settled before the pause and one settled inside the tool
-            # body are the same set.
+            # The same lookup and the same partition the CLI's gate used to do,
+            # now in the one place that needs the answer.
             known = settled_meanings(deps, capture)
             settled, still_open = partition_terms(known, terms)
 
-            # Recorded here rather than by the caller: this is the one place
-            # that knows a term went unanswered, and `assumption_note` on the
-            # way out reads it to force the disclosure into the answer.
+            # Only pause if the answer can be kept: without a store the agent
+            # would ask the same person the same question every turn, which is
+            # worse than assuming and saying so.
+            if still_open and pause_for_definitions and deps.definitions is not None:
+                reply = interrupt(
+                    {"kind": "ask_for_definitions", "terms": list(still_open)}
+                )
+                answers = reply.get("answers") or {}
+                for term, meaning in answers.items():
+                    try:
+                        deps.definitions.remember(
+                            user_id=capture.user_id,
+                            term=term.strip().lower(),
+                            definition=meaning.strip()[:MAX_DEFINITION_CHARS],
+                        )
+                    except Exception as err:
+                        # Not worth failing a turn the executive just unblocked.
+                        log.warning(
+                            "could not save the definition of %r (%s)", term, err
+                        )
+                settled.update(answers)
+                still_open = [term for term in still_open if term not in answers]
+
             capture.record_assumptions(still_open)
             step.detail = _describe_settled(settled, still_open)
 

@@ -15,12 +15,9 @@ query budget and the repair path.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
 
 from langchain.agents.middleware import (
     AgentMiddleware,
-    HumanInTheLoopMiddleware,
-    InterruptOnConfig,
     ModelCallLimitMiddleware,
     ModelFallbackMiddleware,
     ModelRetryMiddleware,
@@ -35,7 +32,7 @@ from langchain.agents.middleware import (
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
-from retail_agent.agent.capture import PendingDefinition, TurnCapture
+from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.prompts import (
     CONVERSATION_SUMMARY_PROMPT,
@@ -43,7 +40,7 @@ from retail_agent.agent.prompts import (
     SAFETY_RULES,
     SUPERVISOR_PROMPT,
 )
-from retail_agent.agent.tools import GuardRejection, partition_terms, settled_meanings
+from retail_agent.agent.tools import GuardRejection
 from retail_agent.datasources.base import DataSourceError
 from retail_agent.llm.messages import message_text
 from retail_agent.llm.resilience import (
@@ -95,17 +92,9 @@ def analyst_middleware(deps: AgentDeps) -> list[AgentMiddleware]:
 
 
 def supervisor_middleware(
-    deps: AgentDeps, capture: TurnCapture, *, pause_for_definitions: bool = False
+    deps: AgentDeps, capture: TurnCapture
 ) -> list[AgentMiddleware]:
-    """The stack that bounds the turn.
-
-    `pause_for_definitions` arms the pause on the `ask_for_definitions` tool.
-    Off by default because a pause needs somebody there to answer it:
-    `seams.ask_once` scores a paused turn as unanswered, and the eval cases that
-    turn on an undefined term are the brief's own examples. Unarmed, the tool
-    still runs — it finds nothing in the store, records the assumption and tells
-    the model to choose and disclose.
-    """
+    """The stack that bounds the turn."""
     stack: list[AgentMiddleware] = [_turn_sync(capture), _prompt(deps, capture), *_pii()]
 
     # After `_pii()`, and that placement is the guarantee rather than a
@@ -116,10 +105,6 @@ def supervisor_middleware(
     summarizer = _summarization(deps)
     if summarizer is not None:
         stack.append(summarizer)
-
-    gate = _approval_gate(deps, capture, pause_for_definitions=pause_for_definitions)
-    if gate is not None:
-        stack.append(gate)
 
     stack += [
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS, exit_behavior="end"),
@@ -260,91 +245,6 @@ def _summarization(deps: AgentDeps) -> AgentMiddleware | None:
         keep=("messages", deps.settings.context_keep_messages),
         summary_prompt=CONVERSATION_SUMMARY_PROMPT,
     )
-
-
-def _approval_gate(
-    deps: AgentDeps, capture: TurnCapture, *, pause_for_definitions: bool = False
-) -> AgentMiddleware | None:
-    """The one place left where a turn stops for a person, as an interrupt
-    before the tool.
-
-    The delete confirmation used to live here too, as a `when` predicate that
-    resolved the target set and parked it on the capture — a predicate doing
-    store I/O and mutating state. `delete_reports` now calls `interrupt()`
-    itself, from inside the tool body, so the manifest and the act cannot
-    drift apart even under replay. What is left is the narrower gate that
-    still benefits from running before the model decides to ask: whether a
-    term the model wants to settle is already on file.
-
-    Returns `None` when nothing is armed, the same shape `_summarization`
-    uses — a stack is the only place this agent's control flow is visible,
-    and a middleware that never fires is a worse description of the turn than
-    its absence.
-    """
-
-    def still_unsettled(request) -> bool:
-        # Only pause if the answer can be kept. Without a store the agent would
-        # ask the same person the same question every turn, which is worse than
-        # assuming and saying so — the bargain the tool's own body makes.
-        if deps.definitions is None:
-            return False
-
-        args = request.tool_call.get("args", {})
-        capture.pending_definition = open_terms(
-            deps, capture, args.get("terms") or []
-        )
-        return capture.pending_definition is not None
-
-    def describe_definition(tool_call, state, runtime) -> str:
-        pending = capture.pending_definition
-        return describe_open_terms(pending.terms) if pending else "A term needs defining."
-
-    interrupt_on: dict[str, InterruptOnConfig] = {}
-    if pause_for_definitions:
-        interrupt_on["ask_for_definitions"] = InterruptOnConfig(
-            # `approve` runs the tool body, which reads the answers back out of
-            # the store the CLI just wrote them to. "Decide for me" and "cancel"
-            # are both `reject` with different messages: the body never runs, so
-            # nothing has to rewrite the call's arguments to mean either.
-            allowed_decisions=["approve", "reject"],
-            description=describe_definition,
-            when=still_unsettled,
-        )
-
-    if not interrupt_on:
-        return None
-
-    return HumanInTheLoopMiddleware(interrupt_on=interrupt_on, description_prefix="")
-
-
-def open_terms(
-    deps: AgentDeps, capture: TurnCapture, terms: Sequence[str]
-) -> PendingDefinition | None:
-    """Of the words the model asked about, the ones still worth a question.
-
-    The model decides what it does not understand; this decides what has
-    already been answered. Both matter, and only the second can be settled
-    without a model: a term this executive defined last week must not produce
-    the same prompt again, however reasonable the model was to ask.
-
-    Never raises — `settled_meanings` reads through stores that return what
-    they managed to read and a `recall` that answers failure with an empty
-    list, so an unreachable store costs a question that did not need asking,
-    never the turn.
-    """
-    known = settled_meanings(deps, capture)
-    _, still_open = partition_terms(known, terms)
-    return PendingDefinition(terms=tuple(still_open)) if still_open else None
-
-
-def describe_open_terms(terms: Sequence[str]) -> str:
-    """What the pause is about.
-
-    The term alone. There is no gloss to add any more: the words are the
-    executive's own rather than keys of a dict that shipped a description with
-    each one, and `propose` puts concrete candidate meanings under this anyway.
-    """
-    return "\n".join(f"{term!r} has no agreed definition yet" for term in terms)
 
 
 def _turn_sync(capture: TurnCapture) -> AgentMiddleware:

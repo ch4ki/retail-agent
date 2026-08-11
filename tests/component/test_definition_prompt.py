@@ -113,7 +113,10 @@ def test_an_empty_answer_cancels_without_querying(make_deps):
     assert "3 or more completed orders, ever" in console.text(), "it did ask"
     assert source.executed == []
     assert definitions.lookup(user_id="dana", term="loyal") is None
-    assert "did not define" in deps.llm.prompts[-1], (
+    # The CLI no longer crafts its own reject message — a cancel resumes with
+    # `{"answers": {}}`, same shape as a hand-back, and it is the tool's own
+    # `NOBODY_TO_ASK` that tells the model why the analyst did not run.
+    assert "Nobody is available to settle: loyal" in deps.llm.prompts[-1], (
         "the model has to be told why the analyst did not run"
     )
 
