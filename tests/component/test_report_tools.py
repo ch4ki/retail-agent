@@ -264,6 +264,29 @@ def test_a_delete_cannot_reach_another_owner(make_deps, saved):
     assert len(saved.list_reports(owner_id="exec")) == 2
 
 
+def test_delete_reports_survives_a_direct_call_with_no_stream_writer(make_deps, saved):
+    """Every other `delete_reports` test above drives it through a compiled
+    graph's tools node, where `runtime.stream_writer` is always a real
+    callable (a no-op one under `.invoke`, per `Pregel.stream`) — none of them
+    would notice an unguarded `stream_writer(...)` call. This one calls the
+    matched-pending branch directly with a hand-built `ToolRuntime`, the same
+    `stream_writer=None` shape `_runtime_with` gives every other direct-call
+    test in this file.
+
+    `interrupt()` itself needs a running graph and raises `RuntimeError`
+    ("Called get_config outside of a runnable context") when called bare like
+    this — that RuntimeError is the proof the guarded `stream_writer` line
+    above it did not blow up first. An unguarded call raises `TypeError`
+    instead, before `interrupt()` is ever reached, which is what the mutation
+    in the task report demonstrates.
+    """
+    deps = make_deps(script=[])
+    tools = {t.name: t.func for t in build_report_tools(deps)}
+
+    with pytest.raises(RuntimeError, match="runnable context"):
+        tools["delete_reports"](runtime=_runtime_with(context_for()), term="Acme")
+
+
 def test_the_model_never_receives_the_report_it_wrote(make_deps):
     """The whole point: a body in the tool return is a body re-sent on every
     later model call, and a body the model can retype differently."""
