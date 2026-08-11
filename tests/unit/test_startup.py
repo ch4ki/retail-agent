@@ -327,18 +327,36 @@ def test_only_the_analyst_is_an_agent():
     `create_agent` compiles a graph — inside the tool body, so on every
     invocation — to do what one `model.invoke` does.
 
-    Asserted against the source because the property is "nobody added another
-    one", which no behavioural test can see. Same technique as
-    `test_both_entry_points_use_the_same_wiring` above.
+    Checked across every module under `retail_agent.agent`, not just
+    `subagents`, because the property is "nobody added another one anywhere
+    in the package" — a `create_agent` added to `reports.py`, `memory.py`, or
+    a new module would be just as much a tool-less capability wrongly
+    compiled as a graph, and a check scoped to one file cannot see it.
+
+    `supervisor.py` is excluded: its one `create_agent` call is the top-level
+    graph itself, the single real agent the whole product is built from
+    (`supervisor.py`'s own module docstring says as much), not a subagent —
+    counting it would make "exactly one" impossible from the day this test is
+    written. No behavioural test can see the property checked here either
+    way. Same technique as `test_both_entry_points_use_the_same_wiring`
+    above.
     """
-    import inspect
+    from pathlib import Path
 
-    from retail_agent.agent import subagents
+    from retail_agent import agent as agent_package
 
-    source = inspect.getsource(subagents)
+    package_dir = Path(agent_package.__file__).parent
+    counts = {}
+    for path in sorted(package_dir.glob("*.py")):
+        if path.name == "supervisor.py":
+            continue
+        count = path.read_text().count("create_agent(")
+        if count:
+            counts[path.name] = count
 
-    assert source.count("create_agent(") == 1, (
+    total = sum(counts.values())
+    assert total == 1, (
         "exactly one subagent should compile a graph — the analyst, which has "
         "real tools. A tool-less capability belongs in a plain model call "
-        "through `resilient_call`."
+        f"through `resilient_call`. Found {total} call(s) across: {counts}"
     )

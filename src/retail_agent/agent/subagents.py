@@ -120,6 +120,12 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
         false only for a draft you are about to rework.
         """
         with capture.step("report_writer") as step:
+            # Built once, outside the lambda `resilient_call` may invoke more
+            # than once: `report_writer_system_prompt` reads the persona
+            # store, the preference store and the trio corpus, and a retried
+            # attempt should resend the same prompt rather than re-read all
+            # three on every attempt.
+            system_prompt = report_writer_system_prompt(deps, capture)
             # A plain call, not an agent: with no tools there is no loop for a
             # graph to run, and `resilient_call` supplies the retry and
             # fallback that `create_agent`'s middleware supplied to the others.
@@ -127,7 +133,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
                 deps,
                 lambda model: model.invoke(
                     [
-                        SystemMessage(report_writer_system_prompt(deps, capture)),
+                        SystemMessage(system_prompt),
                         HumanMessage(brief),
                     ]
                 ),

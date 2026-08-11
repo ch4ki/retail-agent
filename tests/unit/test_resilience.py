@@ -1,11 +1,15 @@
-"""Which provider failures are worth waiting for, and how that is wired in.
+"""Which provider failures are worth waiting for, and the two ways of acting
+on it.
 
 The brief asks for resilience to third-party downtime, and a single-vendor
-agent cannot answer that honestly. The mechanism is langchain's
-`ModelRetryMiddleware` and `ModelFallbackMiddleware` now, so what is left to
-test here is the judgement we still own — `is_retryable` — and the wiring that
-hands it to them. The behaviour itself is covered end to end in
-`tests/component/test_supervisor.py`, through a real compiled agent.
+agent cannot answer that honestly. Inside an agent loop, that is langchain's
+`ModelRetryMiddleware` and `ModelFallbackMiddleware`; outside one, it is
+`resilient_call`, a hand-written copy of the same policy for `report_writer`,
+`ask_about_report` and `propose`, which are single model calls with no tool
+loop for middleware to wrap. This file tests the judgement both paths share —
+`is_retryable` — the wiring that hands it to the middleware pair, and
+`resilient_call` itself. The middleware pair's own behaviour is covered end to
+end in `tests/component/test_supervisor.py`, through a real compiled agent.
 """
 
 import pytest

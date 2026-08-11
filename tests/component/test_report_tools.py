@@ -286,3 +286,38 @@ def test_a_transient_failure_while_writing_the_report_is_survived(
 
     assert flaky.calls == 2, "the first attempt failed and the second succeeded"
     assert reports.list_reports(owner_id="exec")[0].body == "## Summary\nDenim fell in Q1."
+
+
+def test_a_transient_failure_while_answering_about_a_report_is_survived(
+    make_deps, reports, monkeypatch
+):
+    """`ask_about_report` drives a working `ScriptedChatModel` in every other
+    test here, so a bare `deps.llm.invoke` would be indistinguishable from
+    `resilient_call` — this is the one test that tells them apart.
+
+    `resilient_call`'s `sleep` default is bound to `time.sleep` at import
+    time, so patching `time.sleep` itself would not reach it — the default is
+    mutated in place instead, the same dict `resilient_call(deps, call)`
+    reads from on every call that does not pass `sleep=` explicitly.
+    """
+    import retail_agent.llm.resilience as resilience
+
+    monkeypatch.setitem(
+        resilience.resilient_call.__kwdefaults__, "sleep", lambda seconds: None
+    )
+
+    saved = reports.save(
+        owner_id="exec",
+        session_id="s1",
+        title="Q1 Denim",
+        body="## Action items\n1. Audit Texas inventory depth.",
+    )
+    base = make_deps(script=["Audit Texas inventory depth."])
+    flaky = _FlakyOnce(base.llm)
+    deps = replace(base, llm=flaky)
+    capture = TurnCapture(user_id="exec", session_id="s1")
+
+    answer = asker(deps, capture)(report_id=saved.id, question="what were the actions?")
+
+    assert flaky.calls == 2, "the first attempt failed and the second succeeded"
+    assert "Audit Texas" in answer

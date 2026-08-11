@@ -1,11 +1,21 @@
-"""Which provider failures are worth waiting for.
+"""Which provider failures are worth waiting for, and two ways of acting on it.
 
 The brief asks for resilience to third-party downtime, and a single-vendor
-agent cannot answer that honestly. The mechanism now lives in langchain's own
-middleware — `ModelRetryMiddleware` retries the current provider,
-`ModelFallbackMiddleware` moves to the next one — assembled in
-`agent/middleware.py`. What is left here is the one judgement those middlewares
-cannot make for us: whether a given error is worth a second attempt.
+agent cannot answer that honestly. Inside an agent loop, langchain's own
+middleware does the work — `ModelRetryMiddleware` retries the current
+provider, `ModelFallbackMiddleware` moves to the next one — assembled in
+`agent/middleware.py`. This module holds `is_retryable`, the judgement neither
+middleware can make for us, plus a second, complete retry-and-fallback
+implementation: `resilient_call`.
+
+There are two implementations because middleware only exists inside
+`create_agent`. `report_writer`, `ask_about_report` and `propose` are single
+model calls with no tool loop for middleware to wrap, and `Runnable.with_retry`
+cannot stand in for it: it decides what to retry from exception *types*, while
+`is_retryable` is a message-substring predicate — providers surface a rate
+limit and a gateway error as the same exception class with different text.
+`resilient_call` reproduces the middleware pair's ordering and budget by hand
+so both paths share one policy even though they cannot share one mechanism.
 
 This file used to hold a `ResilientChatModel` that wrapped the whole chain
 behind a hand-written model interface. It was deleted because that interface
@@ -92,6 +102,16 @@ def resilient_call(deps, call, *, sleep=time.sleep):
     while the inner spent several.
 
     `sleep` is injected so tests assert the backoff without waiting for it.
+
+    Known, accepted divergence from `ModelRetryMiddleware`: that middleware
+    defaults to `jitter=True`, and applies the `max_delay` cap before adding
+    the ±25% jitter, so its effective ceiling is 10.0s and its sequence is
+    randomized. This function sleeps exact powers of two hard-capped at
+    `MAX_DELAY_SECONDS` (8.0) — see `test_the_backoff_grows_and_is_capped`,
+    which pins that unjittered sequence rather than catching the mismatch.
+    The cost is the thundering-herd case `jitter=True` exists to spread:
+    without it, concurrent callers hitting the same failure retry in exact
+    lockstep instead of fanning out across the window.
     """
     models = [deps.llm, *deps.llm_fallbacks]
     attempts = max(1, deps.settings.llm_retry_attempts)
@@ -110,4 +130,10 @@ def resilient_call(deps, call, *, sleep=time.sleep):
                     break
                 sleep(min(BASE_DELAY_SECONDS * 2**attempt, MAX_DELAY_SECONDS))
 
+    # Unreachable: `models` always contains `deps.llm` and `attempts >= 1`, so
+    # the loop above runs at least once and assigns `last` on any failure.
+    # Asserted rather than left implicit so a broken invariant fails here,
+    # loudly, instead of as `TypeError: exceptions must derive from
+    # BaseException` from a bare `raise None` masking the real error.
+    assert last is not None
     raise last

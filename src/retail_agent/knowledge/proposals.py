@@ -76,7 +76,13 @@ def propose(
     schema: str,
     settled: dict[str, str] | None = None,
 ) -> list[str]:
-    """Definitions to offer for `term`. Never raises, never blocks the prompt."""
+    """Definitions to offer for `term`. Never raises, but can make the caller
+    wait: it goes through `resilient_call`, so with `llm_retry_attempts`
+    defaulting to 3 and a fallback configured, a provider brown-out can cost
+    up to two backoffs (0.5s + 1.0s) before this degrades to the empty list —
+    on top of each attempt's own network timeout. `cli/chat.py` shows no
+    spinner while that happens.
+    """
     prompt = PROMPT.format(
         question=question,
         term=term,

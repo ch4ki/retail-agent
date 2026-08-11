@@ -135,25 +135,36 @@ every warehouse shares — which columns may be enumerated at all, and how value
 are rendered into a schema — while the `APPROX_TOP_COUNT` query that fetches them
 lives in the BigQuery adapter with the dialect that answers it.
 
-**A new capability is a callable in `build_tools`.** "Email this report", "search
+**A new capability is a `@tool` in `build_tools`.** "Email this report", "search
 the web for trends", "generate a chart" — each is one function. When the
-capability needs its own loop, it is a compiled `create_agent` behind that
-function, exactly as `analyst`, `report_writer` and `ask_about_report` already
-are:
+capability needs its own loop — its own tools to call and decide between — it
+is a compiled `create_agent` behind that function, the way `analyst` is. When
+it only needs a model, one call through `resilient_call` gives it the retry and
+fallback a loop would otherwise get from middleware, without paying for a
+graph it has no use for. `report_writer` and `ask_about_report` are that
+second shape:
 
 ```python
 def build_subagents(deps, capture):
+    @tool
     def analyst(question: str) -> str:
         """Query the retail data and report what it found."""
         ...
         agent = create_agent(model=deps.llm, tools=..., middleware=...)
         return final_text(agent.invoke(...))
 
+    @tool
+    def report_writer(brief: str, title: str) -> str:
+        """Write a report from findings, save it, and show it to the executive."""
+        ...
+        return resilient_call(deps, lambda model: model.invoke(...))
+
     return [analyst, report_writer, ask_about_report]
 ```
 
-That is the whole subagent pattern, and it needs no dependency beyond the one
-already in use.
+Both shapes end up the same `@tool` on the supervisor's tool list, so the
+supervisor never has to know which one it is calling. That is the whole
+subagent pattern, and it needs no dependency beyond the one already in use.
 
 Two rules keep it safe as tools are added:
 
