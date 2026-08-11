@@ -32,14 +32,12 @@ from langchain.agents.middleware import (
     ToolCallLimitMiddleware,
     ToolErrorMiddleware,
     after_agent,
-    before_agent,
     dynamic_prompt,
 )
 from langchain.agents.middleware.types import ToolCallRequest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
-from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.prompts import (
     CONVERSATION_SUMMARY_PROMPT,
@@ -55,6 +53,7 @@ from retail_agent.llm.resilience import (
     MAX_DELAY_SECONDS,
     is_retryable,
 )
+from retail_agent.obs.traces import trace_from_state
 from retail_agent.store.personas import active_body
 from retail_agent.store.preferences import notes_for, preference_block
 
@@ -117,13 +116,10 @@ def analyst_middleware(deps: AgentDeps) -> list[AgentMiddleware]:
     ]
 
 
-def supervisor_middleware(
-    deps: AgentDeps, capture: TurnCapture
-) -> list[AgentMiddleware]:
+def supervisor_middleware(deps: AgentDeps) -> list[AgentMiddleware]:
     """The stack that bounds the turn."""
     stack: list[AgentMiddleware] = [
         _identity_guard(),
-        _turn_sync(capture),
         _prompt(deps),
         *_pii(),
     ]
@@ -140,7 +136,7 @@ def supervisor_middleware(
     stack += [
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS, exit_behavior="end"),
         ToolErrorMiddleware(on_error=describe_failure),
-        _recorder(deps, capture),
+        _recorder(deps),
         *_resilience(deps),
     ]
     return stack
@@ -226,9 +222,10 @@ def supervisor_system_prompt(deps: AgentDeps, *, user_id: str) -> str:
     part with a decision in it — what gets appended and when — and a test of it
     should not have to build a `ModelRequest` to ask.
 
-    Takes `user_id` rather than a `TurnCapture`: identity lives on
-    `TurnContext` now, and this is not a tool, so `ToolRuntime` never reaches
-    it. `_prompt`'s closure is what has a `runtime` to read it from.
+    Takes `user_id` as a plain parameter rather than reading it off anything
+    stateful: identity lives on `TurnContext`, and this is not a tool, so
+    `ToolRuntime` never reaches it. `_prompt`'s closure is what has a
+    `runtime` to read it from.
     """
     prompt = SUPERVISOR_PROMPT.format(
         persona=active_body(deps.personas) or PERSONA_DEFAULT,
@@ -248,10 +245,21 @@ def _prompt(deps: AgentDeps) -> AgentMiddleware:
     a database row the CEO can edit weekly, and the preferences are rows the
     user can change mid-session; binding either when the agent is constructed
     means a long-lived process serves the old one until it restarts.
+
+    Also where a turn with no caller identity is refused before a model call
+    is even made, for a turn that never reaches for a tool at all — a plain
+    "hello" needs no `run_sql`, `list_reports` or anything else
+    `_IdentityGuardMiddleware` wraps, so a turn like that would otherwise sail
+    straight through on an empty-string user, all the way to a final answer.
+    `_identity_guard`'s `wrap_tool_call` is what holds on every resume — this
+    is a `before_model`-style hook, so it does not run again once a paused
+    tool's resume re-enters the tools node directly — but it is the only
+    thing that ever sees a turn with no tool call in it at all.
     """
 
     @dynamic_prompt
     def supervisor_prompt(request) -> str:
+        _require_identity(request.runtime)
         return supervisor_system_prompt(deps, user_id=request.runtime.context.user_id)
 
     return supervisor_prompt
@@ -318,46 +326,6 @@ def _identity_guard() -> AgentMiddleware:
     return _IdentityGuardMiddleware()
 
 
-def _turn_sync(capture: TurnCapture) -> AgentMiddleware:
-    """Point a long-lived capture at the turn actually being run.
-
-    The CLI and the eval build a fresh capture per turn, question already set,
-    and this hook changes nothing there. Studio compiles the agent once and
-    closes its tools over one capture — so without this, `settled_meanings`
-    retrieves for the build-time question ("") and caches the nothing it found,
-    for the life of the process.
-
-    The mid-turn cache is dropped only when the question changed: a resume
-    after the definition pause is the same question, and `settled_meanings`'
-    retrieval must survive it for the replayed tool body to read.
-
-    This also runs `_require_identity` on the initial call, as a fail-fast: a
-    turn started with no identity is rejected before a model call is even
-    made, rather than after paying for one. That is a cost optimisation only
-    — `before_agent` is a completed checkpoint node and never runs again on
-    `Command(resume=...)`, so it cannot be what makes the guarantee hold. The
-    guarantee — on the initial call, on every resume, before every tool —
-    belongs to `_identity_guard` (`wrap_tool_call`) above, which is why that
-    one is listed first in `supervisor_middleware` regardless of what this
-    hook does.
-    """
-
-    @before_agent
-    def sync(state, runtime) -> None:
-        _require_identity(runtime)
-
-        for message in reversed(state.get("messages", []) or []):
-            if isinstance(message, HumanMessage):
-                question = message_text(message).strip()
-                if question and question != capture.question:
-                    capture.question = question
-                    capture.recalled_trios = None
-                return None
-        return None
-
-    return sync
-
-
 def _require_identity(runtime) -> None:
     """Fail the turn loudly, at the start, rather than let every tool below
     silently read and write against the empty-string user.
@@ -376,7 +344,7 @@ def _require_identity(runtime) -> None:
         )
 
 
-def _recorder(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
+def _recorder(deps: AgentDeps) -> AgentMiddleware:
     """The trace, written on every path out of the turn.
 
     No output sweep here any more. Personal data is stopped where it enters
@@ -387,13 +355,16 @@ def _recorder(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
     """
 
     @after_agent
-    def record(state, runtime) -> None:
+    def record(state, runtime) -> dict:
         # What this turn will cost every later turn: the thread is re-sent
         # whole on each model call. Approximate on purpose — an exact count is
         # a provider round trip per turn, spent to tune one setting.
-        capture.context_tokens = count_tokens_approximately(
-            state.get("messages", []) or []
-        )
+        #
+        # Written back into state (rather than only used locally) so a caller
+        # reading the turn's final state — the CLI, the eval — sees the same
+        # figure the trace was built from, and so a turn that dies before this
+        # hook ever runs still reads as "not measured" rather than stale.
+        context_tokens = count_tokens_approximately(state.get("messages", []) or [])
 
         message = _last_ai_message(state)
         answer = message_text(message).strip() if message is not None else ""
@@ -401,7 +372,8 @@ def _recorder(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
         context = runtime.context
         try:
             deps.traces.record(
-                capture.to_trace(
+                trace_from_state(
+                    {**state, "context_tokens": context_tokens},
                     answer,
                     user_id=context.user_id,
                     session_id=context.session_id,
@@ -412,7 +384,7 @@ def _recorder(deps: AgentDeps, capture: TurnCapture) -> AgentMiddleware:
             # Losing a trace should not lose the answer it describes.
             log.warning("could not record the trace (%s)", err)
 
-        return None
+        return {"context_tokens": context_tokens}
 
     return record
 

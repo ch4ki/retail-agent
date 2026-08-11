@@ -53,10 +53,10 @@ class TurnContext:
     the API request body, so anything unserialisable here would not survive the
     trip — never put `deps`, a store or a client on it.
 
-    Identity lives here rather than on `TurnCapture` because it is fixed for a
-    run and set by the caller: never accumulated, never merged, never needing a
-    reducer. That is exactly what runtime context is for, and it is what lets
-    one compiled graph serve two users.
+    Identity lives here rather than in checkpointed graph state because it is
+    fixed for a run and set by the caller: never accumulated, never merged,
+    never needing a reducer. That is exactly what runtime context is for, and
+    it is what lets one compiled graph serve two users.
     """
 
     user_id: str = ""

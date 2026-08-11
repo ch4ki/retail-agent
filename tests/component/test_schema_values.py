@@ -118,11 +118,10 @@ def test_the_structural_schema_carries_no_conventions(make_deps):
     nothing."""
     from langchain.tools import ToolRuntime
 
-    from retail_agent.agent.capture import TurnCapture
     from retail_agent.agent.deps import TurnContext
     from retail_agent.agent.schema import build_schema_tool
 
-    describe = build_schema_tool(make_deps(src=ValueSource()), TurnCapture())[0].func
+    describe = build_schema_tool(make_deps(src=ValueSource()))[0].func
     runtime = ToolRuntime(
         state=None,
         context=TurnContext(),

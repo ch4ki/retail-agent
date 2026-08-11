@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import uuid
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 
 import psycopg
 import psycopg_pool
@@ -22,7 +23,6 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.types import Command
 from rich.console import Console
 
-from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.subagents import final_text
 from retail_agent.agent.supervisor import build_agent
@@ -46,8 +46,10 @@ from retail_agent.config import get_settings
 from retail_agent.datasources.bigquery import BigQuerySource
 from retail_agent.knowledge.trios import live_trios
 from retail_agent.llm.errors import describe_llm_error
+from retail_agent.llm.messages import message_text
 from retail_agent.llm.provider import MissingCredentialsError, build_models
 from retail_agent.obs.tracing import configure_tracing
+from retail_agent.obs.traces import trace_from_state
 from retail_agent.store.preferences import preferred
 
 HELP = """
@@ -379,15 +381,17 @@ def _undo(console, deps, user) -> None:
 def _answer(console, deps, saver, user, session_id, question):
     """Run one turn. Always returns its trace, including when it fails.
 
-    A fresh agent and a fresh capture per turn, and a fresh `TurnContext` with
-    a freshly minted `turn_id` — nothing else mints one now that identity has
-    left `TurnCapture`. The persona and preferences are read per model call,
-    so rebuilding costs nothing and rules out a stale binding.
+    A fresh agent and a fresh `TurnContext` with a freshly minted `turn_id`
+    per turn. The persona and preferences are read per model call, so
+    rebuilding costs nothing and rules out a stale binding.
     """
-    capture = TurnCapture(question=question)
     config = {"configurable": {"thread_id": session_id}}
     turn_id = uuid.uuid4().hex[:12]
     context = TurnContext(user_id=user, session_id=session_id, turn_id=turn_id)
+    # Set only once the agent is built: `_record_failure` reads the
+    # checkpoint back through it, and a turn that died before it could be
+    # built has no checkpoint to read either way.
+    agent = None
 
     try:
         # Inside the guard, not above it: assembling the agent reads the persona
@@ -395,9 +399,7 @@ def _answer(console, deps, saver, user, session_id, question):
         # handler is a REPL that dies.
         # Armed here and nowhere else: a pause needs somebody who can answer it,
         # and this is the only caller with a person at a keyboard.
-        agent = build_agent(
-            deps, capture, checkpointer=saver, pause_for_definitions=True
-        )
+        agent = build_agent(deps, checkpointer=saver, pause_for_definitions=True)
         with console.status("thinking…"):
             result = agent.invoke(
                 {"messages": [{"role": "user", "content": question}]},
@@ -409,7 +411,7 @@ def _answer(console, deps, saver, user, session_id, question):
         # both interrupting themselves now, so `_decide` returns exactly the
         # value each one expects back — nothing here has to reshape it.
         while _pending(result):
-            resume = _decide(console, deps, result, capture)
+            resume = _decide(console, deps, result)
             with console.status("working…"):
                 result = agent.invoke(Command(resume=resume), config, context=context)
     except Exception as err:  # the REPL must survive anything
@@ -427,22 +429,26 @@ def _answer(console, deps, saver, user, session_id, question):
         # written down. Without it the id above resolved to nothing and `/trace`
         # went on describing whichever turn last succeeded — the wrong question,
         # with no sign it was the wrong question.
-        return _record_failure(deps, capture, context)
+        return _record_failure(deps, agent, config, context)
 
     answer = final_text(result)
-    render_answer(console, answer, capture, prefs=preferred(deps.preferences, user))
+    render_answer(console, answer, result, prefs=preferred(deps.preferences, user))
     # Printed here rather than left to the model, for the same reason the
     # preference note below is: what the executive was told is not something to
     # leave to whether the model remembered to say it. Below the answer, which
     # is the covering sentence introducing it.
-    render_reports(console, capture.reports_written)
-    for field, value in capture.preference_changes:
+    render_reports(console, _written_reports(deps, result, user))
+    for change in result.get("preference_changes") or []:
         # Said by the CLI rather than left to the model: a setting that changed
         # without the reader being told is the failure this design cares about.
-        console.print(f"[dim]Saved {field} = {value} as your default. /prefs to change it.[/dim]")
+        console.print(
+            f"[dim]Saved {change['action']} = {change['note']} as your "
+            f"default. /prefs to change it.[/dim]"
+        )
     # The trace was written by the recorder middleware, on every path out. This
-    # is the same record, kept so `/trace` needs no round trip to storage.
-    return capture.to_trace(
+    # is the same record, read back off the same state rather than recomputed.
+    return trace_from_state(
+        result,
         answer,
         user_id=context.user_id,
         session_id=context.session_id,
@@ -450,24 +456,65 @@ def _answer(console, deps, saver, user, session_id, question):
     )
 
 
-def _record_failure(deps, capture, context):
+def _written_reports(deps, state, user):
+    """This turn's reports, with the body read back from the store.
+
+    `TurnState["reports_written"]` never carries a body — state is
+    checkpointed on every super-step, and the library's copy is the one that
+    gets read (see `reports.py`) — so the CLI has to fetch it before it can
+    print the report it just wrote.
+    """
+    written = []
+    for entry in state.get("reports_written") or []:
+        report = deps.reports.get(owner_id=user, report_id=entry["report_id"])
+        if report is None:
+            continue
+        written.append({**entry, "body": report.body})
+    return written
+
+
+def _record_failure(deps, agent, config, context):
     """The trace for a turn that died. Never raises.
+
+    Recovers the turn's record from the checkpointer rather than from a
+    return value the graph never produced — `agent.invoke` raised, so there is
+    no result to read `attempts`/`events`/... off directly. Reading the
+    checkpoint instead means a turn that ran two queries and then died still
+    records those two attempts, and it survives the process dying with it,
+    which holding the record in memory never did.
+
+    `agent` is `None` when the turn died before it could even be built (a
+    startup wiring fault, say) — there is no checkpoint to read then, and the
+    trace is built from an empty state, same as a turn that never ran a tool.
 
     `failed` rather than left at `ok`: `self_correction_rate` counts a repaired
     turn as recovered only when it ended `ok`, so a turn that fixed its SQL and
-    then died must not count as a self-correction that worked. That ratio is the
-    only thing reading `status` now, and it is why the field survived `degraded`.
+    then died must not count as a self-correction that worked. That ratio is
+    the only thing reading `status` now, and it is why the field survived
+    `degraded`.
 
-    Takes the `TurnContext` the turn was invoked with: identity lives there
-    now, not on `capture`, and a turn that died before the recorder ran still
-    needs its `user_id`/`session_id`/`turn_id` for the trace.
+    Takes the `TurnContext` the turn was invoked with: identity lives there,
+    not on anything the graph accumulates, and a turn that died before the
+    recorder ran still needs its `user_id`/`session_id`/`turn_id` for the trace.
     """
-    capture.status = "failed"
-    trace = capture.to_trace(
-        "",
-        user_id=context.user_id,
-        session_id=context.session_id,
-        turn_id=context.turn_id,
+    state = {}
+    if agent is not None:
+        try:
+            state = agent.get_state(config).values or {}
+        except Exception as err:
+            logging.getLogger(__name__).warning(
+                "could not recover the checkpoint for the failed turn (%s)", err
+            )
+
+    trace = replace(
+        trace_from_state(
+            state,
+            "",
+            user_id=context.user_id,
+            session_id=context.session_id,
+            turn_id=context.turn_id,
+        ),
+        status="failed",
     )
     try:
         deps.traces.record(trace)
@@ -487,7 +534,23 @@ def _payload(result) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _decide(console, deps, result, capture) -> dict:
+def _question_from(result) -> str:
+    """This turn's own question, the last `HumanMessage` in the thread.
+
+    Identity and the transcript both live in graph state now, so this reads
+    the same fact `memory.py`'s own `_last_human_text` and `obs/traces.py`'s
+    `_last_human_text` do, rather than a value synced onto a closure at the
+    top of every turn.
+    """
+    from langchain_core.messages import HumanMessage
+
+    for message in reversed(result.get("messages") or []):
+        if isinstance(message, HumanMessage):
+            return message_text(message)
+    return ""
+
+
+def _decide(console, deps, result) -> dict:
     """Turn a pause into the value the tool resumes with.
 
     Dispatching on the payload's own `kind`: the tool that asked is the tool
@@ -495,7 +558,7 @@ def _decide(console, deps, result, capture) -> dict:
     """
     payload = _payload(result)
     if payload.get("kind") == "ask_for_definitions":
-        return _settle_definitions(console, deps, capture, payload)
+        return _settle_definitions(console, deps, _question_from(result), payload)
 
     if _confirm(console, payload):
         return {
@@ -528,7 +591,7 @@ def _confirm(console, payload) -> bool:
 _HAND_BACK = object()
 
 
-def _settle_definitions(console, deps, capture, payload) -> dict:
+def _settle_definitions(console, deps, question, payload) -> dict:
     """Ask about each open term, then resume once.
 
     In question order and one at a time: each prompt stays a simple choice, and
@@ -542,6 +605,10 @@ def _settle_definitions(console, deps, capture, payload) -> dict:
     `interrupt()` call unreachable and this resume value unconsumed. So the
     answers travel back in the resume value, and `ask_for_definitions` is what
     stores them.
+
+    `question` is this turn's own question, read off the graph state by the
+    caller (`_decide`) — identity and the transcript both live there now,
+    not on anything built and held across the turn.
     """
     from retail_agent.agent.schema import render_schema_outline
     from retail_agent.knowledge.proposals import propose
@@ -556,7 +623,7 @@ def _settle_definitions(console, deps, capture, payload) -> dict:
     for term in terms:
         options = propose(
             deps,
-            question=capture.question,
+            question=question,
             term=term,
             schema=schema,
             settled=answers,

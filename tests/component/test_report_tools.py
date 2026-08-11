@@ -12,7 +12,6 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
-from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.middleware import MissingTurnIdentity
 from retail_agent.agent.reports import build_report_tools, confirmation_token
@@ -46,8 +45,7 @@ def context_for(user_id: str = "exec", session_id: str = "s1", turn_id: str = "t
     directly: the tools read identity from `runtime.context`, which `invoke`
     never fills in unless the caller passes it, so a test that omits it would
     have every identity-scoped tool see an empty user rather than the one the
-    fixtures set up. Identity is supplied directly here rather than read off a
-    `TurnCapture` — `TurnCapture` no longer carries it.
+    fixtures set up.
     """
     return TurnContext(user_id=user_id, session_id=session_id, turn_id=turn_id)
 
@@ -60,11 +58,11 @@ def _text(result):
     return result
 
 
-def writer(deps, capture):
-    func = {t.name: t.func for t in build_subagents(deps, capture)}["report_writer"]
+def writer(deps):
+    func = {t.name: t.func for t in build_subagents(deps)}["report_writer"]
 
     def call(**kwargs):
-        return _text(func(runtime=_runtime_with(context_for()), **kwargs))
+        return func(runtime=_runtime_with(context_for()), **kwargs)
 
     return call
 
@@ -81,16 +79,15 @@ def saved(reports):
 
 
 def run(deps, question, saver=None):
-    capture = TurnCapture(question=question)
     saver = saver or MemorySaver()
-    agent = build_agent(deps, capture, checkpointer=saver)
+    agent = build_agent(deps, checkpointer=saver)
     config = {"configurable": {"thread_id": "s1"}}
     result = agent.invoke(
         {"messages": [{"role": "user", "content": question}]},
         config,
         context=context_for(),
     )
-    return agent, capture, config, result
+    return agent, config, result
 
 
 def test_a_delete_matching_nothing_never_raises_a_prompt(make_deps, saved):
@@ -99,7 +96,7 @@ def test_a_delete_matching_nothing_never_raises_a_prompt(make_deps, saved):
     deps = make_deps(
         script=[[("delete_reports", {"term": "Nothing"})], "I found none."]
     )
-    _, _, _, result = run(deps, "delete the reports about Nothing")
+    _, _, result = run(deps, "delete the reports about Nothing")
 
     assert not result.get("__interrupt__")
     assert len(saved.list_reports(owner_id="exec")) == 2
@@ -110,7 +107,7 @@ def test_nothing_is_deleted_while_the_user_is_being_asked(make_deps, saved):
     deps = make_deps(
         script=[[("delete_reports", {"term": "Acme"})], "Deleted."]
     )
-    _, _, _, result = run(deps, "delete all reports mentioning Acme")
+    _, _, result = run(deps, "delete all reports mentioning Acme")
 
     assert result.get("__interrupt__")
     assert len(saved.list_reports(owner_id="exec")) == 2
@@ -123,7 +120,7 @@ def test_approving_deletes_exactly_what_was_shown(make_deps, saved):
     deps = make_deps(
         script=[[("delete_reports", {"term": "Acme"})], "Deleted 1 report."]
     )
-    agent, capture, config, result = run(deps, "delete all reports mentioning Acme")
+    agent, config, result = run(deps, "delete all reports mentioning Acme")
     payload = result["__interrupt__"][0].value
 
     agent.invoke(
@@ -157,7 +154,7 @@ def test_a_resumed_approval_with_no_identity_is_refused_not_silent(make_deps, sa
     deps = make_deps(
         script=[[("delete_reports", {"term": "Acme"})], "Deleted 1 report."]
     )
-    agent, capture, config, result = run(deps, "delete all reports mentioning Acme")
+    agent, config, result = run(deps, "delete all reports mentioning Acme")
     payload = result["__interrupt__"][0].value
 
     with pytest.raises(MissingTurnIdentity):
@@ -177,20 +174,19 @@ def test_a_resumed_approval_with_no_identity_is_refused_not_silent(make_deps, sa
 
 
 def test_a_paused_delete_traces_exactly_one_event(make_deps, saved):
-    """`interrupt()` raises out of `capture.step("delete_reports")` on the
-    pre-pause pass, then `interrupt()` replays the whole node on resume. A
-    bare `try/finally` in `TurnCapture.step` would file the pre-pause pass as
-    a completed step with an empty detail before the exception is even seen,
-    then file the real one again on replay — two events, one of them blank,
-    for a single delete. There must be exactly one, and it must carry the
-    real detail."""
+    """`interrupt()` raises before the tool returns a `Command` on the
+    pre-pause pass, so nothing is recorded then; `interrupt()` replays the
+    whole node on resume, and that pass is the only one that ever returns an
+    `events` entry — there must be exactly one, and it must carry the real
+    detail.
+    """
     deps = make_deps(
         script=[[("delete_reports", {"term": "Acme"})], "Deleted 1 report."]
     )
-    agent, capture, config, result = run(deps, "delete all reports mentioning Acme")
+    agent, config, result = run(deps, "delete all reports mentioning Acme")
     payload = result["__interrupt__"][0].value
 
-    agent.invoke(
+    final = agent.invoke(
         Command(
             resume={
                 "approved": True,
@@ -202,17 +198,17 @@ def test_a_paused_delete_traces_exactly_one_event(make_deps, saved):
         context=context_for(),
     )
 
-    delete_events = [e for e in capture.events if e[0] == "delete_reports"]
-    assert len(delete_events) == 1, capture.events
-    assert delete_events[0][2] == "deleted 1"
-    assert capture.calls == 1
+    delete_events = [e for e in final["events"] if e["name"] == "delete_reports"]
+    assert len(delete_events) == 1, final["events"]
+    assert delete_events[0]["detail"] == "deleted 1"
+    assert final["calls"] == 1
 
 
 def test_rejecting_leaves_the_library_alone(make_deps, saved):
     deps = make_deps(
         script=[[("delete_reports", {"term": "Acme"})], "Nothing was deleted."]
     )
-    agent, capture, config, _ = run(deps, "delete all reports mentioning Acme")
+    agent, config, _ = run(deps, "delete all reports mentioning Acme")
 
     agent.invoke(
         Command(resume={"approved": False}), config, context=context_for()
@@ -226,7 +222,7 @@ def test_a_deletion_can_be_undone(make_deps, saved):
     deps = make_deps(
         script=[[("delete_reports", {"term": "Acme"})], "Deleted."]
     )
-    agent, capture, config, result = run(deps, "delete all reports mentioning Acme")
+    agent, config, result = run(deps, "delete all reports mentioning Acme")
     payload = result["__interrupt__"][0].value
     agent.invoke(
         Command(
@@ -247,7 +243,7 @@ def test_a_deletion_can_be_undone(make_deps, saved):
 def test_the_manifest_names_every_report_and_the_token_scales(make_deps, saved):
     """One report is a low-stakes correction; several is not."""
     deps = make_deps(script=[[("delete_reports", {"term": ""})], "Deleted."])
-    _, _, _, result = run(deps, "delete all my reports")
+    _, _, result = run(deps, "delete all my reports")
 
     payload = result["__interrupt__"][0].value
     assert set(payload["report_ids"]) == {r.id for r in saved.list_reports(owner_id="exec")}
@@ -258,8 +254,7 @@ def test_the_manifest_names_every_report_and_the_token_scales(make_deps, saved):
 def test_a_delete_cannot_reach_another_owner(make_deps, saved):
     """Ownership is a WHERE clause in the store, not a check in the agent."""
     deps = make_deps(script=[[("delete_reports", {"term": "Acme"})], "None."])
-    capture = TurnCapture(question="q")
-    tools = {t.name: t.func for t in build_report_tools(deps, capture)}
+    tools = {t.name: t.func for t in build_report_tools(deps)}
 
     answer = _text(tools["delete_reports"](
         runtime=_runtime_with(context_for(user_id="someone-else")), term="Acme"
@@ -278,9 +273,8 @@ def test_the_model_never_receives_the_report_it_wrote(make_deps):
         "## Action items\n1. Audit Texas."
     )
     deps = make_deps(script=[body])
-    capture = TurnCapture()
 
-    receipt = writer(deps, capture)(brief="denim findings", title="Q1 Denim")
+    receipt = _text(writer(deps)(brief="denim findings", title="Q1 Denim"))
 
     assert "Denim fell 11.8%" not in receipt
     assert "Audit Texas" not in receipt
@@ -289,16 +283,20 @@ def test_the_model_never_receives_the_report_it_wrote(make_deps):
 
 def test_what_is_stored_is_what_the_writer_produced(make_deps, reports):
     """No model sits between the two any more, so this is now an identity
-    rather than a hope."""
+    rather than a hope.
+
+    `TurnState["reports_written"]` never carries a body (see
+    `test_a_reports_body_is_not_in_state` in `test_supervisor.py`) — the
+    store's copy is the only one that exists, so there is nothing left to
+    compare it against here beyond checking the store got what was written.
+    """
     body = "## Summary\nDenim fell in Q1."
     deps = make_deps(script=[body])
-    capture = TurnCapture()
 
-    writer(deps, capture)(brief="denim findings", title="Q1 Denim")
+    writer(deps)(brief="denim findings", title="Q1 Denim")
 
     stored = reports.list_reports(owner_id="exec")[0]
     assert stored.body == body
-    assert capture.reports_written[0].body == stored.body
 
 
 def test_a_report_is_scanned_when_it_is_written_not_when_it_is_saved(
@@ -307,11 +305,9 @@ def test_a_report_is_scanned_when_it_is_written_not_when_it_is_saved(
     """A report shown but never saved used to reach the executive unscanned,
     because the only scan lived inside `save_report`."""
     deps = make_deps(script=["Reach Dana at dana@example.com about this."])
-    capture = TurnCapture()
 
-    writer(deps, capture)(brief="contacts", title="Contacts")
+    writer(deps)(brief="contacts", title="Contacts")
 
-    assert "dana@example.com" not in capture.reports_written[0].body
     assert "[redacted:email]" in reports.list_reports(owner_id="exec")[0].body
 
 
@@ -319,20 +315,18 @@ def test_the_show_flag_is_carried_to_the_cli(make_deps):
     """The model decides whether the executive asked to read this; the CLI only
     obeys."""
     deps = make_deps(script=["## Summary\nA draft."])
-    capture = TurnCapture()
 
-    writer(deps, capture)(brief="b", title="T", show_to_executive=False)
+    result = writer(deps)(brief="b", title="T", show_to_executive=False)
 
-    assert capture.reports_written[0].show is False
+    assert result.update["reports_written"][0]["show"] is False
 
 
 def test_a_short_headerless_report_still_leaks_nothing(make_deps):
     """The adversarial shape. An excerpt-based receipt returned this whole body
     verbatim — a report short enough to fit in the receipt is still a report."""
     deps = make_deps(script=["Denim fell 11.8% in Q1. Texas drove it."])
-    capture = TurnCapture()
 
-    receipt = writer(deps, capture)(brief="b", title="T")
+    receipt = _text(writer(deps)(brief="b", title="T"))
 
     assert "Denim fell" not in receipt
     assert "Texas" not in receipt
@@ -342,17 +336,17 @@ def test_there_is_no_save_report_tool(make_deps):
     """Its only caller was the supervisor retyping a body it had just read."""
     from retail_agent.agent.supervisor import build_tools
 
-    names = {t.name for t in build_tools(make_deps(), TurnCapture())}
+    names = {t.name for t in build_tools(make_deps())}
 
     assert "save_report" not in names
     assert "report_writer" in names
 
 
-def asker(deps, capture):
-    func = {t.name: t.func for t in build_subagents(deps, capture)}["ask_about_report"]
+def asker(deps):
+    func = {t.name: t.func for t in build_subagents(deps)}["ask_about_report"]
 
     def call(**kwargs):
-        return _text(func(runtime=_runtime_with(context_for()), **kwargs))
+        return func(runtime=_runtime_with(context_for()), **kwargs)
 
     return call
 
@@ -367,9 +361,8 @@ def test_a_report_is_answered_from_its_stored_body(make_deps, reports):
         body="## Action items\n1. Audit Texas inventory depth.",
     )
     deps = make_deps(script=["Audit Texas inventory depth."])
-    capture = TurnCapture()
 
-    answer = asker(deps, capture)(report_id=saved.id, question="what were the actions?")
+    answer = _text(asker(deps)(report_id=saved.id, question="what were the actions?"))
 
     assert "Audit Texas" in answer
     assert "Audit Texas inventory depth." in deps.llm.prompts[0]
@@ -382,9 +375,8 @@ def test_another_users_report_is_not_readable(make_deps, reports):
         owner_id="someone-else", session_id="s9", title="Theirs", body="Secret."
     )
     deps = make_deps(script=[])
-    capture = TurnCapture()
 
-    answer = asker(deps, capture)(report_id=saved.id, question="what does it say?")
+    answer = _text(asker(deps)(report_id=saved.id, question="what does it say?"))
 
     assert "Secret" not in answer
     assert "list_reports" in answer
@@ -394,9 +386,8 @@ def test_a_missing_report_costs_no_model_call(make_deps):
     """An empty script raises if the subagent is built, so this asserts the
     early return rather than the wording."""
     deps = make_deps(script=[])
-    capture = TurnCapture()
 
-    answer = asker(deps, capture)(report_id="nope", question="?")
+    answer = _text(asker(deps)(report_id="nope", question="?"))
 
     assert "No report nope" in answer
 
@@ -427,9 +418,8 @@ def test_a_transient_failure_while_writing_the_report_is_survived(
     base = make_deps(script=["## Summary\nDenim fell in Q1."])
     flaky = _FlakyOnce(base.llm)
     deps = replace(base, llm=flaky)
-    capture = TurnCapture()
 
-    writer(deps, capture)(brief="denim findings", title="Q1 Denim")
+    writer(deps)(brief="denim findings", title="Q1 Denim")
 
     assert flaky.calls == 2, "the first attempt failed and the second succeeded"
     assert reports.list_reports(owner_id="exec")[0].body == "## Summary\nDenim fell in Q1."
@@ -443,8 +433,7 @@ def test_a_report_added_between_prompt_and_approval_is_not_deleted(
     the resume value precisely so the replay cannot widen the blast radius."""
     deps = make_deps(script=[[("delete_reports", {"term": "Q1"})], "Deleted."])
     saver = MemorySaver()
-    capture = TurnCapture(question="delete the Q1 reports")
-    agent = build_agent(deps, capture, checkpointer=saver)
+    agent = build_agent(deps, checkpointer=saver)
     config = {"configurable": {"thread_id": "s1"}}
 
     result = agent.invoke(
@@ -497,9 +486,10 @@ def test_a_transient_failure_while_answering_about_a_report_is_survived(
     base = make_deps(script=["Audit Texas inventory depth."])
     flaky = _FlakyOnce(base.llm)
     deps = replace(base, llm=flaky)
-    capture = TurnCapture()
 
-    answer = asker(deps, capture)(report_id=saved.id, question="what were the actions?")
+    answer = _text(
+        asker(deps)(report_id=saved.id, question="what were the actions?")
+    )
 
     assert flaky.calls == 2, "the first attempt failed and the second succeeded"
     assert "Audit Texas" in answer
@@ -517,9 +507,9 @@ def test_one_compiled_agent_serves_two_users(make_deps, reports):
     test used to, bypasses `context_schema`, the whole middleware stack and
     the framework's runtime injection: it would keep passing with
     `context_schema=TurnContext` deleted from `build_agent`, with
-    `_identity_guard`/`_turn_sync` removed from the middleware stack, and
-    with runtime injection broken outright, because none of those are on the
-    path a bare function call takes. Driving the compiled graph through
+    `_identity_guard` removed from the middleware stack, and with runtime
+    injection broken outright, because none of those are on the path a bare
+    function call takes. Driving the compiled graph through
     `agent.invoke(..., context=...)`, the way the CLI and the server both
     actually call it, is what exercises all three.
     """
@@ -534,9 +524,7 @@ def test_one_compiled_agent_serves_two_users(make_deps, reports):
             "Written up for Bo.",
         ]
     )
-    agent = build_agent(
-        deps, TurnCapture(question="write it up"), checkpointer=MemorySaver()
-    )
+    agent = build_agent(deps, checkpointer=MemorySaver())
 
     agent.invoke(
         {"messages": [{"role": "user", "content": "write it up"}]},
@@ -571,8 +559,7 @@ def test_the_analysts_record_reaches_the_turn(make_deps):
         ],
         src=source,
     )
-    capture = TurnCapture(question="how many?")
-    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+    agent = build_agent(deps, checkpointer=MemorySaver())
 
     result = agent.invoke(
         {"messages": [{"role": "user", "content": "how many?"}]},
@@ -596,8 +583,7 @@ def test_a_reports_body_is_not_in_state(make_deps, reports):
             "Written.",
         ]
     )
-    capture = TurnCapture(question="write it up")
-    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+    agent = build_agent(deps, checkpointer=MemorySaver())
 
     result = agent.invoke(
         {"messages": [{"role": "user", "content": "write it up"}]},

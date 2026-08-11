@@ -1,9 +1,9 @@
 """What a turn did, as graph state.
 
-This replaces `TurnCapture`, which every tool closed over and mutated in place.
-Accumulation bound at build time is why the agent had to be rebuilt for each
-turn, and why the record of a turn was not checkpointed: a conversation resumed
-from a checkpoint carried its messages but not what its tools had done.
+This replaces the closure every tool used to mutate in place. Accumulation
+bound at build time is why the agent had to be rebuilt for each turn, and why
+the record of a turn was not checkpointed: a conversation resumed from a
+checkpoint carried its messages but not what its tools had done.
 
 Everything here is a plain primitive. LangGraph round-trips custom dataclasses
 today but warns that deserializing unregistered types "will be blocked in a
@@ -45,7 +45,8 @@ class TurnState(AgentState):
 
 
 def step_event(name: str, started: float, detail: str = "") -> dict:
-    """One tool call, timed. What `capture.step` used to append.
+    """One tool call, timed — filed by the call site, now that a turn's
+    record is checkpointed state rather than a closure a step could wrap.
 
     `started` is a `time.perf_counter()` reading taken before the work.
     """
@@ -54,6 +55,25 @@ def step_event(name: str, started: float, detail: str = "") -> dict:
         "ms": int((time.perf_counter() - started) * 1000),
         "detail": detail,
     }
+
+
+def intent_from_events(events) -> str:
+    """Which of four things the turn was, read off which tools ran.
+
+    Derived rather than classified — the graph used to ask a model which of
+    four things a turn was before doing any of them. Which tools actually ran
+    is the same answer, arrived at after the fact and for free. `events` is
+    `TurnState["events"]`, a list of `{"name": ..., "ms": ..., "detail": ...}`
+    dicts.
+    """
+    ran = {event["name"] for event in events}
+    if "analyst" in ran or "run_sql" in ran:
+        return "analyze"
+    if ran & {"report_writer", "ask_about_report", "list_reports", "delete_reports"}:
+        return "report_op"
+    if "describe_schema" in ran:
+        return "schema"
+    return "chat"
 
 
 def frame_to_state(frame) -> dict:
@@ -82,7 +102,7 @@ def attempt_record(
     bytes_billed: int | None = None,
     index: int = 0,
 ) -> dict:
-    """One query attempt. The same keys `TurnCapture.record_attempt` built.
+    """One query attempt, as a plain dict.
 
     `index` is the caller's count of attempts so far, so `step_id` still reads
     `q1`, `q2`, … — the state's reducer cannot know the running total.

@@ -143,7 +143,6 @@ def _tools_called(source, question, tool):
     model elects to call it is a behaviour of the live provider — which means it
     can only be checked against the live provider.
     """
-    from retail_agent.agent.capture import TurnCapture
     from retail_agent.agent.deps import TurnContext
     from retail_agent.agent.supervisor import build_agent
     from retail_agent.bootstrap import build_deps
@@ -152,14 +151,13 @@ def _tools_called(source, question, tool):
     from langgraph.checkpoint.memory import MemorySaver
 
     deps = build_deps(Settings(), llm=_llm(), source=source)
-    capture = TurnCapture(question=question)
-    agent = build_agent(deps, capture, checkpointer=MemorySaver())
-    agent.invoke(
+    agent = build_agent(deps, checkpointer=MemorySaver())
+    result = agent.invoke(
         {"messages": [{"role": "user", "content": question}]},
         {"configurable": {"thread_id": "live"}},
         context=TurnContext(user_id="live", session_id="live", turn_id="t1"),
     )
-    return [name for name, _, _ in capture.events if name == tool]
+    return [event["name"] for event in result["events"] if event["name"] == tool]
 
 
 def _note_preference_calls(source, question):
@@ -168,7 +166,6 @@ def _note_preference_calls(source, question):
 
 def _step_order(source, question):
     """Every step in order, so a test can assert that one preceded another."""
-    from retail_agent.agent.capture import TurnCapture
     from retail_agent.agent.deps import TurnContext
     from retail_agent.agent.supervisor import build_agent
     from retail_agent.bootstrap import build_deps
@@ -177,14 +174,13 @@ def _step_order(source, question):
     from langgraph.checkpoint.memory import MemorySaver
 
     deps = build_deps(Settings(), llm=_llm(), source=source)
-    capture = TurnCapture(question=question)
-    agent = build_agent(deps, capture, checkpointer=MemorySaver())
-    agent.invoke(
+    agent = build_agent(deps, checkpointer=MemorySaver())
+    result = agent.invoke(
         {"messages": [{"role": "user", "content": question}]},
         {"configurable": {"thread_id": "live"}},
         context=TurnContext(user_id="live", session_id="live", turn_id="t1"),
     )
-    return [name for name, _, _ in capture.events]
+    return [event["name"] for event in result["events"]]
 
 
 @pytest.mark.parametrize(

@@ -12,7 +12,6 @@ here rather than requested in a prompt, which is the property worth keeping.
 
 import pandas as pd
 
-from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.subagents import build_subagents
 from retail_agent.knowledge.trios import Trio
 from retail_agent.store.definitions import InMemoryDefinitionStore
@@ -38,17 +37,11 @@ def _text(result):
     return result
 
 
-def subagents_for(deps, question="who are our loyal customers?"):
-    capture = TurnCapture(question=question)
-    tools = {t.name: t.func for t in build_subagents(deps, capture)}
-    bound = {
-        name: (lambda *a, _f=func, **kw: _text(_f(*a, **kw)))
-        for name, func in tools.items()
-    }
-    return bound, capture
+def subagents_for(deps):
+    return {t.name: t.func for t in build_subagents(deps)}
 
 
-def _runtime():
+def _runtime(state=None):
     """A `ToolRuntime` good enough to call a tool's raw `.func` directly.
 
     The framework only injects a real one when a tool runs through
@@ -58,14 +51,15 @@ def _runtime():
 
     `context` carries the same `user_id`/`session_id` used elsewhere in this
     file's fixtures, so a tool reading `runtime.context.user_id` sees the same
-    executive throughout — identity lives only on `TurnContext` now, not on
-    the capture `subagents_for` builds alongside it.
+    executive throughout. `state` stands in for whatever an earlier tool call
+    this turn would have written into `TurnState` — `analyst` reads
+    `assumed_terms` off it, and `report_writer` reads `trio_ids`.
     """
     from langchain.tools import ToolRuntime
     from retail_agent.agent.deps import TurnContext
 
     return ToolRuntime(
-        state=None,
+        state=state or {},
         context=TurnContext(user_id="exec", session_id="s1"),
         config={},
         stream_writer=None,
@@ -87,7 +81,7 @@ def test_the_executives_own_definitions_reach_the_model(make_deps):
         src=source,
         definitions=definitions,
     )
-    analyst, _ = subagents_for(deps)
+    analyst = subagents_for(deps)
 
     analyst["analyst"]("how many LGB customers?", runtime=_runtime())
 
@@ -106,12 +100,13 @@ def test_a_trio_settles_the_term_and_the_query_runs(make_deps):
         definitions=InMemoryDefinitionStore(),
         trios=[LOYAL],
     )
-    analyst, capture = subagents_for(deps)
+    analyst = subagents_for(deps)
 
-    answer = analyst["analyst"]("who are our loyal customers?", runtime=_runtime())
+    result = analyst["analyst"]("who are our loyal customers?", runtime=_runtime())
+    answer = _text(result)
 
     assert "42" in answer
-    assert capture.trio_ids == ["trio-loyal"]
+    assert result.update["trio_ids"] == ["trio-loyal"]
     assert source.executed
 
 
@@ -119,7 +114,7 @@ def test_the_agreed_definition_reaches_the_model(make_deps):
     """Retrieval that never reaches the prompt is retrieval that did nothing."""
     source = FakeSource(frames={"default": pd.DataFrame({"n": [1]})})
     deps = make_deps(script=["one."], src=source, trios=[LOYAL])
-    analyst, _ = subagents_for(deps)
+    analyst = subagents_for(deps)
 
     analyst["analyst"]("who are our loyal customers?", runtime=_runtime())
 
@@ -133,7 +128,7 @@ def test_a_recorded_assumption_is_forced_into_the_answer(make_deps):
 
     The note is appended by the wrapper rather than requested in the prompt, so
     a model that ignores the instruction still cannot return the figure alone.
-    The terms come from the capture — written earlier in the turn by
+    The terms come from this turn's own state — written earlier in the turn by
     `ask_for_definitions` when nobody was there to answer it.
     """
     source = FakeSource(frames={"default": pd.DataFrame({"n": [9]})})
@@ -142,10 +137,12 @@ def test_a_recorded_assumption_is_forced_into_the_answer(make_deps):
         src=source,
         definitions=InMemoryDefinitionStore(),
     )
-    analyst, capture = subagents_for(deps)
-    capture.record_assumptions(["LGB"])
+    analyst = subagents_for(deps)
 
-    answer = analyst["analyst"]("how many LGB customers?", runtime=_runtime())
+    result = analyst["analyst"](
+        "how many LGB customers?", runtime=_runtime(state={"assumed_terms": ["LGB"]})
+    )
+    answer = _text(result)
 
     assert "no agreed definition" in answer.lower()
     assert "LGB" in answer
@@ -160,10 +157,12 @@ def test_nothing_assumed_means_no_disclosure(make_deps):
         src=source,
         definitions=InMemoryDefinitionStore(),
     )
-    analyst, _ = subagents_for(deps)
+    analyst = subagents_for(deps)
 
-    answer = analyst["analyst"](
-        "how much revenue did we make in March?", runtime=_runtime()
+    answer = _text(
+        analyst["analyst"](
+            "how much revenue did we make in March?", runtime=_runtime()
+        )
     )
 
     assert "3" in answer
@@ -180,10 +179,13 @@ def test_the_report_writer_is_shown_how_analysts_here_write(make_deps):
     it silently: nothing failed, the corpus field simply stopped being read.
     """
     deps = make_deps(script=["## Summary\nRevenue rose."], trios=[LOYAL])
-    writer, capture = subagents_for(deps)
-    capture.record_definitions(["trio-loyal"])
+    writer = subagents_for(deps)
 
-    writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue", runtime=_runtime())
+    writer["report_writer"](
+        "Revenue rose 4% in Q1.",
+        title="Q1 Revenue",
+        runtime=_runtime(state={"trio_ids": ["trio-loyal"]}),
+    )
 
     assert "Loyalty is measured over a rolling year." in deps.llm.prompts[0]
 
@@ -191,7 +193,7 @@ def test_the_report_writer_is_shown_how_analysts_here_write(make_deps):
 def test_a_report_with_no_trio_behind_it_still_writes(make_deps):
     """An empty corpus is a valid state; the examples block just goes away."""
     deps = make_deps(script=["## Summary\nRevenue rose."])
-    writer, _ = subagents_for(deps)
+    writer = subagents_for(deps)
 
     assert writer["report_writer"]("Revenue rose 4%.", title="Q1 Revenue", runtime=_runtime())
 
@@ -212,9 +214,13 @@ def test_the_report_writer_runs_through_the_provider_chain(make_deps):
     """
     deps = make_deps(script=["## Summary\nRevenue rose."])
     object.__setattr__(deps, "llm_fallbacks", [deps.llm])
-    writer, _ = subagents_for(deps)
+    writer = subagents_for(deps)
 
-    receipt = writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue", runtime=_runtime())
+    receipt = _text(
+        writer["report_writer"](
+            "Revenue rose 4% in Q1.", title="Q1 Revenue", runtime=_runtime()
+        )
+    )
 
     # The receipt itself carries no report text (see test_report_tools.py) —
     # what this test needs is proof the tool-less compile path produced a
@@ -226,7 +232,7 @@ def test_the_report_writer_runs_through_the_provider_chain(make_deps):
 def test_the_report_writer_cannot_reach_the_data(make_deps):
     """No tools, so a number missing from the brief cannot appear in the report."""
     deps = make_deps(script=["## Summary\nRevenue rose."])
-    writer, _ = subagents_for(deps)
+    writer = subagents_for(deps)
 
     writer["report_writer"]("Revenue rose 4% in Q1.", title="Q1 Revenue", runtime=_runtime())
 
@@ -250,7 +256,6 @@ def test_the_analyst_inherits_the_parent_runs_config(make_deps, monkeypatch):
     kwarg its `invoke` was called with.
     """
     from retail_agent.agent import subagents as subagents_module
-    from retail_agent.agent.capture import TurnCapture
     from retail_agent.agent.deps import TurnContext
     from retail_agent.agent.supervisor import build_agent
 
@@ -278,8 +283,7 @@ def test_the_analyst_inherits_the_parent_runs_config(make_deps, monkeypatch):
             "Nine.",
         ]
     )
-    capture = TurnCapture(question="how many orders?")
-    agent = build_agent(deps, capture)
+    agent = build_agent(deps)
 
     parent_config = {"metadata": {"marker": "parent-turn"}}
     agent.invoke(
@@ -336,10 +340,9 @@ def test_three_queries_accumulate_three_attempts(make_deps):
         ],
         src=source,
     )
-    capture = TurnCapture(question="how many?")
     agent = create_agent(
         model=deps.llm,
-        tools=build_analyst_tools(deps, capture),
+        tools=build_analyst_tools(deps),
         state_schema=TurnState,
     )
 

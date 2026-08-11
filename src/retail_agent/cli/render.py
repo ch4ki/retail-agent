@@ -10,12 +10,16 @@ from rich.panel import Panel
 from rich.table import Table
 
 
-def render_answer(console: Console, answer: str, capture=None, prefs=None) -> None:
+def render_answer(console: Console, answer: str, state=None, prefs=None) -> None:
     """The answer, plus what it cost to produce it.
 
     The footnote is the only place a masked value or a repaired query is
     admitted to in the normal flow. `/trace` has the detail; this says whether
     there is any detail worth asking for.
+
+    `state` is the turn's checkpointed `TurnState` (or the dict `agent.invoke`
+    returned) — the footnote reads `state["redactions"]` and
+    `len(state["attempts"])` straight off it.
     """
     if not answer:
         return
@@ -25,14 +29,17 @@ def render_answer(console: Console, answer: str, capture=None, prefs=None) -> No
     from retail_agent.store.preferences import DEFAULT_PREFERENCES
 
     prefs = prefs or DEFAULT_PREFERENCES
-    if capture is None or not prefs.show_attempt_footnote:
+    if state is None or not prefs.show_attempt_footnote:
         return
 
+    redactions = state.get("redactions", 0)
+    attempts = state.get("attempts") or []
+
     footnotes = []
-    if capture.redactions:
-        footnotes.append(f"{capture.redactions} personal-data values masked")
-    if len(capture.attempts) > 1:
-        footnotes.append(f"{len(capture.attempts)} query attempts")
+    if redactions:
+        footnotes.append(f"{redactions} personal-data values masked")
+    if len(attempts) > 1:
+        footnotes.append(f"{len(attempts)} query attempts")
 
     if footnotes:
         console.print(f"[dim]{' · '.join(footnotes)}[/dim]")
@@ -41,21 +48,23 @@ def render_answer(console: Console, answer: str, capture=None, prefs=None) -> No
 def render_reports(console: Console, reports) -> None:
     """The reports this turn wrote, printed by the CLI rather than by the model.
 
-    These are the capture's bytes — the same ones that were scanned and stored
-    — so what the executive reads and what the library holds cannot differ.
-    Leaving it to the model meant a requested report often arrived as a filing
-    receipt, and a reproduced one could quietly lose a figure.
+    Each entry is a plain dict — `report_id`, `title`, `show`, and `body` the
+    caller read back from the report store, since `TurnState` never carries a
+    report's body (`reports.py`'s own comment: "the report store's copy is
+    the one that gets read"). Reading the store's copy rather than trusting
+    the model to retype it is what keeps what the executive reads and what the
+    library holds from differing.
 
     The `show` filter is here rather than at the call site so that it is a
     behaviour with a test, instead of a condition a test would have to restate.
     """
     for report in reports:
-        if not report.show:
+        if not report["show"]:
             continue
         console.print()
-        console.print(Markdown(report.body))
+        console.print(Markdown(report["body"]))
         console.print(
-            f"[dim]Saved as '{report.title}' (id {report.report_id}) · /reports[/dim]"
+            f"[dim]Saved as '{report['title']}' (id {report['report_id']}) · /reports[/dim]"
         )
 
 
@@ -125,7 +134,7 @@ def render_trace(console: Console, trace) -> None:
     what the guard objected to. This does.
 
     One renderer for the live turn and for one read back from storage, because
-    both are now a `TraceRecord` — the live one is `capture.to_trace(...)`.
+    both are now a `TraceRecord` — the live one built by `trace_from_state(...)`.
     There used to be two near-identical renderers, which is how they drifted:
     only one of them showed bytes billed.
     """

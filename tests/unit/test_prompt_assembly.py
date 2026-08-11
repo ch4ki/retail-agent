@@ -6,7 +6,6 @@ this is a test of that function. The decorator is then one line with nothing in
 it worth testing.
 """
 
-from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.middleware import supervisor_system_prompt
 from retail_agent.agent.subagents import report_writer_system_prompt
@@ -27,10 +26,6 @@ def deps_with(preferences):
         traces=InMemoryTraceStore(),
         preferences=preferences,
     )
-
-
-def capture_for():
-    return TurnCapture(question="how are sales?")
 
 
 def test_the_supervisor_prompt_carries_the_users_notes():
@@ -80,9 +75,7 @@ def test_the_report_writer_prompt_carries_the_users_notes():
     preferences = InMemoryPreferenceStore()
     add_note(preferences, user_id="dana", note="show prices in euros")
 
-    prompt = report_writer_system_prompt(
-        deps_with(preferences), capture_for(), user_id="dana"
-    )
+    prompt = report_writer_system_prompt(deps_with(preferences), [], user_id="dana")
 
     assert "show prices in euros" in prompt
 
@@ -92,7 +85,7 @@ def test_a_user_with_no_notes_gets_a_report_writer_prompt_with_no_dangling_tail(
     (and here, an empty `examples`, since no trio was consulted) must not leave
     the blank lines they'd otherwise weld onto the end of the prompt."""
     prompt = report_writer_system_prompt(
-        deps_with(InMemoryPreferenceStore()), capture_for(), user_id="dana"
+        deps_with(InMemoryPreferenceStore()), [], user_id="dana"
     )
 
     assert not prompt.endswith("\n"), "no dangling separator where the block was"
@@ -100,12 +93,13 @@ def test_a_user_with_no_notes_gets_a_report_writer_prompt_with_no_dangling_tail(
 
 
 def test_the_prompt_takes_the_user_it_is_written_for():
-    """`supervisor_system_prompt` used to read `capture.user_id`. It is not a
-    tool, so `ToolRuntime` does not reach it — but `ModelRequest` carries a
-    `runtime`, so the dynamic-prompt closure can pass the context's user in.
+    """`supervisor_system_prompt` is not a tool, so `ToolRuntime` does not
+    reach it — but `ModelRequest` carries a `runtime`, so the dynamic-prompt
+    closure can pass the context's user in.
 
-    Taking it as a parameter is also what lets this be tested without building
-    a capture, which is why the function was split out of the closure at all.
+    Taking it as a parameter is also what lets this be tested without
+    building anything stateful, which is why the function was split out of
+    the closure at all.
     """
     import inspect
 

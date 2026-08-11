@@ -18,17 +18,36 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 
 from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, tool
 from langgraph.types import Command, interrupt
 
-from retail_agent.agent.capture import PendingDelete, TurnCapture
 from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.state import step_event
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PendingDelete:
+    """A destructive operation resolved against the store, awaiting approval.
+
+    Resolved by the tool itself — once before the pause, to build the manifest
+    `interrupt()` shows the user, and again on replay after resume, so what
+    gets deleted is recomputed against the store rather than trusted from
+    before the pause. What crosses the interrupt boundary is the resume value,
+    not this object; resolving twice would otherwise leave a gap, however
+    small, between the manifest and the act. Purely local to one call of
+    `delete_reports` — it never needs to survive outside this module.
+    """
+
+    action_id: str
+    report_ids: tuple[str, ...]
+    titles: tuple[str, ...]
+    token: str  # what the user must type back, verbatim
 
 
 def confirmation_token(count: int) -> str:
@@ -82,24 +101,23 @@ def render_manifest(pending: PendingDelete) -> str:
     )
 
 
-def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
+def build_report_tools(deps: AgentDeps) -> list[BaseTool]:
     """The library tools, bound to one turn's owner and session."""
 
     @tool
     def list_reports(runtime: ToolRuntime[TurnContext, object]) -> Command:
         """List the reports this executive has saved."""
         started = time.perf_counter()
-        with capture.step("list_reports") as step:
-            saved = deps.reports.list_reports(owner_id=runtime.context.user_id)
-            step.detail = f"{len(saved)} report(s)"
-            if not saved:
-                answer = "You have no saved reports yet."
-            else:
-                answer = "Saved reports:\n" + "\n".join(
-                    f"- {r.title} (id {r.id}, saved {r.created_at:%Y-%m-%d})"
-                    for r in saved
-                )
-            return _reply(runtime, answer, "list_reports", started, step.detail)
+        saved = deps.reports.list_reports(owner_id=runtime.context.user_id)
+        detail = f"{len(saved)} report(s)"
+        if not saved:
+            answer = "You have no saved reports yet."
+        else:
+            answer = "Saved reports:\n" + "\n".join(
+                f"- {r.title} (id {r.id}, saved {r.created_at:%Y-%m-%d})"
+                for r in saved
+            )
+        return _reply(runtime, answer, "list_reports", started, detail)
 
     @tool
     def delete_reports(
@@ -114,57 +132,52 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
         they mean the reports made in this conversation.
         """
         started = time.perf_counter()
-        with capture.step("delete_reports") as step:
-            # Resolved here and nowhere else. On resume this whole body replays,
-            # so this runs a second time — which is why its result decides only
-            # whether to ask and what to show, never what to remove.
-            pending = resolve_delete(
-                deps,
-                user_id=runtime.context.user_id,
-                session_id=runtime.context.session_id,
-                term=term,
-                session_scoped=session_scoped,
-            )
-            if pending is None:
-                described = f" mentioning '{term}'" if term else ""
-                step.detail = "nothing matched"
-                answer = f"I found no reports{described} to delete."
-                return _reply(
-                    runtime, answer, "delete_reports", started, step.detail
-                )
+        # Resolved here and nowhere else. On resume this whole body replays, so
+        # this runs a second time — which is why its result decides only
+        # whether to ask and what to show, never what to remove.
+        pending = resolve_delete(
+            deps,
+            user_id=runtime.context.user_id,
+            session_id=runtime.context.session_id,
+            term=term,
+            session_scoped=session_scoped,
+        )
+        if pending is None:
+            described = f" mentioning '{term}'" if term else ""
+            detail = "nothing matched"
+            answer = f"I found no reports{described} to delete."
+            return _reply(runtime, answer, "delete_reports", started, detail)
 
-            decision = interrupt(
-                {
-                    "kind": "delete_reports",
-                    "manifest": render_manifest(pending),
-                    "report_ids": list(pending.report_ids),
-                    "token": pending.token,
-                }
-            )
-            if not decision.get("approved"):
-                step.detail = "rejected"
-                answer = "Nothing was deleted."
-                return _reply(
-                    runtime, answer, "delete_reports", started, step.detail
-                )
+        decision = interrupt(
+            {
+                "kind": "delete_reports",
+                "manifest": render_manifest(pending),
+                "report_ids": list(pending.report_ids),
+                "token": pending.token,
+            }
+        )
+        if not decision.get("approved"):
+            detail = "rejected"
+            answer = "Nothing was deleted."
+            return _reply(runtime, answer, "delete_reports", started, detail)
 
-            # Ids and token from the resume value, not from `pending`: what the
-            # executive approved is what goes, whatever the replay re-resolved.
-            deleted = deps.reports.soft_delete(
-                owner_id=runtime.context.user_id,
-                report_ids=tuple(decision["report_ids"]),
-                action_id=pending.action_id,
-                token=decision["token"],
+        # Ids and token from the resume value, not from `pending`: what the
+        # executive approved is what goes, whatever the replay re-resolved.
+        deleted = deps.reports.soft_delete(
+            owner_id=runtime.context.user_id,
+            report_ids=tuple(decision["report_ids"]),
+            action_id=pending.action_id,
+            token=decision["token"],
+        )
+        detail = f"deleted {deleted}"
+        if deleted == 0:
+            answer = "Nothing to delete — those reports are already gone."
+        else:
+            answer = (
+                f"Deleted {deleted} report(s). Tell the executive they can run "
+                f"/undo to restore them."
             )
-            step.detail = f"deleted {deleted}"
-            if deleted == 0:
-                answer = "Nothing to delete — those reports are already gone."
-            else:
-                answer = (
-                    f"Deleted {deleted} report(s). Tell the executive they can run "
-                    f"/undo to restore them."
-                )
-            return _reply(runtime, answer, "delete_reports", started, step.detail)
+        return _reply(runtime, answer, "delete_reports", started, detail)
 
     return [list_reports, delete_reports]
 

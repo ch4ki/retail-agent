@@ -7,8 +7,10 @@ is built per process and what is built per run is the whole design:
 
 - `_process_deps` — the model clients, the BigQuery client, the stores. Expensive,
   safe to share, and identical for every run. Built once.
-- `make_graph` — the capture. Per run, because it records what one turn did, and
-  a shared one silently attributed thread B's reports to thread A.
+- `make_graph` — the compiled agent. Built per run, because identity and the
+  turn's own record are per-run properties now (`TurnContext`, checkpointed
+  `TurnState`), not something a shared object could attribute to the wrong
+  thread.
 
 No checkpointer and no store are attached. The server injects both after this
 returns (`graph.py:402`), and supplying our own is a hard `ValueError` under
@@ -24,7 +26,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.supervisor import build_agent
 from retail_agent.bootstrap import build_deps
@@ -93,10 +94,7 @@ def build_studio_graph(*, llm=None, source=None):
     loudly with `MissingTurnIdentity` (`middleware.py`) rather than silently
     acting as an empty-string user.
     """
-    return build_agent(
-        _deps(llm=llm, source=source),
-        TurnCapture(),
-    )
+    return build_agent(_deps(llm=llm, source=source))
 
 
 def make_graph(config):

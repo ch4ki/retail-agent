@@ -23,7 +23,6 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, tool
 from langgraph.types import Command
 
-from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.state import attempt_record, frame_to_state, step_event
 from retail_agent.knowledge.retrieval import retrieve
@@ -65,13 +64,13 @@ class GuardRejection(Exception):
     """
 
 
-def build_analyst_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
-    """Tools bound to one turn's capture.
+def build_analyst_tools(deps: AgentDeps) -> list[BaseTool]:
+    """Tools bound to one turn's `deps`.
 
-    Closures rather than methods so each one can hold the turn's `deps` and
-    `capture`, and `@tool` rather than a bare function so the name, the argument
-    schema and the description the model reads are derived from the definition
-    itself — there is no second place to keep them in step.
+    Closures rather than methods so each one can hold the turn's `deps`, and
+    `@tool` rather than a bare function so the name, the argument schema and
+    the description the model reads are derived from the definition itself —
+    there is no second place to keep them in step.
     """
 
     @tool
@@ -193,7 +192,7 @@ def recall(deps: AgentDeps, question: str) -> list:
 
 
 def settled_meanings(
-    deps: AgentDeps, capture: TurnCapture, *, user_id: str
+    deps: AgentDeps, question: str, *, user_id: str, cache: dict
 ) -> dict[str, str]:
     """Every definition already in play this turn, as term → meaning.
 
@@ -203,9 +202,9 @@ def settled_meanings(
     trio merged later must not silently break that promise. The corpus fills
     gaps; it never overrides.
 
-    The trios consulted are recorded on the capture: their meanings reach the
-    model's context, so an answer that used them cannot show a trace that
-    claims it used none.
+    The trios consulted are read back out of `cache["trios"]` by the caller —
+    their meanings reach the model's context, so an answer that used them
+    cannot show a trace that claims it used none.
 
     One function because `ask_for_definitions` calls it twice in the same
     turn — once before the pause, to decide whether there is anything left to
@@ -216,17 +215,22 @@ def settled_meanings(
     trio defining it sat in the same turn's retrieval, because each side had
     its own lookup.
 
-    Retrieval runs once per turn, cached on the capture, because it is the
+    Retrieval runs once per turn, cached in `cache`, because it is the
     expensive half — with dense retrieval configured it is an embedding round
     trip — and its inputs are fixed for the turn. Two independent runs would
     also mean the two sides of the interrupt could, in principle, see two
     different corpora. The personal store is read fresh every call: the pause
     exists so the executive can write to it.
+
+    `cache` is a plain dict the caller owns — `build_memory_tools` creates one
+    per call, which is once per turn since every real caller rebuilds the
+    agent per turn, so it lives exactly one turn and needs no identity of its
+    own: it is never read after the turn ends and never shared between turns,
+    and nothing in it is checkpointed, traced or scored.
     """
-    if capture.recalled_trios is None:
-        capture.recalled_trios = recall(deps, capture.question)
-    found = capture.recalled_trios
-    capture.record_definitions([trio.id for trio in found])
+    if cache.get("trios") is None:
+        cache["trios"] = recall(deps, question)
+    found = cache["trios"]
     merged = dict(agreed_definitions(found))
     merged.update(all_definitions(deps.definitions, user_id))
     return merged

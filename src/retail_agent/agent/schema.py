@@ -17,7 +17,6 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, tool
 from langgraph.types import Command
 
-from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.prompts import SCHEMA_PROMPT
 from retail_agent.agent.state import step_event
@@ -27,7 +26,7 @@ from retail_agent.knowledge.conventions import notes_for
 log = logging.getLogger(__name__)
 
 
-def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
+def build_schema_tool(deps: AgentDeps) -> list[BaseTool]:
     """"What data do you have?" answered without spending anything.
 
     A tool rather than a subagent: there is no loop to run and nothing to
@@ -43,21 +42,20 @@ def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
         be asked rather than about the numbers themselves.
         """
         started = time.perf_counter()
-        with capture.step("describe_schema") as step:
-            schemas = deps.source.describe_all()
-            step.detail = f"{len(schemas)} table(s)"
-            answer = SCHEMA_PROMPT.format(
-                schema="\n\n".join(schema.to_ddl() for schema in schemas)
-            )
-            return Command(
-                update={
-                    "messages": [
-                        ToolMessage(content=answer, tool_call_id=runtime.tool_call_id)
-                    ],
-                    "events": [step_event("describe_schema", started, step.detail)],
-                    "calls": 1,
-                }
-            )
+        schemas = deps.source.describe_all()
+        detail = f"{len(schemas)} table(s)"
+        answer = SCHEMA_PROMPT.format(
+            schema="\n\n".join(schema.to_ddl() for schema in schemas)
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(content=answer, tool_call_id=runtime.tool_call_id)
+                ],
+                "events": [step_event("describe_schema", started, detail)],
+                "calls": 1,
+            }
+        )
 
     return [describe_schema]
 

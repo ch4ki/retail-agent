@@ -8,7 +8,6 @@ import inspect
 import pandas as pd
 import pytest
 
-from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.tools import EMPTY_HINT, GuardRejection, build_analyst_tools
 from retail_agent.datasources.base import QuerySyntaxError
@@ -41,12 +40,10 @@ def _runtime():
 def tools_for(deps):
     import functools
 
-    capture = TurnCapture(question="q")
-    by_name = {
+    return {
         t.name: functools.partial(t.func, runtime=_runtime())
-        for t in build_analyst_tools(deps, capture)
+        for t in build_analyst_tools(deps)
     }
-    return by_name, capture
 
 
 def _content(command):
@@ -65,16 +62,12 @@ def test_a_guard_violation_never_reaches_the_warehouse(make_deps, source):
     Asserting on `source.executed` rather than on the exception is deliberate —
     a guard that raised *after* executing would still raise.
 
-    `run_sql` no longer touches `TurnCapture` at all — including on this
-    rejection path, which used to call `capture.record_attempt` before
-    raising. A raised tool never returns a `Command`, so there is nowhere left
-    to record a rejected attempt into `TurnState` either; that attempt is
-    simply not recorded any more. `capture.attempts[-1]["violations"]` tested
-    exactly that recording and can no longer pass, so it is dropped rather
-    than rewritten to test something else.
+    `run_sql` never wrote a rejected attempt anywhere reachable — a raised
+    tool never returns a `Command`, so there is nowhere to record a rejected
+    attempt into `TurnState`; that attempt is simply not recorded.
     """
     deps = make_deps(src=source)
-    tools, _capture = tools_for(deps)
+    tools = tools_for(deps)
 
     with pytest.raises(GuardRejection):
         tools["run_sql"]("DROP TABLE users")
@@ -92,7 +85,7 @@ def test_restricted_columns_are_dropped_before_the_model_sees_them(make_deps):
         }
     )
     deps = make_deps(src=source)
-    tools, _capture = tools_for(deps)
+    tools = tools_for(deps)
 
     command = tools["run_sql"]("SELECT id, spend FROM users")
 
@@ -112,12 +105,11 @@ def test_only_run_sql_reads_the_warehouse(make_deps):
     from retail_agent.agent.reports import build_report_tools
     from retail_agent.agent.schema import build_schema_tool
 
-    capture = TurnCapture()
     others = [
-        *build_report_tools(deps, capture),
-        *build_memory_tools(deps, capture),
-        *build_schema_tool(deps, capture),
-        build_analyst_tools(deps, capture)[1],  # lookup_definitions
+        *build_report_tools(deps),
+        *build_memory_tools(deps),
+        *build_schema_tool(deps),
+        build_analyst_tools(deps)[1],  # lookup_definitions
     ]
 
     for t in others:
@@ -128,19 +120,14 @@ def test_only_run_sql_reads_the_warehouse(make_deps):
 def test_a_failed_query_is_recorded_and_re_raised(make_deps):
     """`ToolErrorMiddleware` needs the exception.
 
-    Was also "`/trace` needs the attempt" — `capture.record_attempt` used to
-    run before re-raising, so a failed query still showed up in the turn's
-    trace. `run_sql` no longer touches `TurnCapture`, and a raised tool never
-    returns a `Command`, so that recording has nowhere to go on this path any
-    more; `capture.attempts[-1]["error"]` and `capture.frame is None` tested
-    exactly that recording and are dropped rather than rewritten to assert
-    something else. What remains — the tool still raises, so
-    `ToolErrorMiddleware` still gets the exception it needs — is the part
-    this task's scope actually owns.
+    A failed query is not recorded anywhere: a raised tool never returns a
+    `Command`, so that recording has nowhere to go on this path. What remains
+    — the tool still raises, so `ToolErrorMiddleware` still gets the
+    exception it needs — is the part this task's scope actually owns.
     """
     source = FakeSource(frames={"default": pd.DataFrame({"n": [1]})}, failing={"bad"})
     deps = make_deps(src=source)
-    tools, _capture = tools_for(deps)
+    tools = tools_for(deps)
 
     with pytest.raises(QuerySyntaxError):
         tools["run_sql"]("SELECT bad FROM users")
@@ -149,18 +136,17 @@ def test_a_failed_query_is_recorded_and_re_raised(make_deps):
 def test_the_last_successful_query_is_the_one_kept(make_deps):
     """A turn that fails, repairs and succeeds is scored on the query that ran.
 
-    The failed attempt no longer writes anything (see
+    The failed attempt writes nothing (see
     `test_a_failed_query_is_recorded_and_re_raised`), so there is only ever
     one `Command` to inspect here: the second call's. Checking that its
     `executed_sql` and `frame` reflect the query that actually ran — not the
-    one that failed — is the same property the original assertions checked,
-    just read from the tool's own return instead of from `TurnCapture`.
+    one that failed — is read straight off the tool's own return.
     """
     source = FakeSource(
         frames={"default": pd.DataFrame({"n": [7]})}, failing={"broken"}
     )
     deps = make_deps(src=source)
-    tools, _capture = tools_for(deps)
+    tools = tools_for(deps)
 
     with pytest.raises(QuerySyntaxError):
         tools["run_sql"]("SELECT broken FROM orders")
@@ -174,7 +160,7 @@ def test_an_empty_result_carries_the_hint_the_graph_spent_a_call_on(make_deps):
     """Zero rows raises nothing, so no retry middleware reacts to it."""
     source = FakeSource(frames={"default": pd.DataFrame()}, empty_for={"Levis"})
     deps = make_deps(src=source)
-    tools, _ = tools_for(deps)
+    tools = tools_for(deps)
 
     command = tools["run_sql"]("SELECT id FROM products WHERE brand = 'Levis'")
 
@@ -190,7 +176,7 @@ def test_an_all_null_aggregate_counts_as_empty(make_deps):
         frames={"default": pd.DataFrame()}, null_aggregate_for={"Levis"}
     )
     deps = make_deps(src=source)
-    tools, _ = tools_for(deps)
+    tools = tools_for(deps)
 
     command = tools["run_sql"](
         "SELECT SUM(sale_price) AS total_revenue FROM order_items WHERE brand = 'Levis'"
@@ -206,7 +192,7 @@ def test_a_capped_result_says_so(make_deps):
         frames={"default": pd.DataFrame({"id": [1, 2]})}, total_rows=5_823
     )
     deps = make_deps(src=source)
-    tools, _ = tools_for(deps)
+    tools = tools_for(deps)
 
     command = tools["run_sql"]("SELECT id FROM users")
     rendered = _content(command)
@@ -218,7 +204,7 @@ def test_a_capped_result_says_so(make_deps):
 def test_lookup_definitions_says_so_when_nothing_covers_the_term(make_deps):
     """An empty string reads to a model as a definition of nothing."""
     deps = make_deps()
-    tools, _ = tools_for(deps)
+    tools = tools_for(deps)
 
     command = tools["lookup_definitions"]("who is loyal?")
 

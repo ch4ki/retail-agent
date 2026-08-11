@@ -11,7 +11,6 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import MemorySaver
 
-from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.prompts import SAFETY_RULES
 from retail_agent.agent.subagents import final_text
@@ -22,22 +21,20 @@ from retail_agent.store.preferences import InMemoryPreferenceStore, add_note
 from .conftest import FakeSource
 
 
-# The fixed id every `run()` call mints its `TurnContext` with — a test's own
-# stand-in for the caller doing the minting, now that `TurnCapture` no longer
-# does. Constant rather than random: each test's `traces` store is fresh, so
-# there is nothing for two turns sharing it to collide on.
+# The fixed id every `run()` call mints its `TurnContext` with. Constant
+# rather than random: each test's `traces` store is fresh, so there is
+# nothing for two turns sharing it to collide on.
 TURN_ID = "t1"
 
 
 def run(deps, question, user="exec"):
-    capture = TurnCapture(question=question)
-    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+    agent = build_agent(deps, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [{"role": "user", "content": question}]},
         {"configurable": {"thread_id": "s1"}},
         context=TurnContext(user_id=user, session_id="s1", turn_id=TURN_ID),
     )
-    return final_text(result), capture
+    return final_text(result), result
 
 
 def test_a_turn_with_no_context_fails_loudly(make_deps):
@@ -50,8 +47,7 @@ def test_a_turn_with_no_context_fails_loudly(make_deps):
     from retail_agent.agent.middleware import MissingTurnIdentity
 
     deps = make_deps(script=["Hello."])
-    capture = TurnCapture(question="hello")
-    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+    agent = build_agent(deps, checkpointer=MemorySaver())
 
     with pytest.raises(MissingTurnIdentity):
         agent.invoke(
@@ -67,8 +63,7 @@ def test_a_turn_with_an_empty_user_id_fails_the_same_way(make_deps):
     from retail_agent.agent.middleware import MissingTurnIdentity
 
     deps = make_deps(script=["Hello."])
-    capture = TurnCapture(question="hello")
-    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+    agent = build_agent(deps, checkpointer=MemorySaver())
 
     with pytest.raises(MissingTurnIdentity):
         agent.invoke(
@@ -95,8 +90,7 @@ def test_a_dict_context_is_coerced_into_a_real_turncontext(make_deps):
     not just agent construction — is the proof the coercion ran.
     """
     deps = make_deps(script=[[("list_reports", {})], "You have no saved reports yet."])
-    capture = TurnCapture(question="what have I saved")
-    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+    agent = build_agent(deps, checkpointer=MemorySaver())
 
     result = agent.invoke(
         {"messages": [{"role": "user", "content": "what have I saved"}]},
@@ -105,7 +99,7 @@ def test_a_dict_context_is_coerced_into_a_real_turncontext(make_deps):
     )
 
     assert final_text(result) == "You have no saved reports yet."
-    assert capture.events and capture.events[0][0] == "list_reports"
+    assert result["events"] and result["events"][0]["name"] == "list_reports"
 
 
 def test_a_question_answerable_from_the_conversation_needs_no_tool(make_deps):
@@ -159,14 +153,14 @@ def test_every_turn_leaves_a_trace(make_deps, traces):
         "12.",
     ]
 
-    answer, capture = run(deps, "what was revenue?")
+    answer, _ = run(deps, "what was revenue?")
 
     stored = traces.get(owner_id="exec", turn_id=TURN_ID)
     assert stored is not None
     assert stored.intent == "analyze"
     assert stored.question == "what was revenue?"
-    # Innermost first: `capture.step` files on exit, so the query the analyst
-    # ran is recorded before the analyst call that contained it.
+    # Innermost first: the analyst's own event is filed after the query it
+    # contained.
     assert [name for name, _, _ in stored.events] == ["run_sql", "analyst"]
     assert stored.attempts and stored.attempts[0]["row_count"] == 1
 
@@ -186,13 +180,13 @@ def test_a_trace_carries_no_row_values(make_deps, traces):
         src=source,
     )
 
-    _, capture = run(deps, "list customers")
+    run(deps, "list customers")
 
     stored = traces.get(owner_id="exec", turn_id=TURN_ID)
     assert "a@b.com" not in str(stored)
 
 
-def test_the_final_answer_is_not_swept_for_contact_details(make_deps):
+def test_the_final_answer_is_not_swept_for_contact_details(make_deps, traces):
     """The output sweep is gone: PII is stopped where it enters, not where it leaves.
 
     Asserted rather than deleted, because this test used to claim the opposite
@@ -203,10 +197,10 @@ def test_the_final_answer_is_not_swept_for_contact_details(make_deps):
     """
     deps = make_deps(script=["Contact them at dana@example.com."])
 
-    answer, capture = run(deps, "who should I call?")
+    answer, _ = run(deps, "who should I call?")
 
     assert "dana@example.com" in answer
-    assert capture.status == "ok"
+    assert traces.recent(owner_id="exec")[0].status == "ok"
 
 
 def test_describe_schema_costs_no_query_and_says_what_it_found(make_deps, source):
@@ -217,12 +211,10 @@ def test_describe_schema_costs_no_query_and_says_what_it_found(make_deps, source
     """
     from langchain.tools import ToolRuntime
 
-    from retail_agent.agent.capture import TurnCapture
     from retail_agent.agent.schema import build_schema_tool
 
     deps = make_deps(src=source)
-    capture = TurnCapture()
-    describe = build_schema_tool(deps, capture)[0].func
+    describe = build_schema_tool(deps)[0].func
     runtime = ToolRuntime(
         state=None,
         context=TurnContext(),
@@ -237,7 +229,7 @@ def test_describe_schema_costs_no_query_and_says_what_it_found(make_deps, source
 
     assert source.executed == [], "answering what data exists must cost nothing"
     assert "order_items" in rendered
-    assert capture.events[0][2] == "4 table(s)"
+    assert result.update["events"][0]["detail"] == "4 table(s)"
 
 
 class DeadProvider(BaseChatModel):
@@ -356,8 +348,7 @@ async def test_an_async_turn_falls_over_too(make_deps):
     deps = make_deps(script=["Hello."])
     dead = with_dead_primary(deps, attempts=1)
 
-    capture = TurnCapture(question="hello")
-    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+    agent = build_agent(deps, checkpointer=MemorySaver())
     result = await agent.ainvoke(
         {"messages": [{"role": "user", "content": "hello"}]},
         {"configurable": {"thread_id": "s1"}},
@@ -366,3 +357,47 @@ async def test_an_async_turn_falls_over_too(make_deps):
 
     assert final_text(result) == "Hello."
     assert len(dead.calls) == 1
+
+
+def test_a_failed_turn_keeps_what_it_did(make_deps):
+    """The record of a turn that died is the one the trace exists for. The
+    capture used to hold it in memory; the checkpoint holds it now, so it also
+    survives the process that died with it."""
+    from .conftest import FakeSource, ScriptExhausted
+
+    source = FakeSource(frames={"default": pd.DataFrame({"n": [1]})})
+    # The analyst subgraph is its own isolated `agent.invoke()` — Task 3's own
+    # self-review notes this: its `Command` updates land in the SUBGRAPH's
+    # state, and only a *normal return* from the `analyst` tool lifts them
+    # into the parent turn (see `test_the_analysts_record_reaches_the_turn`).
+    # So the script here lets `run_sql` run and the analyst finish normally —
+    # the query commits, and its record is lifted into this turn's checkpoint
+    # — and only then does the supervisor's own follow-up model call find the
+    # script empty. `ScriptedChatModel` raises `ScriptExhausted` there: the
+    # file's own way of killing a turn mid-flight, firing only after the
+    # query has already committed. `ScriptExhausted` derives from
+    # `BaseException`, not `Exception` (see `conftest.py`), so it is matched
+    # directly rather than through the broader class.
+    deps = make_deps(
+        script=[
+            [("analyst", {"question": "how many?"})],
+            [("run_sql", {"sql": "SELECT 1"})],
+            "Seven.",
+        ],
+        src=source,
+    )
+    agent = build_agent(deps, checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "s1"}}
+
+    with pytest.raises(ScriptExhausted):
+        agent.invoke(
+            {"messages": [{"role": "user", "content": "how many?"}]},
+            config,
+            context=TurnContext(user_id="exec", session_id="s1", turn_id="t1"),
+        )
+
+    recovered = agent.get_state(config).values
+
+    assert [a["sql"] for a in recovered["attempts"]] == ["SELECT 1"], (
+        "the completed query is still in the checkpoint after the turn died"
+    )
