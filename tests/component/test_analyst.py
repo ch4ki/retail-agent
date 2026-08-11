@@ -28,9 +28,24 @@ LOYAL = Trio(
 )
 
 
+def _text(result):
+    """A tool's answer, unwrapped from the `Command` it now returns — the one
+    `ToolMessage` on `update["messages"]` carries the text a model would see."""
+    from langgraph.types import Command
+
+    if isinstance(result, Command):
+        return result.update["messages"][0].content
+    return result
+
+
 def subagents_for(deps, question="who are our loyal customers?"):
     capture = TurnCapture(question=question)
-    return {t.name: t.func for t in build_subagents(deps, capture)}, capture
+    tools = {t.name: t.func for t in build_subagents(deps, capture)}
+    bound = {
+        name: (lambda *a, _f=func, **kw: _text(_f(*a, **kw)))
+        for name, func in tools.items()
+    }
+    return bound, capture
 
 
 def _runtime():

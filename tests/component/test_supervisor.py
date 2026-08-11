@@ -232,7 +232,8 @@ def test_describe_schema_costs_no_query_and_says_what_it_found(make_deps, source
         store=None,
     )
 
-    rendered = describe(runtime=runtime)
+    result = describe(runtime=runtime)
+    rendered = result.update["messages"][0].content
 
     assert source.executed == [], "answering what data exists must cost nothing"
     assert "order_items" in rendered

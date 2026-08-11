@@ -16,14 +16,17 @@ text for a model to alter on its way to the library.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 
 from langchain.tools import ToolRuntime
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, tool
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
 
 from retail_agent.agent.capture import PendingDelete, TurnCapture
 from retail_agent.agent.deps import AgentDeps, TurnContext
+from retail_agent.agent.state import step_event
 
 log = logging.getLogger(__name__)
 
@@ -83,30 +86,34 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """The library tools, bound to one turn's owner and session."""
 
     @tool
-    def list_reports(runtime: ToolRuntime[TurnContext, object]) -> str:
+    def list_reports(runtime: ToolRuntime[TurnContext, object]) -> Command:
         """List the reports this executive has saved."""
+        started = time.perf_counter()
         with capture.step("list_reports") as step:
             saved = deps.reports.list_reports(owner_id=runtime.context.user_id)
             step.detail = f"{len(saved)} report(s)"
             if not saved:
-                return "You have no saved reports yet."
-            return "Saved reports:\n" + "\n".join(
-                f"- {r.title} (id {r.id}, saved {r.created_at:%Y-%m-%d})"
-                for r in saved
-            )
+                answer = "You have no saved reports yet."
+            else:
+                answer = "Saved reports:\n" + "\n".join(
+                    f"- {r.title} (id {r.id}, saved {r.created_at:%Y-%m-%d})"
+                    for r in saved
+                )
+            return _reply(runtime, answer, "list_reports", started, step.detail)
 
     @tool
     def delete_reports(
         runtime: ToolRuntime[TurnContext, object],
         term: str = "",
         session_scoped: bool = False,
-    ) -> str:
+    ) -> Command:
         """Delete saved reports. Destructive, and confirmed with the user first.
 
         `term` selects reports whose text mentions it — leave it empty only if
         the executive means all of their reports. Set `session_scoped` only when
         they mean the reports made in this conversation.
         """
+        started = time.perf_counter()
         with capture.step("delete_reports") as step:
             # Resolved here and nowhere else. On resume this whole body replays,
             # so this runs a second time — which is why its result decides only
@@ -121,7 +128,10 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             if pending is None:
                 described = f" mentioning '{term}'" if term else ""
                 step.detail = "nothing matched"
-                return f"I found no reports{described} to delete."
+                answer = f"I found no reports{described} to delete."
+                return _reply(
+                    runtime, answer, "delete_reports", started, step.detail
+                )
 
             decision = interrupt(
                 {
@@ -133,7 +143,10 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             )
             if not decision.get("approved"):
                 step.detail = "rejected"
-                return "Nothing was deleted."
+                answer = "Nothing was deleted."
+                return _reply(
+                    runtime, answer, "delete_reports", started, step.detail
+                )
 
             # Ids and token from the resume value, not from `pending`: what the
             # executive approved is what goes, whatever the replay re-resolved.
@@ -145,10 +158,26 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             )
             step.detail = f"deleted {deleted}"
             if deleted == 0:
-                return "Nothing to delete — those reports are already gone."
-            return (
-                f"Deleted {deleted} report(s). Tell the executive they can run "
-                f"/undo to restore them."
-            )
+                answer = "Nothing to delete — those reports are already gone."
+            else:
+                answer = (
+                    f"Deleted {deleted} report(s). Tell the executive they can run "
+                    f"/undo to restore them."
+                )
+            return _reply(runtime, answer, "delete_reports", started, step.detail)
 
     return [list_reports, delete_reports]
+
+
+def _reply(
+    runtime: ToolRuntime, text: str, name: str, started: float, detail: str
+) -> Command:
+    """One `ToolMessage` plus this call's own `events` entry and `calls: 1` —
+    all either tool here contributes to `TurnState`."""
+    return Command(
+        update={
+            "messages": [ToolMessage(content=text, tool_call_id=runtime.tool_call_id)],
+            "events": [step_event(name, started, detail)],
+            "calls": 1,
+        }
+    )

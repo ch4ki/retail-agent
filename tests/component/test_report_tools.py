@@ -52,11 +52,19 @@ def context_for(user_id: str = "exec", session_id: str = "s1", turn_id: str = "t
     return TurnContext(user_id=user_id, session_id=session_id, turn_id=turn_id)
 
 
+def _text(result):
+    """A tool's answer, unwrapped from the `Command` it now returns — the one
+    `ToolMessage` on `update["messages"]` carries the text a model would see."""
+    if isinstance(result, Command):
+        return result.update["messages"][0].content
+    return result
+
+
 def writer(deps, capture):
     func = {t.name: t.func for t in build_subagents(deps, capture)}["report_writer"]
 
     def call(**kwargs):
-        return func(runtime=_runtime_with(context_for()), **kwargs)
+        return _text(func(runtime=_runtime_with(context_for()), **kwargs))
 
     return call
 
@@ -253,9 +261,9 @@ def test_a_delete_cannot_reach_another_owner(make_deps, saved):
     capture = TurnCapture(question="q")
     tools = {t.name: t.func for t in build_report_tools(deps, capture)}
 
-    answer = tools["delete_reports"](
+    answer = _text(tools["delete_reports"](
         runtime=_runtime_with(context_for(user_id="someone-else")), term="Acme"
-    )
+    ))
 
     assert "no reports" in answer.lower()
     assert len(saved.list_reports(owner_id="exec")) == 2
@@ -344,7 +352,7 @@ def asker(deps, capture):
     func = {t.name: t.func for t in build_subagents(deps, capture)}["ask_about_report"]
 
     def call(**kwargs):
-        return func(runtime=_runtime_with(context_for()), **kwargs)
+        return _text(func(runtime=_runtime_with(context_for()), **kwargs))
 
     return call
 
@@ -543,3 +551,61 @@ def test_one_compiled_agent_serves_two_users(make_deps, reports):
 
     assert [r.title for r in reports.list_reports(owner_id="ada")] == ["Ada's report"]
     assert [r.title for r in reports.list_reports(owner_id="bo")] == ["Bo's report"]
+
+
+def test_the_analysts_record_reaches_the_turn(make_deps):
+    """`run_sql` writes the analyst SUBGRAPH's state. A nested invoke returns
+    its state rather than merging it, so nothing carries those fields upward on
+    its own — the `analyst` tool has to lift them, and this is what says so."""
+    import pandas as pd
+
+    from .conftest import FakeSource
+
+    source = FakeSource(frames={"default": pd.DataFrame({"n": [7]})})
+    deps = make_deps(
+        script=[
+            [("analyst", {"question": "how many?"})],
+            [("run_sql", {"sql": "SELECT 7"})],
+            "Seven.",
+            "Seven.",
+        ],
+        src=source,
+    )
+    capture = TurnCapture(question="how many?")
+    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": "how many?"}]},
+        {"configurable": {"thread_id": "s1"}},
+        context=TurnContext(user_id="exec", session_id="s1", turn_id="t1"),
+    )
+
+    assert result["executed_sql"], "the analyst's SQL never reached the turn"
+    assert result["frame"] is not None
+    assert [a["sql"] for a in result["attempts"]] == ["SELECT 7"]
+
+
+def test_a_reports_body_is_not_in_state(make_deps, reports):
+    """Bodies are the only large payload here and state is checkpointed on
+    every super-step. The library's copy is the one that gets read."""
+    body = "## Summary\nDenim fell in Q1."
+    deps = make_deps(
+        script=[
+            [("report_writer", {"brief": "denim", "title": "Q1 Denim"})],
+            body,
+            "Written.",
+        ]
+    )
+    capture = TurnCapture(question="write it up")
+    agent = build_agent(deps, capture, checkpointer=MemorySaver())
+
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": "write it up"}]},
+        {"configurable": {"thread_id": "s1"}},
+        context=TurnContext(user_id="exec", session_id="s1", turn_id="t1"),
+    )
+
+    written = result["reports_written"][0]
+    assert set(written) == {"report_id", "title", "show"}
+    assert body not in str(result["reports_written"])
+    assert reports.get(owner_id="exec", report_id=written["report_id"]).body == body

@@ -132,4 +132,7 @@ def test_the_structural_schema_carries_no_conventions(make_deps):
         store=None,
     )
 
-    assert "NOT IN" not in describe(runtime=runtime)
+    result = describe(runtime=runtime)
+    rendered = result.update["messages"][0].content
+
+    assert "NOT IN" not in rendered

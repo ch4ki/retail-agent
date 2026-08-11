@@ -12,6 +12,8 @@ were an instruction, which is the failure the proposal engine existed to
 prevent.
 """
 
+from langchain_core.messages import HumanMessage
+
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.memory import build_memory_tools
@@ -24,18 +26,20 @@ from retail_agent.store.reports import InMemoryReportStore
 from retail_agent.store.preferences import InMemoryPreferenceStore
 
 
-def _runtime():
+def _runtime(question):
     """A `ToolRuntime` good enough to call a tool's raw `.func` directly.
 
     The framework only injects a real one when a tool runs through
     `agent.invoke`; calling `.func` here bypasses that machinery entirely, so
     the test has to build one itself. Six of `ToolRuntime`'s nine fields are
     required — `tools`, `execution_info` and `server_info` have defaults.
+    `state` carries this turn's question as a `HumanMessage` — `note_preference`
+    reads it from there now, not from `capture.question`.
     """
     from langchain.tools import ToolRuntime
 
     return ToolRuntime(
-        state=None,
+        state={"messages": [HumanMessage(question)]},
         context=TurnContext(user_id="dana", session_id="s1"),
         config={},
         stream_writer=None,
@@ -44,8 +48,23 @@ def _runtime():
     )
 
 
-def _bound(tools):
-    """Every tool's `.func`, pre-bound to this file's identity.
+def _text(result):
+    """A tool's answer, whatever it returned.
+
+    Every tool here now returns a `Command`, its answer the one `ToolMessage`
+    on `update["messages"]` — this file's tests read text out of that, the
+    same string a model would have seen either way.
+    """
+    from langgraph.types import Command
+
+    if isinstance(result, Command):
+        return result.update["messages"][0].content
+    return result
+
+
+def _bound(tools, question):
+    """Every tool's `.func`, pre-bound to this file's identity, with its
+    answer unwrapped from the `Command` it now returns.
 
     Calling `.func` directly bypasses `BaseTool.run` and the runtime
     injection that goes with it, so every call site would otherwise need its
@@ -54,7 +73,14 @@ def _bound(tools):
     """
     import functools
 
-    return {t.name: functools.partial(t.func, runtime=_runtime()) for t in tools}
+    runtime = _runtime(question)
+    return {
+        t.name: functools.partial(_run, t.func, runtime=runtime) for t in tools
+    }
+
+
+def _run(func, *args, **kwargs):
+    return _text(func(*args, **kwargs))
 
 
 def tools_for(question, trios=(), dense=None):
@@ -71,7 +97,7 @@ def tools_for(question, trios=(), dense=None):
         dense=dense,
     )
     capture = TurnCapture(question=question)
-    return _bound(build_memory_tools(deps, capture)), deps, capture
+    return _bound(build_memory_tools(deps, capture), question), deps, capture
 
 
 def test_a_quoted_preference_is_saved_in_the_users_own_words():
@@ -158,7 +184,7 @@ def test_a_store_failure_costs_the_preference_not_the_turn():
             raise RuntimeError("postgres is down")
 
     object.__setattr__(deps, "preferences", Broken())
-    tools = _bound(build_memory_tools(deps, capture))
+    tools = _bound(build_memory_tools(deps, capture), "keep it brief")
 
     answer = tools["note_preference"]("keep answers brief", "keep it brief")
 
@@ -237,7 +263,7 @@ def test_a_definition_store_failure_costs_the_memory_not_the_turn():
             raise RuntimeError("postgres is down")
 
     object.__setattr__(deps, "definitions", Broken())
-    tools = _bound(build_memory_tools(deps, capture))
+    tools = _bound(build_memory_tools(deps, capture), "loyal means three orders")
 
     answer = tools["remember_definition"]("loyal", "three orders")
 

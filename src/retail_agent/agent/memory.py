@@ -30,14 +30,18 @@ Silent is the failure mode worth avoiding, not immediate.
 from __future__ import annotations
 
 import logging
+import time
 
 from langchain.tools import ToolRuntime
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps, TurnContext
+from retail_agent.agent.state import step_event
 from retail_agent.agent.tools import partition_terms, settled_meanings
+from retail_agent.llm.messages import message_text
 from retail_agent.store.definitions import MAX_DEFINITION_CHARS
 from retail_agent.store.preferences import (
     MAX_NOTE_CHARS,
@@ -90,19 +94,24 @@ def build_memory_tools(
     @tool
     def remember_definition(
         term: str, definition: str, runtime: ToolRuntime[TurnContext, object]
-    ) -> str:
+    ) -> Command:
         """Record what a business term means for this executive.
 
         Call this when they tell you — for example "loyal means three or more
         orders in a year". Only for terms whose meaning is a business decision;
         never for a column that already exists.
         """
+        started = time.perf_counter()
         with capture.step("remember_definition") as step:
             if deps.definitions is None:
                 step.detail = "no store"
-                return (
+                return _reply(
+                    runtime,
                     "I cannot remember definitions right now, but I will use "
-                    "that for this question."
+                    "that for this question.",
+                    "remember_definition",
+                    started,
+                    step.detail,
                 )
 
             try:
@@ -115,18 +124,28 @@ def build_memory_tools(
                 # Not worth failing a turn the user just unblocked.
                 log.warning("could not save the definition of %r (%s)", term, err)
                 step.detail = f"failed: {err}"
-                return "I could not save that, but I will use it for this question."
+                return _reply(
+                    runtime,
+                    "I could not save that, but I will use it for this question.",
+                    "remember_definition",
+                    started,
+                    step.detail,
+                )
 
             step.detail = f"remembered {term}"
-            return (
+            return _reply(
+                runtime,
                 f"Recorded: {term} means {definition}. I will use that from now "
-                f"on. Now answer the original question."
+                f"on. Now answer the original question.",
+                "remember_definition",
+                started,
+                step.detail,
             )
 
     @tool
     def ask_for_definitions(
         terms: list[str], runtime: ToolRuntime[TurnContext, object]
-    ) -> str:
+    ) -> Command:
         """Ask the executive what a business term means, before querying.
 
         Use this when the question turns on a word whose meaning is a business
@@ -138,11 +157,16 @@ def build_memory_tools(
         definition has already spent the money and produced a number nobody can
         trace to a decision.
         """
+        started = time.perf_counter()
         with capture.step("ask_for_definitions") as step:
             # The same lookup and the same partition the CLI's gate used to do,
             # now in the one place that needs the answer.
             known = settled_meanings(deps, capture, user_id=runtime.context.user_id)
             settled, still_open = partition_terms(known, terms)
+            # `settled_meanings` caches the corpus retrieval on the capture, so
+            # this reads what was just consulted rather than paying for a
+            # second lookup.
+            consulted = [trio.id for trio in (capture.recalled_trios or [])]
 
             # Only pause if the answer can be kept: without a store the agent
             # would ask the same person the same question every turn, which is
@@ -178,12 +202,22 @@ def build_memory_tools(
                 )
             if still_open:
                 parts.append(NOBODY_TO_ASK.format(terms=", ".join(still_open)))
-            return "\n\n".join(parts) or "There was nothing to settle."
+            answer = "\n\n".join(parts) or "There was nothing to settle."
+
+            return _reply(
+                runtime,
+                answer,
+                "ask_for_definitions",
+                started,
+                step.detail,
+                assumed_terms=list(still_open),
+                trio_ids=consulted,
+            )
 
     @tool
     def note_preference(
         preference: str, evidence: str, runtime: ToolRuntime[TurnContext, object]
-    ) -> str:
+    ) -> Command:
         """Record how this executive wants answers written.
 
         `preference` is the request in plain words — "keep answers under three
@@ -192,18 +226,35 @@ def build_memory_tools(
         Do not call this for questions about the data — "why are sales down"
         says nothing about how they want an answer written.
         """
+        started = time.perf_counter()
         with capture.step("note_preference") as step:
             # The check that makes acting on this safe rather than presumptuous.
             # A span the user never typed would mean the model inferred a
             # preference and this tool wrote it down as though they had asked.
+            # Read off the turn's own messages rather than `capture.question`:
+            # identity and the turn's transcript both now live in state, and a
+            # bare `.func` call in a test carries no capture question at all.
+            question = _last_human_text(runtime.state)
             quoted = evidence.strip()
-            if not quoted or quoted.lower() not in capture.question.lower():
+            if not quoted or quoted.lower() not in question.lower():
                 step.detail = "evidence not quotable"
-                return "Nothing recorded — the evidence must be their exact words."
+                return _reply(
+                    runtime,
+                    "Nothing recorded — the evidence must be their exact words.",
+                    "note_preference",
+                    started,
+                    step.detail,
+                )
 
             if deps.preferences is None:
                 step.detail = "no store"
-                return "Noted for this answer; I cannot save it as a default."
+                return _reply(
+                    runtime,
+                    "Noted for this answer; I cannot save it as a default.",
+                    "note_preference",
+                    started,
+                    step.detail,
+                )
 
             note = " ".join(preference.split())
             try:
@@ -213,33 +264,55 @@ def build_memory_tools(
             except Exception as err:
                 log.warning("could not save the preference %r (%s)", note, err)
                 step.detail = f"failed: {err}"
-                return "Noted for this answer; I could not save it as a default."
+                return _reply(
+                    runtime,
+                    "Noted for this answer; I could not save it as a default.",
+                    "note_preference",
+                    started,
+                    step.detail,
+                )
 
             if outcome != "added":
                 step.detail = f"refused: {outcome}"
-                return REFUSALS[outcome]
+                return _reply(
+                    runtime, REFUSALS[outcome], "note_preference", started, step.detail
+                )
 
             # Recorded on the capture, not just described in the reply: the CLI
             # announces the change itself, so the user is told whether or not
             # the model mentions it.
             capture.preference_changes.append(("added", note))
             step.detail = f"added {note}"
-            return f"Saved: {note}. I will follow that from now on. Apply it now."
+            return _reply(
+                runtime,
+                f"Saved: {note}. I will follow that from now on. Apply it now.",
+                "note_preference",
+                started,
+                step.detail,
+                preference_changes=[{"action": "added", "note": note}],
+            )
 
     @tool
     def forget_preference(
         preference: str, runtime: ToolRuntime[TurnContext, object]
-    ) -> str:
+    ) -> Command:
         """Drop a preference this executive no longer wants.
 
         Pass the saved wording as closely as you can; the match ignores case and
         spacing. Changing a preference is this tool followed by
         `note_preference` with the new wording — there is no edit.
         """
+        started = time.perf_counter()
         with capture.step("forget_preference") as step:
             if deps.preferences is None:
                 step.detail = "no store"
-                return "I cannot change saved preferences right now."
+                return _reply(
+                    runtime,
+                    "I cannot change saved preferences right now.",
+                    "forget_preference",
+                    started,
+                    step.detail,
+                )
 
             note = " ".join(preference.split())
             try:
@@ -260,7 +333,13 @@ def build_memory_tools(
                 )
                 if stored is None:
                     step.detail = "no match"
-                    return f"Nothing saved matching {note!r}; nothing changed."
+                    return _reply(
+                        runtime,
+                        f"Nothing saved matching {note!r}; nothing changed.",
+                        "forget_preference",
+                        started,
+                        step.detail,
+                    )
 
                 remove_note(
                     deps.preferences, user_id=runtime.context.user_id, note=stored
@@ -268,11 +347,24 @@ def build_memory_tools(
             except Exception as err:
                 log.warning("could not forget the preference %r (%s)", note, err)
                 step.detail = f"failed: {err}"
-                return "I could not change your saved preferences just now."
+                return _reply(
+                    runtime,
+                    "I could not change your saved preferences just now.",
+                    "forget_preference",
+                    started,
+                    step.detail,
+                )
 
             capture.preference_changes.append(("removed", stored))
             step.detail = f"removed {stored}"
-            return f"Removed: {stored}."
+            return _reply(
+                runtime,
+                f"Removed: {stored}.",
+                "forget_preference",
+                started,
+                step.detail,
+                preference_changes=[{"action": "removed", "note": stored}],
+            )
 
     return [
         ask_for_definitions,
@@ -289,3 +381,43 @@ def _describe_settled(settled: dict[str, str], still_open: list[str]) -> str:
     if still_open:
         parts.append(f"unanswered: {', '.join(still_open)}")
     return "; ".join(parts) or "nothing asked"
+
+
+def _last_human_text(state: object) -> str:
+    """The question this turn is actually about, read off the messages.
+
+    `note_preference` used to read `capture.question`, kept in step with the
+    turn by `_turn_sync`. Identity and the transcript both live in graph
+    state now, so this reads the same fact from `runtime.state` instead —
+    the last `HumanMessage` in the list is this turn's question, whatever
+    came before it in the conversation.
+    """
+    messages = (state or {}).get("messages", []) or []
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return message_text(message)
+    return ""
+
+
+def _reply(
+    runtime: ToolRuntime,
+    text: str,
+    name: str,
+    started: float,
+    detail: str,
+    **extra: object,
+) -> Command:
+    """Every memory tool's answer, wrapped for `TurnState`.
+
+    One `ToolMessage` plus this call's own `events` entry and `calls: 1` —
+    the shape every path through every tool here ends on — plus whatever else
+    this particular call contributed (`preference_changes`, `assumed_terms`,
+    `trio_ids`, ...), passed as keyword updates.
+    """
+    update = {
+        "messages": [ToolMessage(content=text, tool_call_id=runtime.tool_call_id)],
+        "events": [step_event(name, started, detail)],
+        "calls": 1,
+    }
+    update.update(extra)
+    return Command(update=update)
