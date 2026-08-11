@@ -66,6 +66,7 @@ def test_nothing_is_deleted_while_the_user_is_being_asked(make_deps, saved):
     assert len(saved.list_reports(owner_id="exec")) == 2
     payload = result["__interrupt__"][0].value
     assert "Acme Q1" in payload["manifest"]
+    assert "Beta Q1" not in payload["manifest"], "the other report must not be caught up in the match"
 
 
 def test_approving_deletes_exactly_what_was_shown(make_deps, saved):
