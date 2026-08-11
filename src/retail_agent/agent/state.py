@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import operator
 import time
-from typing import Annotated, Any
+from typing import Annotated
 
 from langchain.agents.middleware import AgentState
 

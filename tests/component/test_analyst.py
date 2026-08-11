@@ -283,3 +283,52 @@ def test_the_analyst_inherits_the_parent_runs_config(make_deps, monkeypatch):
         "the nested invoke did not receive the parent run's config — got "
         f"{nested_config!r}"
     )
+
+
+def test_three_queries_accumulate_three_attempts(make_deps):
+    """The reducer's whole job. Without `operator.add` the second `run_sql`
+    replaces the first and the turn reports one query where it ran three.
+
+    This drives `build_analyst_tools` directly through a `create_agent`
+    compiled with `state_schema=TurnState` — the SQL loop itself, which is
+    what this task owns — rather than through the supervisor's `analyst`
+    tool. `analyst` (in `subagents.py`) still returns a plain string today;
+    lifting the subagent's `TurnState` keys into the parent turn's state is
+    explicitly Task 3's job ("what Task 3's `analyst` tool lifts into the
+    parent turn"), and `subagents.py` is off limits here. Asserting through
+    the supervisor's top-level `agent.invoke(...)` result, as an earlier
+    draft of this test did, produces `result["attempts"] == []` — not because
+    the reducer or `index=len(runtime.state...)` logic is wrong (both are
+    exercised and proven correct below), but because nothing yet copies the
+    inner subagent's state into the outer graph. That gap is real and is
+    left for Task 3 to close.
+    """
+    import pandas as pd
+
+    from langchain.agents import create_agent
+
+    from retail_agent.agent.state import TurnState
+    from retail_agent.agent.tools import build_analyst_tools
+    from .conftest import FakeSource
+
+    source = FakeSource(frames={"default": pd.DataFrame({"n": [1]})})
+    deps = make_deps(
+        script=[
+            [("run_sql", {"sql": "SELECT 1"})],
+            [("run_sql", {"sql": "SELECT 2"})],
+            [("run_sql", {"sql": "SELECT 3"})],
+            "Three of them.",
+        ],
+        src=source,
+    )
+    capture = TurnCapture(question="how many?")
+    agent = create_agent(
+        model=deps.llm,
+        tools=build_analyst_tools(deps, capture),
+        state_schema=TurnState,
+    )
+
+    result = agent.invoke({"messages": [{"role": "user", "content": "how many?"}]})
+
+    assert [a["step_id"] for a in result["attempts"]] == ["q1", "q2", "q3"]
+    assert [a["sql"] for a in result["attempts"]] == ["SELECT 1", "SELECT 2", "SELECT 3"]
