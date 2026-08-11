@@ -550,7 +550,11 @@ def _settle_definitions(console, deps, capture, payload) -> dict:
             # from `answers`; the tool records them as assumed on resume.
             return {"answers": answers}
         if not chosen:
-            return {"answers": {}}
+            # Stops asking, but does not undo what was already agreed: a term
+            # settled earlier in this same batch was answered, and cancelling
+            # on a later one must not erase it — only what's still open here
+            # goes unanswered, same as a hand-back.
+            return {"answers": answers}
 
         answers[term] = chosen
 

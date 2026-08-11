@@ -275,3 +275,42 @@ def test_a_declined_term_is_recorded_as_assumed(make_deps):
 
     assert "LGB" in capture.assumed_terms
     assert all_definitions(definitions, "exec") == {}
+
+
+def test_cancelling_a_later_term_keeps_an_earlier_terms_answer(make_deps):
+    """`_settle_definitions` asks about a batch of terms one at a time and
+    resumes once. Cancelling on the second must not undo the first: the old
+    CLI wrote each answer to the store as it was chosen, so an answer given
+    for term one survived a later cancel on term two — it only stopped
+    asking, it did not un-decide what was already agreed. All writes are now
+    deferred to the tool, so the resume value itself has to carry every
+    answer collected so far, not just the ones for terms still open."""
+    from .test_repl_turn import FakeConsole
+    from retail_agent.cli.chat import _settle_definitions
+
+    definitions = InMemoryDefinitionStore()
+    deps = make_deps(
+        script=[
+            [("ask_for_definitions", {"terms": ["top", "LGB"]})],
+            {"definitions": ["the 10 highest by revenue"]},  # propose() for "top"
+            {"definitions": ["low gross basket"]},  # propose() for "LGB"
+            "All set.",
+        ],
+        definitions=definitions,
+    )
+
+    agent, config, capture, result = start(deps)
+    assert paused(result)
+
+    # The executive types an answer for "top", then presses enter on "LGB" —
+    # the CLI's cancel path, distinct from the numbered hand-back option.
+    console = FakeConsole(["the 10 highest by revenue", ""])
+    resume = _settle_definitions(console, deps, capture, {"terms": ["top", "LGB"]})
+    result = agent.invoke(Command(resume=resume), config)
+
+    assert not paused(result)
+    kept = all_definitions(definitions, "exec")
+    assert kept["top"] == "the 10 highest by revenue", (
+        "term one's answer must survive the cancel on term two"
+    )
+    assert "lgb" not in kept

@@ -47,9 +47,12 @@ from retail_agent.store.preferences import (
 
 log = logging.getLogger(__name__)
 
-# What `ask_for_definitions` returns when its body actually runs with the term
-# still unsettled — meaning nobody was there to be asked. Armed with the
-# interrupt, the body is only reached *after* a person answered.
+# What `ask_for_definitions` says about a term that is still unsettled once
+# the pause is resumed — whether the person gave no answer for it, declined
+# outright, or simply never got asked because there was nobody there. All of
+# those resume the same interrupt() call and land here the same way; nothing
+# distinguishes "the executive said decide for yourself" from "the executive
+# typed nothing", and nothing needs to.
 #
 # Not a refusal. The brief's own example questions turn on undefined terms, and
 # an agent that declines to answer them is not safe, it is useless. Same bargain
