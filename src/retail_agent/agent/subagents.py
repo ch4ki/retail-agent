@@ -64,7 +64,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """
 
     @tool
-    def analyst(question: str, runtime: ToolRuntime | None = None) -> str:
+    def analyst(question: str, runtime: ToolRuntime) -> str:
         """Query the retail data and report what it found.
 
         Pass the executive's question in full, keeping every business term
@@ -99,7 +99,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
             )
             result = agent.invoke(
                 {"messages": [{"role": "user", "content": question}]},
-                config=runtime.config if runtime is not None else None,
+                config=runtime.config,
             )
 
             answer = final_text(result)

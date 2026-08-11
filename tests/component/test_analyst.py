@@ -33,6 +33,26 @@ def subagents_for(deps, question="who are our loyal customers?"):
     return {t.name: t.func for t in build_subagents(deps, capture)}, capture
 
 
+def _runtime():
+    """A `ToolRuntime` good enough to call a tool's raw `.func` directly.
+
+    The framework only injects a real one when a tool runs through
+    `agent.invoke`; calling `.func` here bypasses that machinery entirely, so
+    the test has to build one itself. Six of `ToolRuntime`'s nine fields are
+    required — `tools`, `execution_info` and `server_info` have defaults.
+    """
+    from langchain.tools import ToolRuntime
+
+    return ToolRuntime(
+        state=None,
+        context=None,
+        config={},
+        stream_writer=None,
+        tool_call_id="test",
+        store=None,
+    )
+
+
 def test_the_executives_own_definitions_reach_the_model(make_deps):
     """All of them, not the ones a regex picked out of the question. The
     filtering step that needed a term list is gone, and the whole set costs one
@@ -48,7 +68,7 @@ def test_the_executives_own_definitions_reach_the_model(make_deps):
     )
     analyst, _ = subagents_for(deps)
 
-    analyst["analyst"]("how many LGB customers?")
+    analyst["analyst"]("how many LGB customers?", runtime=_runtime())
 
     assert any("low gross basket" in prompt for prompt in deps.llm.prompts)
 
@@ -67,7 +87,7 @@ def test_a_trio_settles_the_term_and_the_query_runs(make_deps):
     )
     analyst, capture = subagents_for(deps)
 
-    answer = analyst["analyst"]("who are our loyal customers?")
+    answer = analyst["analyst"]("who are our loyal customers?", runtime=_runtime())
 
     assert "42" in answer
     assert capture.trio_ids == ["trio-loyal"]
@@ -80,7 +100,7 @@ def test_the_agreed_definition_reaches_the_model(make_deps):
     deps = make_deps(script=["one."], src=source, trios=[LOYAL])
     analyst, _ = subagents_for(deps)
 
-    analyst["analyst"]("who are our loyal customers?")
+    analyst["analyst"]("who are our loyal customers?", runtime=_runtime())
 
     assert any(
         "three or more completed orders" in prompt for prompt in deps.llm.prompts
@@ -104,7 +124,7 @@ def test_a_recorded_assumption_is_forced_into_the_answer(make_deps):
     analyst, capture = subagents_for(deps)
     capture.record_assumptions(["LGB"])
 
-    answer = analyst["analyst"]("how many LGB customers?")
+    answer = analyst["analyst"]("how many LGB customers?", runtime=_runtime())
 
     assert "no agreed definition" in answer.lower()
     assert "LGB" in answer
@@ -121,7 +141,9 @@ def test_nothing_assumed_means_no_disclosure(make_deps):
     )
     analyst, _ = subagents_for(deps)
 
-    answer = analyst["analyst"]("how much revenue did we make in March?")
+    answer = analyst["analyst"](
+        "how much revenue did we make in March?", runtime=_runtime()
+    )
 
     assert "3" in answer
     assert "no agreed definition" not in answer.lower()
@@ -191,29 +213,41 @@ def test_the_report_writer_cannot_reach_the_data(make_deps):
     assert deps.llm.bound_tools == []
 
 
-def test_the_analyst_inherits_the_parent_runs_config(make_deps):
+def test_the_analyst_inherits_the_parent_runs_config(make_deps, monkeypatch):
     """Finding 5. The nested `agent.invoke` used to pass no config, so the
     subagent's model calls reached the parent's callbacks only by contextvar
     propagation — which holds for synchronous Python and silently stops the
     moment anything moves behind a thread or an async boundary. The eval's
     token accounting is what breaks first, and it breaks quietly.
 
-    Contextvar propagation makes the two implementations behave identically in
-    this path, so this asserts the config is threaded explicitly rather than
-    asserting an observable difference.
+    Contextvar propagation makes the supervisor's own callbacks reach the
+    subagent either way, so a test that only counts model-start events cannot
+    tell the two implementations apart — deleting `config=runtime.config`
+    entirely still leaves it green. What actually distinguishes them is
+    whether the nested `agent.invoke` was *handed* the parent's config, so
+    this spies on the analyst's inner `create_agent` and inspects the `config`
+    kwarg its `invoke` was called with.
     """
-    from langchain_core.callbacks import BaseCallbackHandler
-
+    from retail_agent.agent import subagents as subagents_module
     from retail_agent.agent.capture import TurnCapture
     from retail_agent.agent.deps import TurnContext
     from retail_agent.agent.supervisor import build_agent
 
-    class Counting(BaseCallbackHandler):
-        def __init__(self):
-            self.starts = 0
+    captured_configs = []
+    real_create_agent = subagents_module.create_agent
 
-        def on_chat_model_start(self, *args, **kwargs):
-            self.starts += 1
+    def spying_create_agent(*args, **kwargs):
+        nested_agent = real_create_agent(*args, **kwargs)
+        real_invoke = nested_agent.invoke
+
+        def spying_invoke(*invoke_args, **invoke_kwargs):
+            captured_configs.append(invoke_kwargs.get("config"))
+            return real_invoke(*invoke_args, **invoke_kwargs)
+
+        monkeypatch.setattr(nested_agent, "invoke", spying_invoke)
+        return nested_agent
+
+    monkeypatch.setattr(subagents_module, "create_agent", spying_create_agent)
 
     deps = make_deps(
         script=[
@@ -223,17 +257,23 @@ def test_the_analyst_inherits_the_parent_runs_config(make_deps):
             "Nine.",
         ]
     )
-    counting = Counting()
     capture = TurnCapture(question="how many orders?")
     agent = build_agent(deps, capture)
 
+    parent_config = {"metadata": {"marker": "parent-turn"}}
     agent.invoke(
         {"messages": [{"role": "user", "content": "how many orders?"}]},
-        {"callbacks": [counting]},
+        parent_config,
         context=TurnContext(user_id="exec", session_id="s1", turn_id="t1"),
     )
 
-    assert counting.starts >= 3, (
-        "the supervisor's calls and the analyst subagent's calls should all "
-        f"reach the parent's callbacks; saw {counting.starts}"
+    assert captured_configs, "the analyst never called its nested agent.invoke"
+    nested_config = captured_configs[0]
+    assert nested_config is not None, (
+        "the nested invoke was called with config=None instead of the "
+        "parent's RunnableConfig"
+    )
+    assert nested_config.get("metadata", {}).get("marker") == "parent-turn", (
+        "the nested invoke did not receive the parent run's config — got "
+        f"{nested_config!r}"
     )

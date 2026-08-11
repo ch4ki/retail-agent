@@ -48,6 +48,34 @@ def test_the_agent_can_be_built_from_them():
     assert build_agent(deps, TurnCapture())
 
 
+def test_no_tool_leaks_its_runtime_into_the_model_facing_schema():
+    """`ToolRuntime` must never reach the model.
+
+    A tool takes it by adding a parameter literally named `runtime` — nothing
+    marks it `Annotated` or optional — and the framework strips that parameter
+    from `tool_call_schema` and injects a real value at call time. If a tool's
+    `runtime` parameter is ever given a default (to make some other caller's
+    life easier, say), the strip stops working: `langchain_core`'s injection
+    check does not unwrap `Optional`, so `runtime` stays in the schema, and
+    schema conversion for every real provider then crashes on `ToolRuntime`'s
+    non-serialisable `stream_writer`. The fakes used elsewhere in this suite
+    override `bind_tools` and never run real schema conversion, so only a test
+    that calls `convert_to_openai_tool` directly, as this one does, can catch
+    it.
+    """
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    from retail_agent.agent.capture import TurnCapture
+    from retail_agent.agent.supervisor import build_tools
+
+    deps = build_deps(_settings(), llm=_bindable(), source=_schema_only())
+    for tool in build_tools(deps, TurnCapture()):
+        assert "runtime" not in tool.tool_call_schema.model_fields, (
+            f"{tool.name} leaks `runtime` into its model-facing schema"
+        )
+        convert_to_openai_tool(tool)  # must not raise
+
+
 def test_an_unreachable_database_degrades_rather_than_raising():
     deps = build_deps(_settings(), llm=object(), source=object())
 
