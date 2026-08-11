@@ -60,21 +60,31 @@ def test_nothing_is_deleted_while_the_user_is_being_asked(make_deps, saved):
     deps = make_deps(
         script=[[("delete_reports", {"term": "Acme"})], "Deleted."]
     )
-    _, capture, _, result = run(deps, "delete all reports mentioning Acme")
+    _, _, _, result = run(deps, "delete all reports mentioning Acme")
 
     assert result.get("__interrupt__")
     assert len(saved.list_reports(owner_id="exec")) == 2
-    assert capture.pending is not None
-    assert capture.pending.titles == ("Acme Q1",)
+    payload = result["__interrupt__"][0].value
+    assert "Acme Q1" in payload["manifest"]
 
 
 def test_approving_deletes_exactly_what_was_shown(make_deps, saved):
     deps = make_deps(
         script=[[("delete_reports", {"term": "Acme"})], "Deleted 1 report."]
     )
-    agent, capture, config, _ = run(deps, "delete all reports mentioning Acme")
+    agent, capture, config, result = run(deps, "delete all reports mentioning Acme")
+    payload = result["__interrupt__"][0].value
 
-    agent.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
+    agent.invoke(
+        Command(
+            resume={
+                "approved": True,
+                "report_ids": payload["report_ids"],
+                "token": payload["token"],
+            }
+        ),
+        config,
+    )
 
     remaining = [r.title for r in saved.list_reports(owner_id="exec")]
     assert remaining == ["Beta Q1"]
@@ -86,7 +96,7 @@ def test_rejecting_leaves_the_library_alone(make_deps, saved):
     )
     agent, _, config, _ = run(deps, "delete all reports mentioning Acme")
 
-    agent.invoke(Command(resume={"decisions": [{"type": "reject"}]}), config)
+    agent.invoke(Command(resume={"approved": False}), config)
 
     assert len(saved.list_reports(owner_id="exec")) == 2
 
@@ -96,8 +106,18 @@ def test_a_deletion_can_be_undone(make_deps, saved):
     deps = make_deps(
         script=[[("delete_reports", {"term": "Acme"})], "Deleted."]
     )
-    agent, _, config, _ = run(deps, "delete all reports mentioning Acme")
-    agent.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
+    agent, _, config, result = run(deps, "delete all reports mentioning Acme")
+    payload = result["__interrupt__"][0].value
+    agent.invoke(
+        Command(
+            resume={
+                "approved": True,
+                "report_ids": payload["report_ids"],
+                "token": payload["token"],
+            }
+        ),
+        config,
+    )
 
     assert saved.undo(owner_id="exec") == 1
     assert len(saved.list_reports(owner_id="exec")) == 2
@@ -106,13 +126,12 @@ def test_a_deletion_can_be_undone(make_deps, saved):
 def test_the_manifest_names_every_report_and_the_token_scales(make_deps, saved):
     """One report is a low-stakes correction; several is not."""
     deps = make_deps(script=[[("delete_reports", {"term": ""})], "Deleted."])
-    _, capture, _, result = run(deps, "delete all my reports")
+    _, _, _, result = run(deps, "delete all my reports")
 
-    assert set(capture.pending.titles) == {"Acme Q1", "Beta Q1"}
-    assert capture.pending.token == confirmation_token(2) == "DELETE 2"
-
-    description = result["__interrupt__"][0].value["action_requests"][0]["description"]
-    assert "Acme Q1" in description and "Beta Q1" in description
+    payload = result["__interrupt__"][0].value
+    assert set(payload["report_ids"]) == {r.id for r in saved.list_reports(owner_id="exec")}
+    assert payload["token"] == confirmation_token(2) == "DELETE 2"
+    assert "Acme Q1" in payload["manifest"] and "Beta Q1" in payload["manifest"]
 
 
 def test_a_delete_cannot_reach_another_owner(make_deps, saved):
@@ -286,6 +305,51 @@ def test_a_transient_failure_while_writing_the_report_is_survived(
 
     assert flaky.calls == 2, "the first attempt failed and the second succeeded"
     assert reports.list_reports(owner_id="exec")[0].body == "## Summary\nDenim fell in Q1."
+
+
+def test_a_report_added_between_prompt_and_approval_is_not_deleted(
+    make_deps, saved, reports
+):
+    """`interrupt()` replays the tool body, so `resolve_delete` runs again
+    after the executive has already seen the manifest. The ids come back in
+    the resume value precisely so the replay cannot widen the blast radius."""
+    deps = make_deps(script=[[("delete_reports", {"term": "Q1"})], "Deleted."])
+    saver = MemorySaver()
+    capture = TurnCapture(user_id="exec", session_id="s1", question="delete the Q1 reports")
+    agent = build_agent(deps, capture, checkpointer=saver)
+    config = {"configurable": {"thread_id": "s1"}}
+
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": "delete the Q1 reports"}]}, config
+    )
+    payload = result["__interrupt__"][0].value
+    shown = list(payload["report_ids"])
+
+    # A third matching report lands while the executive is reading the prompt.
+    reports.save(
+        owner_id="exec", session_id="s1", title="Gamma Q1", body="Gamma did fine."
+    )
+
+    agent.invoke(
+        Command(resume={"approved": True, "report_ids": shown, "token": payload["token"]}),
+        config,
+    )
+
+    surviving = {r.title for r in reports.list_reports(owner_id="exec")}
+    assert surviving == {"Gamma Q1"}, "only the reports shown were deleted"
+
+
+def test_rejecting_deletes_nothing(make_deps, saved, reports):
+    deps = make_deps(script=[[("delete_reports", {"term": "Acme"})], "Nothing deleted."])
+    saver = MemorySaver()
+    capture = TurnCapture(user_id="exec", session_id="s1", question="delete Acme")
+    agent = build_agent(deps, capture, checkpointer=saver)
+    config = {"configurable": {"thread_id": "s1"}}
+
+    agent.invoke({"messages": [{"role": "user", "content": "delete Acme"}]}, config)
+    agent.invoke(Command(resume={"approved": False}), config)
+
+    assert len(reports.list_reports(owner_id="exec")) == 2
 
 
 def test_a_transient_failure_while_answering_about_a_report_is_survived(

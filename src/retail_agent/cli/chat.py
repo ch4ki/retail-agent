@@ -399,19 +399,20 @@ def _answer(console, deps, saver, user, session_id, question):
                 {"messages": [{"role": "user", "content": question}]}, config
             )
 
-        # Two things pause the agent before a tool runs: a destructive call, and
-        # a question whose terms nobody has settled. Both were resolved
-        # read-only by the gate, so what is shown is exactly what stopped it.
+        # Two things pause a turn: `delete_reports` interrupting itself, and a
+        # question whose terms nobody has settled, still gated by the
+        # middleware. The two resume differently — the middleware subscripts
+        # its resume value by `"decisions"`, the tool gets back exactly what
+        # `_decide` returns — so which one it was has to be read off the
+        # payload before the resume is shaped.
         while _pending(result):
+            kind = _payload(result).get("kind")
             decision = _decide(console, deps, result, capture, user)
+            resume = (
+                {"decisions": [decision]} if kind == "ask_for_definitions" else decision
+            )
             with console.status("working…"):
-                result = agent.invoke(
-                    # A dict with `decisions`, not a bare list: the middleware
-                    # subscripts the resume value by name, and a list resumes
-                    # with a TypeError that surfaces as a failed turn.
-                    Command(resume={"decisions": [decision]}),
-                    config,
-                )
+                result = agent.invoke(Command(resume=resume), config)
     except Exception as err:  # the REPL must survive anything
         # Full detail goes to the log; the user gets one actionable line. The
         # turn id makes a complaint a single lookup rather than an
@@ -467,43 +468,53 @@ def _pending(result) -> bool:
     return bool(result.get("__interrupt__"))
 
 
-def _decide(console, deps, result, capture, user) -> dict:
-    """Turn a pause into the decision the middleware resumes with.
+def _payload(result) -> dict:
+    """What the tool asked for. Our own shape now, not the middleware's.
 
-    Dispatching on the tool rather than on a mode flag: the two gates are
-    configured in one middleware and either can be the reason a turn stopped, so
-    the request itself is the only honest source of which one it was.
+    `ask_for_definitions` has not made that move yet — Task 2 does it — so its
+    pause still arrives in `HumanInTheLoopMiddleware`'s own shape, an
+    `action_requests` list with no `kind` at the top. `_decide` dispatches on
+    `kind` alone, so that shape is folded into one here rather than taught to
+    every caller: the tool named in the first (and, while only one gate is
+    armed, only) action request becomes the `kind`.
     """
-    request = _first_request(result)
-    if request.get("name") == "ask_for_definitions":
-        return _settle_definitions(console, deps, capture, user, request)
-
-    if _confirm(console, request.get("description", ""), capture):
-        return {"type": "approve"}
-    return {
-        "type": "reject",
-        "message": "The executive did not confirm. Nothing was deleted.",
-    }
+    value = result["__interrupt__"][0].value
+    if not isinstance(value, dict):
+        return {}
+    if "kind" not in value and value.get("action_requests"):
+        value = {**value, "kind": value["action_requests"][0].get("name")}
+    return value
 
 
-def _first_request(result) -> dict:
-    interrupt = result["__interrupt__"][0]
-    value = interrupt.value if isinstance(interrupt.value, dict) else {}
-    requests = value.get("action_requests", [])
-    return requests[0] if requests else {}
+def _decide(console, deps, result, capture, user) -> dict:
+    """Turn a pause into the value the tool resumes with.
+
+    Dispatching on the payload's own `kind`: the tool that asked is the tool
+    that named the question, so there is nothing to infer.
+    """
+    payload = _payload(result)
+    if payload.get("kind") == "ask_for_definitions":
+        return _settle_definitions(console, deps, capture, user, payload)
+
+    if _confirm(console, payload):
+        return {
+            "approved": True,
+            "report_ids": list(payload["report_ids"]),
+            "token": payload["token"],
+        }
+    return {"approved": False}
 
 
-def _confirm(console, description, capture) -> bool:
+def _confirm(console, payload) -> bool:
     """Show the manifest and take a typed answer.
 
     The typed token rather than a bare y/n: `DELETE 7` cannot be produced by
     someone who has not read how many reports they are about to lose.
     """
-    render_confirmation(console, description)
+    render_confirmation(console, payload.get("manifest", ""))
 
     typed = console.input("[bold yellow]›[/bold yellow] ").strip()
-    expected = capture.pending.token if capture.pending else "y"
-    if typed == expected:
+    if typed == payload.get("token", "y"):
         return True
 
     console.print("[dim]Cancelled — nothing was deleted.[/dim]")
@@ -516,13 +527,17 @@ def _confirm(console, description, capture) -> bool:
 _HAND_BACK = object()
 
 
-def _settle_definitions(console, deps, capture, user, request) -> dict:
+def _settle_definitions(console, deps, capture, user, payload) -> dict:
     """Ask about each open term, then resume once.
 
     In question order and one at a time: each prompt stays a simple choice, and
     the options for the second term are generated knowing how the first was
     settled — otherwise a definition of `top` can quietly contradict the `loyal`
     just agreed.
+
+    `payload` is unused for now — it still reads `capture.pending_definition`,
+    the same as before. Task 2 rewrites this to read the payload instead and
+    drop that field.
     """
     from retail_agent.agent.schema import render_schema_outline
     from retail_agent.knowledge.proposals import propose

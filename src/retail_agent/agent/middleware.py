@@ -43,7 +43,6 @@ from retail_agent.agent.prompts import (
     SAFETY_RULES,
     SUPERVISOR_PROMPT,
 )
-from retail_agent.agent.reports import render_manifest, resolve_delete
 from retail_agent.agent.tools import GuardRejection, partition_terms, settled_meanings
 from retail_agent.datasources.base import DataSourceError
 from retail_agent.llm.messages import message_text
@@ -118,8 +117,11 @@ def supervisor_middleware(
     if summarizer is not None:
         stack.append(summarizer)
 
+    gate = _approval_gate(deps, capture, pause_for_definitions=pause_for_definitions)
+    if gate is not None:
+        stack.append(gate)
+
     stack += [
-        _approval_gate(deps, capture, pause_for_definitions=pause_for_definitions),
         ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS, exit_behavior="end"),
         ToolErrorMiddleware(on_error=describe_failure),
         _recorder(deps, capture),
@@ -262,37 +264,23 @@ def _summarization(deps: AgentDeps) -> AgentMiddleware | None:
 
 def _approval_gate(
     deps: AgentDeps, capture: TurnCapture, *, pause_for_definitions: bool = False
-) -> AgentMiddleware:
-    """The two places a turn stops for a person, as interrupts before the tool.
+) -> AgentMiddleware | None:
+    """The one place left where a turn stops for a person, as an interrupt
+    before the tool.
 
-    Both `when` predicates resolve read-only, without a model call, and park
-    what they found on the capture. That is what makes each one a gate rather
-    than advice: a delete that matches nothing never raises a prompt, a term
-    this executive has already defined never raises one either, and in both
-    cases what the user is shown is exactly what the predicate found.
+    The delete confirmation used to live here too, as a `when` predicate that
+    resolved the target set and parked it on the capture — a predicate doing
+    store I/O and mutating state. `delete_reports` now calls `interrupt()`
+    itself, from inside the tool body, so the manifest and the act cannot
+    drift apart even under replay. What is left is the narrower gate that
+    still benefits from running before the model decides to ask: whether a
+    term the model wants to settle is already on file.
 
-    What changed with `ask_for_definitions` is which half is deterministic.
-    *Whether* a word needs settling is now the model's judgement, made by
-    calling the tool at all. What survives here is the narrower check that does
-    not need one: whether the answer is already on file.
+    Returns `None` when nothing is armed, the same shape `_summarization`
+    uses — a stack is the only place this agent's control flow is visible,
+    and a middleware that never fires is a worse description of the turn than
+    its absence.
     """
-
-    def has_targets(request) -> bool:
-        args = request.tool_call.get("args", {})
-        capture.pending = resolve_delete(
-            deps,
-            capture,
-            term=args.get("term", "") or "",
-            session_scoped=bool(args.get("session_scoped", False)),
-        )
-        return capture.pending is not None
-
-    def describe(tool_call, state, runtime) -> str:
-        return (
-            render_manifest(capture.pending)
-            if capture.pending
-            else "Delete saved reports?"
-        )
 
     def still_unsettled(request) -> bool:
         # Only pause if the answer can be kept. Without a store the agent would
@@ -311,13 +299,7 @@ def _approval_gate(
         pending = capture.pending_definition
         return describe_open_terms(pending.terms) if pending else "A term needs defining."
 
-    interrupt_on: dict[str, InterruptOnConfig] = {
-        "delete_reports": InterruptOnConfig(
-            allowed_decisions=["approve", "reject"],
-            description=describe,
-            when=has_targets,
-        )
-    }
+    interrupt_on: dict[str, InterruptOnConfig] = {}
     if pause_for_definitions:
         interrupt_on["ask_for_definitions"] = InterruptOnConfig(
             # `approve` runs the tool body, which reads the answers back out of
@@ -328,6 +310,9 @@ def _approval_gate(
             description=describe_definition,
             when=still_unsettled,
         )
+
+    if not interrupt_on:
+        return None
 
     return HumanInTheLoopMiddleware(interrupt_on=interrupt_on, description_prefix="")
 
