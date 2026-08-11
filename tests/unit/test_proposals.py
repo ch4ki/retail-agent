@@ -11,6 +11,18 @@ from retail_agent.knowledge.proposals import propose
 SCHEMA = "orders(id, user_id, created_at)\norder_items(id, sale_price)"
 
 
+def _deps_for(llm):
+    """`propose` takes deps now, so it can retry and fall over the way every
+    other model call does."""
+    from types import SimpleNamespace
+
+    from retail_agent.config import Settings
+
+    return SimpleNamespace(
+        llm=llm, llm_fallbacks=[], settings=Settings(_env_file=None)
+    )
+
+
 def suggest(replies, **overrides):
     llm = ScriptedLLM(replies)
     kwargs = dict(
@@ -19,7 +31,7 @@ def suggest(replies, **overrides):
         schema=SCHEMA,
     )
     kwargs.update(overrides)
-    return propose(llm, **kwargs), llm
+    return propose(_deps_for(llm), **kwargs), llm
 
 
 def test_the_proposed_definitions_come_back_in_order():
@@ -39,7 +51,7 @@ def test_a_model_failure_costs_the_options_and_not_the_turn():
             raise RuntimeError("the provider is down")
 
     assert propose(
-        Broken([]), question="q", term="loyal", schema=SCHEMA
+        _deps_for(Broken([])), question="q", term="loyal", schema=SCHEMA
     ) == []
 
 
@@ -105,3 +117,40 @@ def test_an_over_long_option_is_cut_to_what_the_store_will_keep():
     options, _ = suggest([{"definitions": ["x" * (MAX_DEFINITION_CHARS + 50)]}])
 
     assert len(options[0]) == MAX_DEFINITION_CHARS
+
+
+def test_a_transient_failure_is_survived_and_still_yields_options(monkeypatch):
+    """Every other test here either succeeds on the first call or raises "the
+    provider is down", which matches no `_TRANSIENT` marker — one attempt
+    either way, so none of them would notice `resilient_call` going missing.
+    This scripts a 429 on the first attempt and a real reply on the second.
+
+    `resilient_call`'s `sleep` default is bound to `time.sleep` at import
+    time, so patching `time.sleep` itself would not reach it — the default is
+    mutated in place instead.
+    """
+    import retail_agent.llm.resilience as resilience
+
+    monkeypatch.setitem(
+        resilience.resilient_call.__kwdefaults__, "sleep", lambda seconds: None
+    )
+
+    class FlakyOnce(ScriptedLLM):
+        def __init__(self, replies):
+            super().__init__(replies)
+            self.calls = 0
+
+        def with_structured_output(self, schema, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("429 rate limit")
+            return super().with_structured_output(schema, **kwargs)
+
+    llm = FlakyOnce([{"definitions": ["3 or more orders, ever"]}])
+
+    options = propose(
+        _deps_for(llm), question="who are my loyal customers?", term="loyal", schema=SCHEMA
+    )
+
+    assert llm.calls == 2, "the first attempt failed and the second succeeded"
+    assert options == ["3 or more orders, ever"]

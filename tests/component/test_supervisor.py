@@ -143,7 +143,7 @@ def test_describe_schema_costs_no_query_and_says_what_it_found(make_deps, source
 
     deps = make_deps(src=source)
     capture = TurnCapture()
-    describe = build_schema_tool(deps, capture)[0]
+    describe = build_schema_tool(deps, capture)[0].func
 
     rendered = describe()
 

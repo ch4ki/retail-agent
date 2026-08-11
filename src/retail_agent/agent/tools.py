@@ -14,7 +14,9 @@ true as tools are added.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
+
+from langchain_core.tools import BaseTool, tool
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
@@ -57,13 +59,16 @@ class GuardRejection(Exception):
     """
 
 
-def build_analyst_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
+def build_analyst_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """Tools bound to one turn's capture.
 
-    Closures rather than methods so that `create_agent` receives plain callables
-    with docstrings — which is the tool description the model actually reads.
+    Closures rather than methods so each one can hold the turn's `deps` and
+    `capture`, and `@tool` rather than a bare function so the name, the argument
+    schema and the description the model reads are derived from the definition
+    itself — there is no second place to keep them in step.
     """
 
+    @tool
     def run_sql(sql: str) -> str:
         """Run a read-only BigQuery query against theLook and return the rows.
 
@@ -114,6 +119,7 @@ def build_analyst_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]
             step.detail = f"{frame.row_count} row(s), {result.bytes_billed} bytes"
             return _render(frame)
 
+    @tool
     def lookup_definitions(question: str) -> str:
         """Look up how the business defines the terms in a question.
 

@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Callable
+
+from langchain_core.tools import BaseTool, tool
 
 from retail_agent.agent.capture import PendingDelete, TurnCapture
 from retail_agent.agent.deps import AgentDeps
@@ -69,9 +70,10 @@ def render_manifest(pending: PendingDelete) -> str:
     )
 
 
-def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
+def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """The library tools, bound to one turn's owner and session."""
 
+    @tool
     def list_reports() -> str:
         """List the reports this executive has saved."""
         with capture.step("list_reports") as step:
@@ -84,6 +86,7 @@ def build_report_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 for r in saved
             )
 
+    @tool
     def delete_reports(term: str = "", session_scoped: bool = False) -> str:
         """Delete saved reports. Destructive, and confirmed with the user first.
 

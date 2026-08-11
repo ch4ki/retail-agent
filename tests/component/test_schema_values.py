@@ -119,6 +119,6 @@ def test_the_structural_schema_carries_no_conventions(make_deps):
     from retail_agent.agent.capture import TurnCapture
     from retail_agent.agent.schema import build_schema_tool
 
-    describe = build_schema_tool(make_deps(src=ValueSource()), TurnCapture())[0]
+    describe = build_schema_tool(make_deps(src=ValueSource()), TurnCapture())[0].func
 
     assert "NOT IN" not in describe()

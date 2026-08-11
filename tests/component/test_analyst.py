@@ -30,7 +30,7 @@ LOYAL = Trio(
 
 def subagents_for(deps, question="who are our loyal customers?"):
     capture = TurnCapture(user_id="exec", session_id="s1", question=question)
-    return {fn.__name__: fn for fn in build_subagents(deps, capture)}, capture
+    return {t.name: t.func for t in build_subagents(deps, capture)}, capture
 
 
 def test_the_executives_own_definitions_reach_the_model(make_deps):

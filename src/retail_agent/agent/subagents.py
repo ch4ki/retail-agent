@@ -1,9 +1,9 @@
 """The two subagents, offered to the supervisor as tools.
 
 `langchain` 1.3 has no subagent middleware, so a subagent here is a compiled
-`create_agent` wrapped in a plain callable. That is the whole pattern, and it is
-how every future capability arrives: a chart builder, a mailer, a web search
-each become one of these without the supervisor changing shape.
+`create_agent` wrapped in a `@tool`. That is the whole pattern, and it is how
+every future capability arrives: a chart builder, a mailer, a web search each
+become one of these without the supervisor changing shape.
 
 **analyst** owns the SQL loop. Its value is context isolation: a three-query
 analysis produces several markdown tables of tool output that the supervisor
@@ -18,9 +18,10 @@ attention.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 
 from langchain.agents import create_agent
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import BaseTool, tool
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
@@ -42,6 +43,7 @@ from retail_agent.knowledge.trios import (
     style_examples,
 )
 from retail_agent.llm.messages import message_text
+from retail_agent.llm.resilience import resilient_call
 from retail_agent.safety.egress import scan_text
 from retail_agent.store.definitions import all_definitions, personal_definitions_block
 from retail_agent.store.personas import active_body
@@ -50,7 +52,7 @@ from retail_agent.store.preferences import notes_for, preference_block
 log = logging.getLogger(__name__)
 
 
-def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
+def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """The subagent tools, bound to one turn.
 
     Built per turn rather than per process because the definitions, the persona
@@ -60,6 +62,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
     a column being added.
     """
 
+    @tool
     def analyst(question: str) -> str:
         """Query the retail data and report what it found.
 
@@ -102,6 +105,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 answer += f"\n\n{assumption_note(assumed)}"
             return answer or "I could not produce an answer to that."
 
+    @tool
     def report_writer(
         brief: str, title: str, show_to_executive: bool = True
     ) -> str:
@@ -116,18 +120,30 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
         false only for a draft you are about to rework.
         """
         with capture.step("report_writer") as step:
-            agent = create_agent(
-                model=deps.llm,
-                tools=[],
-                system_prompt=report_writer_system_prompt(deps, capture),
+            # Built once, outside the lambda `resilient_call` may invoke more
+            # than once: `report_writer_system_prompt` reads the persona
+            # store, the preference store and the trio corpus, and a retried
+            # attempt should resend the same prompt rather than re-read all
+            # three on every attempt.
+            system_prompt = report_writer_system_prompt(deps, capture)
+            # A plain call, not an agent: with no tools there is no loop for a
+            # graph to run, and `resilient_call` supplies the retry and
+            # fallback that `create_agent`'s middleware supplied to the others.
+            reply = resilient_call(
+                deps,
+                lambda model: model.invoke(
+                    [
+                        SystemMessage(system_prompt),
+                        HumanMessage(brief),
+                    ]
+                ),
             )
-            result = agent.invoke({"messages": [{"role": "user", "content": brief}]})
 
             # The last sweep before the text is shown or stored, and it happens
             # here rather than at save time because those are now the same
             # moment for one copy of the text. A report is read long after the
             # conversation that produced it, by people who were not in it.
-            scanned = scan_text(final_text(result))
+            scanned = scan_text(message_text(reply))
             report = deps.reports.save(
                 owner_id=capture.user_id,
                 session_id=capture.session_id,
@@ -149,6 +165,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 f"({len(report.body)} chars).\n{shown}"
             )
 
+    @tool
     def ask_about_report(report_id: str, question: str) -> str:
         """Answer a question about a report the executive has saved.
 
@@ -171,20 +188,23 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 )
 
             step.detail = f"{report.id}, {len(report.body)} chars"
-            agent = create_agent(
-                model=deps.llm,
-                tools=[],
-                system_prompt=REPORT_QA_PROMPT.format(
-                    persona=active_body(deps.personas) or PERSONA_DEFAULT,
-                    safety=SAFETY_RULES,
-                    title=report.title,
-                    report=report.body,
+            reply = resilient_call(
+                deps,
+                lambda model: model.invoke(
+                    [
+                        SystemMessage(
+                            REPORT_QA_PROMPT.format(
+                                persona=active_body(deps.personas) or PERSONA_DEFAULT,
+                                safety=SAFETY_RULES,
+                                title=report.title,
+                                report=report.body,
+                            )
+                        ),
+                        HumanMessage(question),
+                    ]
                 ),
             )
-            result = agent.invoke(
-                {"messages": [{"role": "user", "content": question}]}
-            )
-            return final_text(result) or "I could not find that in the report."
+            return message_text(reply) or "I could not find that in the report."
 
     return [analyst, report_writer, ask_about_report]
 

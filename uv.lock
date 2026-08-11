@@ -2163,7 +2163,6 @@ dependencies = [
     { name = "rich" },
     { name = "sqlalchemy" },
     { name = "sqlglot" },
-    { name = "tenacity" },
 ]
 
 [package.dev-dependencies]
@@ -2195,7 +2194,6 @@ requires-dist = [
     { name = "rich", specifier = ">=14.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.36" },
     { name = "sqlglot", specifier = ">=27.0.0" },
-    { name = "tenacity", specifier = ">=9.0.0" },
 ]
 
 [package.metadata.requires-dev]

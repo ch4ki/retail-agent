@@ -10,7 +10,8 @@ something about to write a literal into a WHERE clause.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+
+from langchain_core.tools import BaseTool, tool
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
@@ -21,7 +22,7 @@ from retail_agent.knowledge.conventions import notes_for
 log = logging.getLogger(__name__)
 
 
-def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
+def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """"What data do you have?" answered without spending anything.
 
     A tool rather than a subagent: there is no loop to run and nothing to
@@ -29,6 +30,7 @@ def build_schema_tool(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
     own words, which is also what keeps the persona applied to the answer.
     """
 
+    @tool
     def describe_schema() -> str:
         """Describe the data available: tables, columns and what they support.
 

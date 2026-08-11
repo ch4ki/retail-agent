@@ -30,7 +30,8 @@ Silent is the failure mode worth avoiding, not immediate.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+
+from langchain_core.tools import BaseTool, tool
 
 from retail_agent.agent.capture import TurnCapture
 from retail_agent.agent.deps import AgentDeps
@@ -76,9 +77,10 @@ REFUSALS = {
 }
 
 
-def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
+def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """Bound to one turn, because both tools write against its user."""
 
+    @tool
     def remember_definition(term: str, definition: str) -> str:
         """Record what a business term means for this executive.
 
@@ -112,6 +114,7 @@ def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 f"on. Now answer the original question."
             )
 
+    @tool
     def ask_for_definitions(terms: list[str]) -> str:
         """Ask the executive what a business term means, before querying.
 
@@ -147,6 +150,7 @@ def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
                 parts.append(NOBODY_TO_ASK.format(terms=", ".join(still_open)))
             return "\n\n".join(parts) or "There was nothing to settle."
 
+    @tool
     def note_preference(preference: str, evidence: str) -> str:
         """Record how this executive wants answers written.
 
@@ -188,6 +192,7 @@ def build_memory_tools(deps: AgentDeps, capture: TurnCapture) -> list[Callable]:
             step.detail = f"added {note}"
             return f"Saved: {note}. I will follow that from now on. Apply it now."
 
+    @tool
     def forget_preference(preference: str) -> str:
         """Drop a preference this executive no longer wants.
 

@@ -100,7 +100,7 @@ flowchart TB
         SUP["supervisor<br/><i>own model · persona + safety rules<br/>+ preference notes, read per model call</i>"]
     end
 
-    subgraph t2["Tier 2 — subagents: a compiled agent behind a callable"]
+    subgraph t2["Tier 2 — subagents: one compiled agent, two plain model calls"]
         AN["<b>analyst</b><br/><i>own model, own loop,<br/>own query budget</i>"]
         RW["<b>report_writer</b><br/><i>own model · NO tools</i>"]
         AR["<b>ask_about_report</b><br/><i>own model · NO tools</i>"]
@@ -174,10 +174,13 @@ the loop that spends it; the supervisor carries the approval gate because it is
 the boundary the interface can resume. Both are capped on model calls
 independently, so a runaway subagent cannot spend the supervisor's allowance.
 
-Adding a capability means adding a node at tier 1 — a plain function, or another
-compiled agent behind a callable if it needs its own loop. `analyst`,
-`report_writer` and `ask_about_report` are three instances of that one pattern,
-so extensibility is demonstrated rather than promised.
+Adding a capability means adding a node at tier 1 — a plain function, or a
+compiled agent behind a callable if it needs its own loop. `analyst` is the
+one that needs a loop, because it is the one with real tools to call and
+decide between; `report_writer` and `ask_about_report` are plain model calls,
+each a `@tool` with no tools of its own, going through `resilient_call` for the
+retry and fallback middleware gives a loop. Three tools, one of which is a
+graph, so extensibility is demonstrated rather than promised.
 
 ---
 

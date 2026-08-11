@@ -38,7 +38,7 @@ def tools_for(question, trios=(), dense=None):
         dense=dense,
     )
     capture = TurnCapture(user_id="dana", session_id="s1", question=question)
-    return {fn.__name__: fn for fn in build_memory_tools(deps, capture)}, deps, capture
+    return {t.name: t.func for t in build_memory_tools(deps, capture)}, deps, capture
 
 
 def test_a_quoted_preference_is_saved_in_the_users_own_words():
@@ -125,7 +125,7 @@ def test_a_store_failure_costs_the_preference_not_the_turn():
             raise RuntimeError("postgres is down")
 
     object.__setattr__(deps, "preferences", Broken())
-    tools = {fn.__name__: fn for fn in build_memory_tools(deps, capture)}
+    tools = {t.name: t.func for t in build_memory_tools(deps, capture)}
 
     answer = tools["note_preference"]("keep answers brief", "keep it brief")
 
@@ -204,7 +204,7 @@ def test_a_definition_store_failure_costs_the_memory_not_the_turn():
             raise RuntimeError("postgres is down")
 
     object.__setattr__(deps, "definitions", Broken())
-    tools = {fn.__name__: fn for fn in build_memory_tools(deps, capture)}
+    tools = {t.name: t.func for t in build_memory_tools(deps, capture)}
 
     answer = tools["remember_definition"]("loyal", "three orders")
 

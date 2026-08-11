@@ -26,6 +26,7 @@ import logging
 
 from pydantic import BaseModel, Field
 
+from retail_agent.llm.resilience import resilient_call
 from retail_agent.store.definitions import MAX_DEFINITION_CHARS
 
 log = logging.getLogger(__name__)
@@ -68,14 +69,20 @@ class Proposals(BaseModel):
 
 
 def propose(
-    llm,
+    deps,
     *,
     question: str,
     term: str,
     schema: str,
     settled: dict[str, str] | None = None,
 ) -> list[str]:
-    """Definitions to offer for `term`. Never raises, never blocks the prompt."""
+    """Definitions to offer for `term`. Never raises, but can make the caller
+    wait: it goes through `resilient_call`, so with `llm_retry_attempts`
+    defaulting to 3 and a fallback configured, a provider brown-out can cost
+    up to two backoffs (0.5s + 1.0s) before this degrades to the empty list —
+    on top of each attempt's own network timeout. `cli/chat.py` shows no
+    spinner while that happens.
+    """
     prompt = PROMPT.format(
         question=question,
         term=term,
@@ -85,7 +92,12 @@ def propose(
     )
 
     try:
-        reply = llm.with_structured_output(Proposals).invoke(prompt)
+        # Through `resilient_call` so a transient blip costs a wait rather than
+        # the options: this used to be the one model call in the system with no
+        # retry and no fallback behind it.
+        reply = resilient_call(
+            deps, lambda model: model.with_structured_output(Proposals).invoke(prompt)
+        )
     except Exception as err:
         # Includes the schema rejecting the reply, which is the same outcome
         # from the user's side: no options, and the two fixed choices remain.
