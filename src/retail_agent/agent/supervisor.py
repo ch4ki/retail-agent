@@ -19,6 +19,7 @@ from retail_agent.agent.memory import build_memory_tools
 from retail_agent.agent.middleware import supervisor_middleware
 from retail_agent.agent.reports import build_report_tools
 from retail_agent.agent.schema import build_schema_tool
+from retail_agent.agent.state import TurnState
 from retail_agent.agent.subagents import build_subagents
 
 
@@ -63,4 +64,5 @@ def build_agent(
         middleware=supervisor_middleware(deps, capture),
         checkpointer=checkpointer,
         context_schema=TurnContext,
+        state_schema=TurnState,
     )

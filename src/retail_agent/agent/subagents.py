@@ -35,6 +35,7 @@ from retail_agent.agent.prompts import (
     SAFETY_RULES,
 )
 from retail_agent.agent.schema import render_schema_for_sql
+from retail_agent.agent.state import TurnState
 from retail_agent.agent.tools import build_analyst_tools, recall
 from retail_agent.knowledge.trios import (
     assumption_note,
@@ -96,6 +97,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
                     dataset=deps.settings.bq_dataset,
                 ),
                 middleware=analyst_middleware(deps),
+                state_schema=TurnState,
             )
             result = agent.invoke(
                 {"messages": [{"role": "user", "content": question}]},
