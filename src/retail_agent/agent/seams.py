@@ -15,7 +15,7 @@ from typing import Any
 from langgraph.checkpoint.memory import MemorySaver
 
 from retail_agent.agent.capture import TurnCapture
-from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.subagents import final_text
 from retail_agent.agent.supervisor import build_agent
 from retail_agent.evals.runner import AgentAnswer
@@ -82,7 +82,9 @@ def ask_once(
         config["callbacks"] = [usage]
 
     result = agent.invoke(
-        {"messages": [{"role": "user", "content": question}]}, config=config
+        {"messages": [{"role": "user", "content": question}]},
+        config=config,
+        context=TurnContext(user_id=user, session_id=session, turn_id=capture.turn_id),
     )
 
     # A turn paused for a delete confirmation never produces a number. Recorded

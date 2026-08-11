@@ -14,7 +14,7 @@ from langchain.agents import create_agent
 from langchain_core.tools import BaseTool
 
 from retail_agent.agent.capture import TurnCapture
-from retail_agent.agent.deps import AgentDeps
+from retail_agent.agent.deps import AgentDeps, TurnContext
 from retail_agent.agent.memory import build_memory_tools
 from retail_agent.agent.middleware import supervisor_middleware
 from retail_agent.agent.reports import build_report_tools
@@ -62,4 +62,5 @@ def build_agent(
         tools=build_tools(deps, capture, pause_for_definitions=pause_for_definitions),
         middleware=supervisor_middleware(deps, capture),
         checkpointer=checkpointer,
+        context_schema=TurnContext,
     )

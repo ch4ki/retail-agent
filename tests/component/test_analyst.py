@@ -189,3 +189,51 @@ def test_the_report_writer_cannot_reach_the_data(make_deps):
 
     assert "Revenue rose" in deps.reports.list_reports(owner_id="exec")[0].body
     assert deps.llm.bound_tools == []
+
+
+def test_the_analyst_inherits_the_parent_runs_config(make_deps):
+    """Finding 5. The nested `agent.invoke` used to pass no config, so the
+    subagent's model calls reached the parent's callbacks only by contextvar
+    propagation — which holds for synchronous Python and silently stops the
+    moment anything moves behind a thread or an async boundary. The eval's
+    token accounting is what breaks first, and it breaks quietly.
+
+    Contextvar propagation makes the two implementations behave identically in
+    this path, so this asserts the config is threaded explicitly rather than
+    asserting an observable difference.
+    """
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    from retail_agent.agent.capture import TurnCapture
+    from retail_agent.agent.deps import TurnContext
+    from retail_agent.agent.supervisor import build_agent
+
+    class Counting(BaseCallbackHandler):
+        def __init__(self):
+            self.starts = 0
+
+        def on_chat_model_start(self, *args, **kwargs):
+            self.starts += 1
+
+    deps = make_deps(
+        script=[
+            [("analyst", {"question": "how many orders?"})],
+            [("run_sql", {"sql": "SELECT COUNT(*) FROM orders"})],
+            "Nine.",
+            "Nine.",
+        ]
+    )
+    counting = Counting()
+    capture = TurnCapture(question="how many orders?")
+    agent = build_agent(deps, capture)
+
+    agent.invoke(
+        {"messages": [{"role": "user", "content": "how many orders?"}]},
+        {"callbacks": [counting]},
+        context=TurnContext(user_id="exec", session_id="s1", turn_id="t1"),
+    )
+
+    assert counting.starts >= 3, (
+        "the supervisor's calls and the analyst subagent's calls should all "
+        f"reach the parent's callbacks; saw {counting.starts}"
+    )

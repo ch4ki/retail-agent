@@ -23,6 +23,7 @@ from langgraph.types import Command
 from rich.console import Console
 
 from retail_agent.agent.capture import TurnCapture
+from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.subagents import final_text
 from retail_agent.agent.supervisor import build_agent
 from retail_agent.bootstrap import build_deps
@@ -384,6 +385,7 @@ def _answer(console, deps, saver, user, session_id, question):
     """
     capture = TurnCapture(user_id=user, session_id=session_id, question=question)
     config = {"configurable": {"thread_id": session_id}}
+    context = TurnContext(user_id=user, session_id=session_id, turn_id=capture.turn_id)
 
     try:
         # Inside the guard, not above it: assembling the agent reads the persona
@@ -396,7 +398,9 @@ def _answer(console, deps, saver, user, session_id, question):
         )
         with console.status("thinking…"):
             result = agent.invoke(
-                {"messages": [{"role": "user", "content": question}]}, config
+                {"messages": [{"role": "user", "content": question}]},
+                config,
+                context=context,
             )
 
         # Two things pause a turn: `delete_reports` and `ask_for_definitions`,
@@ -405,7 +409,7 @@ def _answer(console, deps, saver, user, session_id, question):
         while _pending(result):
             resume = _decide(console, deps, result, capture)
             with console.status("working…"):
-                result = agent.invoke(Command(resume=resume), config)
+                result = agent.invoke(Command(resume=resume), config, context=context)
     except Exception as err:  # the REPL must survive anything
         # Full detail goes to the log; the user gets one actionable line. The
         # turn id makes a complaint a single lookup rather than an

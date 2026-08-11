@@ -43,3 +43,22 @@ class AgentDeps:
     # Optional second ranker for retrieval. None means lexical only, which is
     # the default and needs no model and no provider.
     dense: object | None = None
+
+
+@dataclass(frozen=True)
+class TurnContext:
+    """Who is asking, and which turn this is. Supplied per run.
+
+    Three strings and nothing else. On the LangGraph server this arrives from
+    the API request body, so anything unserialisable here would not survive the
+    trip — never put `deps`, a store or a client on it.
+
+    Identity lives here rather than on `TurnCapture` because it is fixed for a
+    run and set by the caller: never accumulated, never merged, never needing a
+    reducer. That is exactly what runtime context is for, and it is what lets
+    one compiled graph serve two users.
+    """
+
+    user_id: str = ""
+    session_id: str = ""
+    turn_id: str = ""

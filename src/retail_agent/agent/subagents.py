@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 
 from langchain.agents import create_agent
+from langchain.tools import ToolRuntime
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, tool
 
@@ -63,7 +64,7 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
     """
 
     @tool
-    def analyst(question: str) -> str:
+    def analyst(question: str, runtime: ToolRuntime | None = None) -> str:
         """Query the retail data and report what it found.
 
         Pass the executive's question in full, keeping every business term
@@ -96,7 +97,10 @@ def build_subagents(deps: AgentDeps, capture: TurnCapture) -> list[BaseTool]:
                 ),
                 middleware=analyst_middleware(deps),
             )
-            result = agent.invoke({"messages": [{"role": "user", "content": question}]})
+            result = agent.invoke(
+                {"messages": [{"role": "user", "content": question}]},
+                config=runtime.config if runtime is not None else None,
+            )
 
             answer = final_text(result)
             if assumed:
