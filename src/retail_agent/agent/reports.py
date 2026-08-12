@@ -148,10 +148,6 @@ def build_report_tools(deps: AgentDeps) -> list[BaseTool]:
             answer = f"I found no reports{described} to delete."
             return _reply(runtime, answer, "delete_reports", started, detail)
 
-        if runtime.stream_writer:
-            runtime.stream_writer(
-                {"progress": f"{len(pending.report_ids)} report(s) matched"}
-            )
         decision = interrupt(
             {
                 "kind": "delete_reports",
@@ -160,6 +156,20 @@ def build_report_tools(deps: AgentDeps) -> list[BaseTool]:
                 "token": pending.token,
             }
         )
+        # After `interrupt()`, not before: this whole function body replays
+        # from the top on resume (see the comment above `pending`), and
+        # `interrupt()` only pauses the first time through — the resuming
+        # call gets `decision` back immediately and keeps going. Emitting the
+        # progress line before `interrupt()` meant it printed once while
+        # pausing and again on replay, the second time after the executive
+        # had already answered — "1 report(s) matched" appearing again right
+        # after they typed anything-but-the-token could read as the deletion
+        # having gone ahead anyway. Here, it runs exactly once: this line is
+        # never reached on the call that pauses, only on the one that resumes.
+        if runtime.stream_writer:
+            runtime.stream_writer(
+                {"progress": f"{len(pending.report_ids)} report(s) matched"}
+            )
         if not decision.get("approved"):
             detail = "rejected"
             answer = "Nothing was deleted."

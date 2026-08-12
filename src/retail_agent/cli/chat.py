@@ -409,10 +409,31 @@ def _stream_turn(console, agent, payload, config, context) -> str:
       own internal model call leaking through the shared callback context (see
       `_SUPERVISOR_NODE`'s comment) — skipped by node, since `isinstance`
       alone cannot tell it apart from the real answer.
+
+    Two more things a per-chunk stream gets wrong if handled the same way a
+    whole message is:
+
+    - `message_text` ends in `.strip()`, correct for a whole reply but wrong
+      per chunk — stripping every chunk eats the space it carries at its own
+      edge, and concatenating stripped chunks glues words together with none
+      between them. `chunk_text` is the same content-block handling without
+      the strip.
+    - The supervisor's own node can run more than once in a turn — a real
+      model routinely narrates before a tool call ("Let me look that up.")
+      and again before the next, and each of those is its own `AIMessage`,
+      not a continuation of the last. `parts` resets whenever `message.id`
+      changes, so the answer this returns is the FINAL supervisor message —
+      the one `final_text(agent.get_state(config).values)` would also read —
+      not every one of them glued together. The narration still reaches the
+      console as it streams; it just does not end up in the returned answer.
     """
     from langchain_core.messages import AIMessage
 
+    from retail_agent.llm.messages import chunk_text
+
     parts: list[str] = []
+    current_message_id: object = None
+    mid_line = False
     # Every `AIMessage` chunk's node, seen regardless of the filter below —
     # if the supervisor's own node is never among them, the name this filter
     # relies on has changed, and silently rendering nothing would be a worse
@@ -422,7 +443,25 @@ def _stream_turn(console, agent, payload, config, context) -> str:
         payload, config, context=context, stream_mode=["messages", "custom"]
     ):
         if mode == "custom":
-            console.print(f"[dim]{chunk.get('progress', chunk)}[/dim]")
+            if mid_line:
+                # The last thing printed was an answer or narration token,
+                # left mid-line by `end=""` below. Left alone, this progress
+                # line would glue onto it: "Let me look that up.1 row(s)...".
+                console.print()
+                mid_line = False
+            # `markup=False, highlight=False`: `chunk["progress"]` can embed
+            # a tool's own text (a report title, a search term) verbatim, and
+            # that text is not console markup. Unescaped, a stray `[/bold]`
+            # in it does not just print wrong — it raises `MarkupError` and
+            # takes the whole turn down with it (see the answer print below).
+            # `style="dim"` gets the same look the old `[dim]...[/dim]`
+            # wrapping gave, without parsing the interpolated text as markup.
+            console.print(
+                str(chunk.get("progress", chunk)),
+                style="dim",
+                markup=False,
+                highlight=False,
+            )
         elif mode == "messages":
             message, meta = chunk
             if isinstance(message, AIMessage):
@@ -432,17 +471,28 @@ def _stream_turn(console, agent, payload, config, context) -> str:
                 node = str(meta.get("langgraph_node"))
                 seen_nodes.add(node)
                 if node == _SUPERVISOR_NODE:
-                    text = message_text(message)
+                    if message.id != current_message_id:
+                        # A new supervisor message has started — narration
+                        # from an earlier one in this same turn is not part
+                        # of the answer this function returns.
+                        parts = []
+                        current_message_id = message.id
+                    text = chunk_text(message)
                     if text:
                         parts.append(text)
-                        console.print(text, end="")
+                        # `markup=False, highlight=False`: the model's own
+                        # words are not console markup either, for the same
+                        # reason as the progress line above — see C3 in the
+                        # streaming-the-turn review.
+                        console.print(text, end="", markup=False, highlight=False)
+                        mid_line = True
     if seen_nodes and _SUPERVISOR_NODE not in seen_nodes:
         raise RuntimeError(
             f"expected an AIMessage chunk from node {_SUPERVISOR_NODE!r}, saw "
             f"only {sorted(seen_nodes)} — the supervisor's node name changed "
             "and _stream_turn's filter needs updating, not silent dropping."
         )
-    if parts:
+    if mid_line:
         console.print()
     return "".join(parts)
 

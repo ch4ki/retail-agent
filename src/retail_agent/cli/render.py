@@ -119,8 +119,26 @@ def render_definition_prompt(
 
 
 def render_error(console: Console, message: str, turn_id: str = "") -> None:
+    """The one panel every failed turn ends on.
+
+    `message` can hold a provider's own error text (`describe_llm_error`
+    embeds it verbatim after redaction) or, upstream of this function, a
+    model-supplied string reaching it through some other path — neither is
+    console markup, and an unmatched `[/bold]` in it is not just cosmetic:
+    Rich's markup parser raises `MarkupError` on a stray closing tag, and
+    that would escape `_answer`'s own exception handling because it happens
+    *inside* the call that reports the turn already failed. `escape()` is
+    the same guard `_vet_definition` uses on typed input for the same
+    reason — the panel must not be able to raise from what it is showing.
+    `turn_id` is ours, not the model's, so its `[dim]...[/dim]` wrapping is
+    left as real markup.
+    """
+    from rich.markup import escape
+
     suffix = f"\n\n[dim]turn {turn_id}[/dim]" if turn_id else ""
-    console.print(Panel(f"{message}{suffix}", title="Something went wrong", style="red"))
+    console.print(
+        Panel(f"{escape(message)}{suffix}", title="Something went wrong", style="red")
+    )
 
 
 def render_banner(
