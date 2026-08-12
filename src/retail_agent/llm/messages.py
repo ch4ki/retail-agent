@@ -26,6 +26,29 @@ def message_text(message: Any) -> str:
     return str(content).strip()
 
 
+def chunk_text(message: Any) -> str:
+    """The text of one streamed chunk, whatever content shape it arrived in.
+
+    Same content-block handling as `message_text` — a chunk's `content` is
+    string on OpenAI, a list of blocks on Gemini, exactly like a whole
+    message's — but deliberately without the `.strip()`. `message_text`'s
+    strip is correct for a whole reply; applied per chunk it eats the leading
+    or trailing space every chunk but the first and last actually carries, so
+    concatenating stripped chunks glues words together with no space between
+    them. Only `_stream_turn` should call this; every other reader wants the
+    normalised, stripped text `message_text` gives.
+    """
+    content = getattr(message, "content", message)
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        return "".join(_block_text(block) for block in content)
+
+    return str(content)
+
+
 def _block_text(block: Any) -> str:
     if isinstance(block, str):
         return block

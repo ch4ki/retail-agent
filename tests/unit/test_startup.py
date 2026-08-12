@@ -155,13 +155,13 @@ def test_both_entry_points_use_the_same_wiring():
 # --- the deployment entrypoint ---
 #
 # `langgraph_api` invokes a graph factory once per request
-# (langgraph_api/graph.py:390), passing that run's config. These tests pin the
+# (langgraph_api/graph.py:397), passing that run's config. These tests pin the
 # three properties that depend on: one dependency container per process, one
 # freshly compiled agent per run, and no persistence of our own.
 
 
 def test_the_factory_takes_exactly_a_config():
-    """`langgraph_api/_factory_utils.py:91-140` classifies a factory by its
+    """`langgraph_api/_factory_utils.py:92-142` classifies a factory by its
     signature. A second parameter would be read as a `ServerRuntime` and fail
     to resolve. Checked directly rather than through that private helper."""
     import inspect
@@ -243,9 +243,9 @@ def test_the_expensive_dependencies_are_built_once(_fake_deps, monkeypatch):
 
 
 def test_the_returned_graph_carries_no_persistence(_fake_deps):
-    """`langgraph_api/graph.py:801-822` raises under `langgraph dev` if the
+    """`langgraph_api/graph.py:808-828` raises under `langgraph dev` if the
     graph has a checkpointer or a store; the server injects its own at
-    graph.py:402. The assertion mirrors that isinstance check exactly."""
+    graph.py:377-385. The assertion mirrors that isinstance check exactly."""
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.store.base import BaseStore
 
@@ -394,4 +394,78 @@ def test_only_the_analyst_is_an_agent():
         "exactly one subagent should compile a graph — the analyst, which has "
         "real tools. A tool-less capability belongs in a plain model call "
         f"through `resilient_call`. Found {total} call(s) across: {counts}"
+    )
+
+
+def test_the_process_deps_are_built_off_the_event_loop(monkeypatch):
+    """`langgraph dev` runs BlockBuster, which raises on a blocking call made
+    from the loop thread — and it does: `BlockingError: Blocking call to
+    os.read`, on the first run.
+
+    Constructing the BigQuery client resolves Google's application default
+    credentials, and for authorized-user credentials (`gcloud auth
+    application-default login`) `google/auth/_default.py` falls through to
+    `_cloud_sdk.get_project_id()`, which shells out to `gcloud`. The
+    credentials file carries no project of its own, so that fallback is not an
+    edge case — it is the normal path for a developer.
+
+    `make_graph` is called per request by `langgraph_api`, from the loop. So
+    the construction has to happen somewhere BlockBuster tolerates, and it only
+    raises when `asyncio.get_running_loop()` succeeds.
+    """
+    import asyncio
+
+    from retail_agent.agent import studio
+
+    where = {}
+
+    def spy():
+        try:
+            asyncio.get_running_loop()
+            where["on_loop_thread"] = True
+        except RuntimeError:
+            where["on_loop_thread"] = False
+        return build_deps(_settings(), llm=_bindable(), source=_schema_only())
+
+    monkeypatch.setattr(studio, "_build_process_deps", spy)
+    studio._process_deps.cache_clear()
+
+    async def drive():
+        return studio.make_graph({"configurable": {"thread_id": "t", "user_id": "u"}})
+
+    try:
+        assert asyncio.run(drive())
+    finally:
+        studio._process_deps.cache_clear()
+
+    assert where["on_loop_thread"] is False, (
+        "deps were built on the event loop thread; BlockBuster will kill the "
+        "first request under `langgraph dev`"
+    )
+
+
+def test_the_process_deps_skip_the_thread_when_there_is_no_loop(monkeypatch):
+    """The CLI and the eval have no loop to protect, and paying for a thread
+    per process start to protect nothing would be cargo cult."""
+    import threading
+
+    from retail_agent.agent import studio
+
+    seen = {}
+
+    def spy():
+        seen["thread"] = threading.current_thread()
+        return build_deps(_settings(), llm=_bindable(), source=_schema_only())
+
+    monkeypatch.setattr(studio, "_build_process_deps", spy)
+    studio._process_deps.cache_clear()
+
+    try:
+        assert studio.make_graph({"configurable": {"thread_id": "t", "user_id": "u"}})
+    finally:
+        studio._process_deps.cache_clear()
+
+    assert seen["thread"] is threading.current_thread(), (
+        "deps were built on a worker thread even though no loop was running "
+        "to protect — the no-loop shortcut is being skipped"
     )

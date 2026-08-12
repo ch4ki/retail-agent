@@ -99,10 +99,22 @@ def build_subagents(deps: AgentDeps) -> list[BaseTool]:
             middleware=analyst_middleware(deps),
             state_schema=TurnState,
         )
-        result = agent.invoke(
+        # Streamed, not invoked: a `stream_writer` inside the subagent
+        # writes into a stream nobody reads, so `run_sql`'s progress would
+        # never reach the executive. The final `values` chunk is the same
+        # completed state `invoke` returned, which is what the lift below
+        # carries into the parent turn.
+        result = {}
+        for mode, chunk in agent.stream(
             {"messages": [{"role": "user", "content": question}]},
             config=runtime.config,
-        )
+            stream_mode=["custom", "values"],
+        ):
+            if mode == "custom":
+                if runtime.stream_writer:
+                    runtime.stream_writer(chunk)
+            else:
+                result = chunk
 
         answer = final_text(result)
         if assumed:
@@ -176,6 +188,8 @@ def build_subagents(deps: AgentDeps) -> list[BaseTool]:
             (runtime.state or {}).get("trio_ids", []),
             user_id=runtime.context.user_id,
         )
+        if runtime.stream_writer:
+            runtime.stream_writer({"progress": f"writing '{title}'…"})
         # A plain call, not an agent: with no tools there is no loop for a
         # graph to run, and `resilient_call` supplies the retry and fallback
         # that `create_agent`'s middleware supplied to the others.
@@ -264,6 +278,8 @@ def build_subagents(deps: AgentDeps) -> list[BaseTool]:
             )
 
         detail = f"{report.id}, {len(report.body)} chars"
+        if runtime.stream_writer:
+            runtime.stream_writer({"progress": f"reading '{report.title}'…"})
         reply = resilient_call(
             deps,
             lambda model: model.invoke(

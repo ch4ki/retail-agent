@@ -100,6 +100,9 @@ def run_trios(argv, *, console: Console | None = None, store=None) -> int:
         console.print(f"The corpus is up to date — {len(SEED_TRIOS)} trios.")
         return 0
 
+    # `trio_id` is the corpus's own identifier and `state` is one of
+    # `seed_drift`'s fixed labels ("missing", "differs", ...) — both ours,
+    # not free text a model or an analyst typed, so left as real markup.
     for trio_id, state in sorted(drift.items()):
         console.print(f"  [bold]{trio_id}[/bold] — {state}")
 
@@ -153,11 +156,22 @@ def _migrate(*, console: Console | None = None) -> int:
 
 
 def render_error(console: Console, message: str, turn_id: str = "") -> None:
-    """Local copy so `migrate` does not import the render module's dependencies."""
+    """Local copy so `migrate` does not import the render module's dependencies.
+
+    `message` embeds `str(err)` verbatim (see both call sites above) — a
+    database or corpus-store exception, which is not console markup and can
+    still carry a `[...]`-shaped fragment (a relation name, a URL). Escaped
+    for the same reason `cli/render.render_error` escapes its own `message`:
+    an unmatched tag here raises `MarkupError` out of the one panel this
+    function exists to show without raising.
+    """
+    from rich.markup import escape
     from rich.panel import Panel
 
     suffix = f"\n\n[dim]turn {turn_id}[/dim]" if turn_id else ""
-    console.print(Panel(f"{message}{suffix}", title="Something went wrong", style="red"))
+    console.print(
+        Panel(f"{escape(message)}{suffix}", title="Something went wrong", style="red")
+    )
 
 
 if __name__ == "__main__":

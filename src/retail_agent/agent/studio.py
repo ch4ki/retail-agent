@@ -1,7 +1,10 @@
 """The deployment entrypoint — `langgraph dev`, `langgraph build`, `langgraph up`.
 
+Upstream line numbers below were re-verified against langgraph-api 0.12.3; they
+drift on upgrade, so treat a mismatch as stale documentation, not as a finding.
+
 `langgraph_api` invokes a graph factory once per request rather than once at
-registration (`langgraph_api/graph.py:390`), handing it that run's config. So
+registration (`langgraph_api/graph.py:397`), handing it that run's config. So
 this module exports a factory rather than a graph, and the split between what
 is built per process and what is built per run is the whole design:
 
@@ -12,9 +15,11 @@ is built per process and what is built per run is the whole design:
   `TurnState`), not something a shared object could attribute to the wrong
   thread.
 
-No checkpointer and no store are attached. The server injects both after this
-returns (`graph.py:402`), and supplying our own is a hard `ValueError` under
-`langgraph dev` (`graph.py:801`). That constraint outlives this module: nothing
+No checkpointer and no store are attached. The server supplies both itself, by
+writing them into the `configurable` of the very config it then hands this
+factory (`graph.py:377-385`, immediately before the `invoke_factory` call), and
+supplying our own is a hard `ValueError` under `langgraph dev`
+(`graph.py:808-828`). That constraint outlives this module: nothing
 downstream may attach persistence here either.
 
 It does not construct `AgentDeps` itself, for a reason worth keeping: a second
@@ -24,7 +29,10 @@ to only one path. `build_deps` is the one place.
 
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from itertools import count
 
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.supervisor import build_agent
@@ -35,19 +43,11 @@ from retail_agent.llm.provider import build_models
 from retail_agent.obs.tracing import configure_tracing
 
 
-@lru_cache(maxsize=1)
-def _process_deps() -> AgentDeps:
-    """Everything expensive, built once for the life of the process.
+def _build_process_deps() -> AgentDeps:
+    """The construction itself. Blocking, by way of the BigQuery client.
 
     Tracing is configured from in here rather than at import, so its os.environ
     write happens on the first request and happens once.
-
-    `lru_cache` only serialises the dict update, not this function body, so
-    two concurrent first requests can both miss the cache and both call
-    `build_deps` before either result is stored — one of the two built
-    `AgentDeps` is then discarded. Harmless here (`AgentDeps` is frozen and
-    nothing it holds is mutated), but "built once" is a description of the
-    common case, not a guarantee.
     """
     settings = get_settings()
     configure_tracing(settings)
@@ -58,6 +58,74 @@ def _process_deps() -> AgentDeps:
         llm_fallbacks=fallbacks,
         source=BigQuerySource(settings),
     )
+
+
+_pool_ids = count()
+
+
+@lru_cache(maxsize=1)
+def _process_deps() -> AgentDeps:
+    """Everything expensive, built once for the life of the process.
+
+    Built on a worker thread whenever an event loop is running, and directly
+    otherwise. `make_graph` is called per request by `langgraph_api`, which
+    calls it from the loop — and constructing the BigQuery client resolves
+    Google's application default credentials, which for authorized-user
+    credentials (`gcloud auth application-default login`) shells out to
+    `gcloud config get project`: `google/auth/_default.py` falls through to
+    `_cloud_sdk.get_project_id()` whenever the credentials file carries no
+    project of its own, which an authorized-user file never does.
+
+    A blocking subprocess on the loop thread is exactly what `langgraph dev`'s
+    BlockBuster exists to catch, and it caught it — `BlockingError: Blocking
+    call to os.read` on the first run. BlockBuster only raises when
+    `asyncio.get_running_loop()` succeeds (`blockbuster.py:77-79`), so a worker
+    thread is enough; the loop still waits for the result, but it waits once
+    per process rather than dying.
+
+    `lru_cache` only serialises the dict update, not this function body, so
+    two concurrent first requests can both miss the cache and both call
+    `_build_process_deps` before either result is stored — one of the two built
+    `AgentDeps` is then discarded. The discarded object itself is harmless
+    (`AgentDeps` is frozen and nothing it holds is mutated), but building it is
+    not free of side effects: `build_deps` → `build_trio_store` seeds the trio
+    table with a read-then-insert against a primary-keyed table, with no
+    upsert (`knowledge/trios.py:472`, `store/models.py:226`). Two builds racing
+    against a fresh database can both see a trio absent and both INSERT,
+    raising `IntegrityError`. That race is pre-existing and unchanged by this
+    fix — not addressed here — but "built once" is a description of the common
+    case, not a guarantee, and this is what the uncommon case can do.
+
+    `future.result()` below, and the pool's implicit `shutdown(wait=True)` on
+    `__exit__`, both block the loop thread on a `Thread.join()` — itself a
+    blocking lock acquisition BlockBuster would normally catch just as it
+    caught the subprocess call above. This works only because langgraph's dev
+    server deactivates `threading.Lock.acquire` for BlockBuster's purposes
+    (`langgraph_runtime_inmem/queue.py:346`, reasoning that anything using a
+    thread pool would be relying on it). Tightening that exemption anywhere
+    upstream would break the approach taken here.
+
+    Zero loop stall is possible in principle: `langgraph_api/asyncio.py:30-31`
+    awaits a coroutine returned by the factory, and `_factory_utils.py`'s
+    `_classify_factory` classifies by signature alone, so an `async def
+    make_graph(config)` that itself does `await asyncio.to_thread(...)` would
+    never block the loop at all. Not taken here because it changes
+    `make_graph`'s signature and needs its own `langgraph dev` verification —
+    left as a follow-up, not folded into this fix.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop: the CLI and the eval. Nothing to protect, so no thread.
+        return _build_process_deps()
+
+    # A unique prefix per pool: two concurrent builds would otherwise both
+    # name their single worker "deps_0", and that name is the evidence relied
+    # on elsewhere that a build went off-loop.
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix=f"deps-{next(_pool_ids)}"
+    ) as pool:
+        return pool.submit(_build_process_deps).result()
 
 
 def _deps(*, llm=None, source=None) -> AgentDeps:
@@ -100,7 +168,7 @@ def build_studio_graph(*, llm=None, source=None):
 def make_graph(config):
     """The name `langgraph.json` points at. Called once per run.
 
-    One parameter, named `config`: `_factory_utils.py:91-140` classifies a
+    One parameter, named `config`: `_factory_utils.py:92-142` classifies a
     factory by its signature, and a second parameter would be read as a
     `ServerRuntime`. Left unused otherwise — this used to resolve `user_id`
     and `thread_id` out of `config["configurable"]` and thread them into

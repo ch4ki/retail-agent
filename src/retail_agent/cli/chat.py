@@ -22,18 +22,18 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.types import Command
 from rich.console import Console
+from rich.markup import escape
 
 from retail_agent.agent.deps import TurnContext
-from retail_agent.agent.subagents import final_text
 from retail_agent.agent.supervisor import build_agent
 from retail_agent.bootstrap import build_deps
 from retail_agent.cli.render import (
-    render_answer,
     render_banner,
     render_confirmation,
     render_definition_prompt,
     render_definitions,
     render_error,
+    render_footnote,
     render_metrics,
     render_persona,
     render_personas,
@@ -378,6 +378,165 @@ def _undo(console, deps, user) -> None:
     )
 
 
+# The supervisor's own graph node, as `create_agent` names it — confirmed
+# against a live stream, not assumed: `report_writer` and `ask_about_report`
+# both make a bare `model.invoke()` inside `resilient_call`, and LangGraph
+# propagates the parent run's callback context into any Runnable invoked
+# synchronously inside a node, so those internal calls surface as `AIMessage`
+# chunks on `stream_mode="messages"` too — tagged `langgraph_node="tools"`,
+# never touching `TurnState["messages"]`. A probe against the real agent
+# (report_writer scripted, then the covering sentence) showed exactly this:
+#   AIMessage  node=model  text=''                          <- tool-call request
+#   AIMessage  node=tools  text='# Q1 Report\n\nRevenue...'  <- the leak
+#   ToolMessage node=tools text="Report ... written ..."     <- already skipped by type
+#   AIMessage  node=model  text="Here's your report."        <- the actual answer
+# The `analyst` subagent does not leak this way: it is a compiled subgraph
+# reached through `.invoke()`, which LangGraph does not auto-forward into the
+# parent's message stream.
+_SUPERVISOR_NODE = "model"
+
+
+def _stream_turn(console, agent, payload, config, context) -> str:
+    """Drive one turn, rendering as it arrives. Returns the answer text.
+
+    `messages` carries the supervisor's tokens; `custom` carries whatever a tool
+    chose to say while it worked. Only `AIMessage` chunks with content, from the
+    supervisor's own node, are the answer:
+
+    - A `ToolMessage` is the tool's receipt to the model, and `report_writer`'s
+      receipt is deliberately a covering sentence rather than the report it
+      wrote — skipped by type, not by guessing from content.
+    - An `AIMessage` from any node other than `_SUPERVISOR_NODE` is a tool's
+      own internal model call leaking through the shared callback context (see
+      `_SUPERVISOR_NODE`'s comment) — skipped by node, since `isinstance`
+      alone cannot tell it apart from the real answer.
+
+    Two more things a per-chunk stream gets wrong if handled the same way a
+    whole message is:
+
+    - `message_text` ends in `.strip()`, correct for a whole reply but wrong
+      per chunk — stripping every chunk eats the space it carries at its own
+      edge, and concatenating stripped chunks glues words together with none
+      between them. `chunk_text` is the same content-block handling without
+      the strip.
+    - The supervisor's own node can run more than once in a turn — a real
+      model routinely narrates before a tool call ("Let me look that up.")
+      and again before the next, and each of those is its own `AIMessage`,
+      not a continuation of the last. `parts` resets whenever `message.id`
+      changes, so the answer this returns is the FINAL supervisor message —
+      the one `final_text(agent.get_state(config).values)` would also read —
+      not every one of them glued together. The narration still reaches the
+      console as it streams; it just does not end up in the returned answer.
+    """
+    from langchain_core.messages import AIMessage
+
+    from retail_agent.llm.messages import chunk_text
+
+    parts: list[str] = []
+    current_message_id: object = None
+    mid_line = False
+    # Every `AIMessage` chunk's node, seen regardless of the filter below —
+    # if the supervisor's own node is never among them, the name this filter
+    # relies on has changed, and silently rendering nothing would be a worse
+    # bug than the one this replaced.
+    seen_nodes: set[str] = set()
+
+    # Held until the first thing reaches the screen, then dropped. Removing
+    # the whole-turn spinner was right — it hid three queries and a report
+    # behind one unchanging line — but it also removed the only feedback
+    # before the first token, and a turn that opens with an `analyst` call
+    # says nothing until that subagent does. `ExitStack.close()` is
+    # idempotent, so each render site below can drop it without knowing
+    # whether it is the first.
+    waiting = ExitStack()
+    waiting.enter_context(console.status("thinking…"))
+    try:
+        for mode, chunk in agent.stream(
+            payload, config, context=context, stream_mode=["messages", "custom"]
+        ):
+            if mode == "custom":
+                # First output of the turn? The wait is over.
+                waiting.close()
+                if mid_line:
+                    # The last thing printed was an answer or narration token,
+                    # left mid-line by `end=""` below. Left alone, this progress
+                    # line would glue onto it: "Let me look that up.1 row(s)...".
+                    console.print()
+                    mid_line = False
+                # `markup=False, highlight=False`: `chunk["progress"]` can embed
+                # a tool's own text (a report title, a search term) verbatim, and
+                # that text is not console markup. Unescaped, a stray `[/bold]`
+                # in it does not just print wrong — it raises `MarkupError` and
+                # takes the whole turn down with it (see the answer print below).
+                # `style="dim"` gets the same look the old `[dim]...[/dim]`
+                # wrapping gave, without parsing the interpolated text as markup.
+                console.print(
+                    str(chunk.get("progress", chunk)),
+                    style="dim",
+                    markup=False,
+                    highlight=False,
+                )
+            elif mode == "messages":
+                message, meta = chunk
+                if isinstance(message, AIMessage):
+                    # `str(...)`: a chunk with no `langgraph_node` at all must still
+                    # land somewhere sortable in `seen_nodes` below, not raise a
+                    # `TypeError` from comparing `None` against a string.
+                    node = str(meta.get("langgraph_node"))
+                    seen_nodes.add(node)
+                    if node == _SUPERVISOR_NODE:
+                        if message.id != current_message_id:
+                            # A new supervisor message has started — narration
+                            # from an earlier one in this same turn is not part
+                            # of the answer this function returns.
+                            #
+                            # Depends on every chunk of one model call sharing a
+                            # stable id and a new call getting a different one —
+                            # true for all four configured providers, and true in
+                            # general because `langchain_core`'s own streaming
+                            # loop stamps an id-less chunk with the call's
+                            # `run_id` (`chat_models.py`, `_generate_with_cache`:
+                            # `if chunk.message.id is None: chunk.message.id =
+                            # run_id`). It stops being true for a provider whose
+                            # *own* chunks already carry ids that change mid-call
+                            # — OpenAI's Responses API does this (e.g.
+                            # `resp_1` on early chunks, then `lc_run--x` on
+                            # later ones of the SAME reply) — because
+                            # `langchain_core` only fills in a missing id, it
+                            # never overrides one a provider already set. On such
+                            # a provider this silently drops every chunk before
+                            # the id change instead of resetting on a real
+                            # message boundary. Not reachable with the providers
+                            # `llm/provider.py` builds today; re-check this
+                            # assumption before pointing `LLM_PROVIDER`/
+                            # `LLM_MODEL` at a Responses-API-shaped model.
+                            parts = []
+                            current_message_id = message.id
+                        text = chunk_text(message)
+                        if text:
+                            parts.append(text)
+                            # `markup=False, highlight=False`: the model's own
+                            # words are not console markup either, for the same
+                            # reason as the progress line above — see C3 in the
+                            # streaming-the-turn review.
+                            # First output of the turn? The wait is over.
+                            waiting.close()
+                            console.print(text, end="", markup=False, highlight=False)
+                            mid_line = True
+    finally:
+        waiting.close()
+
+    if seen_nodes and _SUPERVISOR_NODE not in seen_nodes:
+        raise RuntimeError(
+            f"expected an AIMessage chunk from node {_SUPERVISOR_NODE!r}, saw "
+            f"only {sorted(seen_nodes)} — the supervisor's node name changed "
+            "and _stream_turn's filter needs updating, not silent dropping."
+        )
+    if mid_line:
+        console.print()
+    return "".join(parts)
+
+
 def _answer(console, deps, saver, user, session_id, question):
     """Run one turn. Always returns its trace, including when it fails.
 
@@ -400,20 +559,24 @@ def _answer(console, deps, saver, user, session_id, question):
         # Armed here and nowhere else: a pause needs somebody who can answer it,
         # and this is the only caller with a person at a keyboard.
         agent = build_agent(deps, checkpointer=saver, pause_for_definitions=True)
-        with console.status("thinking…"):
-            result = agent.invoke(
-                {"messages": [{"role": "user", "content": question}]},
-                config,
-                context=context,
-            )
+        answer = _stream_turn(
+            console,
+            agent,
+            {"messages": [{"role": "user", "content": question}]},
+            config,
+            context,
+        )
+        result = agent.get_state(config).values
 
         # Two things pause a turn: `delete_reports` and `ask_for_definitions`,
         # both interrupting themselves now, so `_decide` returns exactly the
         # value each one expects back — nothing here has to reshape it.
-        while _pending(result):
-            resume = _decide(console, deps, result)
-            with console.status("working…"):
-                result = agent.invoke(Command(resume=resume), config, context=context)
+        while _pending(agent, config):
+            resume = _decide(console, deps, agent, config)
+            answer = _stream_turn(
+                console, agent, Command(resume=resume), config, context
+            )
+            result = agent.get_state(config).values
     except Exception as err:  # the REPL must survive anything
         # Full detail goes to the log; the user gets one actionable line. The
         # turn id makes a complaint a single lookup rather than an
@@ -431,8 +594,13 @@ def _answer(console, deps, saver, user, session_id, question):
         # with no sign it was the wrong question.
         return _record_failure(deps, agent, config, context)
 
-    answer = final_text(result)
-    render_answer(console, answer, result, prefs=preferred(deps.preferences, user))
+    # `_stream_turn` already printed `answer` live, token by token, as it
+    # arrived — calling `render_answer` here would print it a second time
+    # through `Markdown`. Only the footnote (masking, repaired queries) still
+    # needs rendering, and only when there was an answer to attach it to,
+    # matching `render_answer`'s own `if not answer: return`.
+    if answer:
+        render_footnote(console, result, prefs=preferred(deps.preferences, user))
     # Printed here rather than left to the model, for the same reason the
     # preference note below is: what the executive was told is not something to
     # leave to whether the model remembered to say it. Below the answer, which
@@ -441,8 +609,15 @@ def _answer(console, deps, saver, user, session_id, question):
     for change in result.get("preference_changes") or []:
         # Said by the CLI rather than left to the model: a setting that changed
         # without the reader being told is the failure this design cares about.
+        # `change["note"]` is `note_preference`'s own text — the same
+        # untrusted, model-paraphrased note `render_preferences` shows and
+        # escapes later, via `/prefs` — so it is escaped here too, same
+        # reason as every other model/store text this file no longer trusts
+        # as console markup (see `_stream_turn` and `render_error`).
+        # `action` is one of two literals this codebase writes ("added",
+        # "removed"), not model text.
         console.print(
-            f"[dim]Saved {change['action']} = {change['note']} as your "
+            f"[dim]Saved {change['action']} = {escape(change['note'])} as your "
             f"default. /prefs to change it.[/dim]"
         )
     # The trace was written by the recorder middleware, on every path out. This
@@ -524,13 +699,30 @@ def _record_failure(deps, agent, config, context):
     return trace
 
 
-def _pending(result) -> bool:
-    return bool(result.get("__interrupt__"))
+def _pending(agent, config) -> bool:
+    """Whether the turn stopped for a person.
+
+    `agent.get_state(config).next` rather than an `__interrupt__` key: a
+    streamed turn's result is the state read back from the checkpointer, and
+    this is the same check `seams.ask_once` already uses.
+    """
+    return bool(agent.get_state(config).next)
 
 
-def _payload(result) -> dict:
-    """What the tool asked for."""
-    value = result["__interrupt__"][0].value
+def _payload(snapshot) -> dict:
+    """What the tool asked for.
+
+    Reads `snapshot.interrupts` rather than a `result["__interrupt__"]` key:
+    `agent.invoke` used to stamp that key onto its return value, but a streamed
+    turn's `result` is the checkpointed state, which never carries it — the
+    interrupt itself only lives on the state snapshot `get_state` returns.
+    """
+    # Not a state key: `__interrupt__` is only ever stamped onto `invoke()`'s
+    # return value, never written into the checkpoint, so there is no
+    # `snapshot.values["__interrupt__"]` to fall back to here.
+    if not snapshot.interrupts:
+        return {}
+    value = snapshot.interrupts[0].value
     return value if isinstance(value, dict) else {}
 
 
@@ -550,15 +742,22 @@ def _question_from(result) -> str:
     return ""
 
 
-def _decide(console, deps, result) -> dict:
+def _decide(console, deps, agent, config) -> dict:
     """Turn a pause into the value the tool resumes with.
 
     Dispatching on the payload's own `kind`: the tool that asked is the tool
     that named the question, so there is nothing to infer.
+
+    Takes `agent`/`config` rather than a result dict: the interrupt payload
+    lives on the state snapshot (see `_payload`), not on the checkpointed
+    values a streamed turn's `result` now is.
     """
-    payload = _payload(result)
+    snapshot = agent.get_state(config)
+    payload = _payload(snapshot)
     if payload.get("kind") == "ask_for_definitions":
-        return _settle_definitions(console, deps, _question_from(result), payload)
+        return _settle_definitions(
+            console, deps, _question_from(snapshot.values), payload
+        )
 
     if _confirm(console, payload):
         return {

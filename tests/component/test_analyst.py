@@ -241,7 +241,7 @@ def test_the_report_writer_cannot_reach_the_data(make_deps):
 
 
 def test_the_analyst_inherits_the_parent_runs_config(make_deps, monkeypatch):
-    """Finding 5. The nested `agent.invoke` used to pass no config, so the
+    """Finding 5. The nested subagent call used to pass no config, so the
     subagent's model calls reached the parent's callbacks only by contextvar
     propagation — which holds for synchronous Python and silently stops the
     moment anything moves behind a thread or an async boundary. The eval's
@@ -251,9 +251,10 @@ def test_the_analyst_inherits_the_parent_runs_config(make_deps, monkeypatch):
     subagent either way, so a test that only counts model-start events cannot
     tell the two implementations apart — deleting `config=runtime.config`
     entirely still leaves it green. What actually distinguishes them is
-    whether the nested `agent.invoke` was *handed* the parent's config, so
-    this spies on the analyst's inner `create_agent` and inspects the `config`
-    kwarg its `invoke` was called with.
+    whether the nested call was *handed* the parent's config, so this spies
+    on the analyst's inner `create_agent` and inspects the `config` kwarg its
+    `stream` was called with (Task 3 replaced the nested `invoke` with
+    `stream`, so the config now travels as a `stream` kwarg).
     """
     from retail_agent.agent import subagents as subagents_module
     from retail_agent.agent.deps import TurnContext
@@ -264,13 +265,13 @@ def test_the_analyst_inherits_the_parent_runs_config(make_deps, monkeypatch):
 
     def spying_create_agent(*args, **kwargs):
         nested_agent = real_create_agent(*args, **kwargs)
-        real_invoke = nested_agent.invoke
+        real_stream = nested_agent.stream
 
-        def spying_invoke(*invoke_args, **invoke_kwargs):
-            captured_configs.append(invoke_kwargs.get("config"))
-            return real_invoke(*invoke_args, **invoke_kwargs)
+        def spying_stream(*stream_args, **stream_kwargs):
+            captured_configs.append(stream_kwargs.get("config"))
+            return real_stream(*stream_args, **stream_kwargs)
 
-        monkeypatch.setattr(nested_agent, "invoke", spying_invoke)
+        monkeypatch.setattr(nested_agent, "stream", spying_stream)
         return nested_agent
 
     monkeypatch.setattr(subagents_module, "create_agent", spying_create_agent)
@@ -539,3 +540,41 @@ def test_the_analysts_calls_reach_the_turn(make_deps):
 
     # 1 for the nested run_sql call, +1 for the analyst call itself.
     assert result.update["calls"] == 2
+
+
+def test_progress_from_inside_the_analyst_reaches_the_caller(make_deps):
+    """`stream_writer` does not cross a nested-invoke boundary — measured. The
+    analyst has to stream its subagent and forward what it sees, or the longest
+    part of a turn stays silent."""
+    import pandas as pd
+
+    from retail_agent.agent.deps import TurnContext
+    from retail_agent.agent.supervisor import build_agent
+    from .conftest import FakeSource
+
+    source = FakeSource(frames={"default": pd.DataFrame({"n": [9]})})
+    deps = make_deps(
+        script=[
+            [("analyst", {"question": "how many?"})],
+            [("run_sql", {"sql": "SELECT COUNT(*) FROM orders"})],
+            "Nine.",
+            "Nine.",
+        ],
+        src=source,
+    )
+    agent = build_agent(deps)
+
+    progress = [
+        chunk
+        for mode, chunk in agent.stream(
+            {"messages": [{"role": "user", "content": "how many?"}]},
+            {"configurable": {"thread_id": "s1"}},
+            context=TurnContext(user_id="exec", session_id="s1", turn_id="t1"),
+            stream_mode=["custom", "values"],
+        )
+        if mode == "custom"
+    ]
+
+    assert any("row" in str(chunk).lower() for chunk in progress), (
+        f"nothing from run_sql crossed the analyst boundary; saw {progress}"
+    )

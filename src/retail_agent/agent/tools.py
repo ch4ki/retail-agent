@@ -123,6 +123,10 @@ def build_analyst_tools(deps: AgentDeps) -> list[BaseTool]:
             dropped_columns=report.dropped_columns,
             truncated=result.row_count > len(masked),
         )
+        if runtime.stream_writer:
+            runtime.stream_writer(
+                {"progress": f"{frame.row_count} row(s), {result.bytes_billed} bytes"}
+            )
         return Command(
             update={
                 "messages": [

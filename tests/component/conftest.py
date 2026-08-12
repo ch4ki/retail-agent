@@ -7,8 +7,8 @@ import pandas as pd
 import pytest
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.config import Settings
@@ -164,6 +164,53 @@ class ScriptedChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
+class StreamingScriptedChatModel(ScriptedChatModel):
+    """`ScriptedChatModel`, but replies actually stream.
+
+    `ScriptedChatModel` only implements `_generate`, so `BaseChatModel`'s
+    fallback hands `.stream()` a single whole-message chunk — no test built on
+    it can tell a streamed answer from a blocking one that merely looks
+    streamed. This implements `_stream` so a script entry arrives as several
+    `AIMessageChunk`s, word by word, the way a real provider's tokens do.
+
+    A script entry is a plain string (streamed word by word, no tool calls —
+    same as `ScriptedChatModel`), a list of `(tool_name, args)` pairs (one
+    tool-call chunk, no narration), or a `(text, calls)` tuple — narration
+    streamed first, then a chunk carrying the tool calls — for the realistic
+    case a real model does routinely: talking while it calls a tool.
+    """
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        self.prompts.append("\n".join(str(m.content) for m in messages))
+        if not self.script:
+            raise ScriptExhausted("StreamingScriptedChatModel ran out of turns")
+
+        turn = self.script.pop(0)
+        if isinstance(turn, str):
+            text, calls = turn, None
+        elif isinstance(turn, tuple):
+            text, calls = turn
+        else:
+            text, calls = None, turn
+
+        if text:
+            words = text.split(" ")
+            for index, word in enumerate(words):
+                piece = word if index == 0 else " " + word
+                yield ChatGenerationChunk(message=AIMessageChunk(content=piece))
+
+        if calls:
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_calls=[
+                        {"name": name, "args": args, "id": f"call_{index}"}
+                        for index, (name, args) in enumerate(calls)
+                    ],
+                )
+            )
+
+
 class _ScriptedStructuredChat:
     def __init__(self, model: "ScriptedChatModel", schema):
         self._model = model
@@ -272,10 +319,10 @@ def traces():
 
 @pytest.fixture
 def make_deps(settings, source, reports, traces):
-    def _make(script: list | None = None, src=None, store=None, **extra):
+    def _make(script: list | None = None, src=None, store=None, llm=None, **extra):
         return AgentDeps(
             settings=settings,
-            llm=ScriptedChatModel(script or []),
+            llm=llm if llm is not None else ScriptedChatModel(script or []),
             source=src or source,
             policy=PiiPolicy.default(),
             reports=store or reports,
