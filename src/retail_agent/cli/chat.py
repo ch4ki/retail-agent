@@ -22,6 +22,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.types import Command
 from rich.console import Console
+from rich.markup import escape
 
 from retail_agent.agent.deps import TurnContext
 from retail_agent.agent.supervisor import build_agent
@@ -475,6 +476,27 @@ def _stream_turn(console, agent, payload, config, context) -> str:
                         # A new supervisor message has started — narration
                         # from an earlier one in this same turn is not part
                         # of the answer this function returns.
+                        #
+                        # Depends on every chunk of one model call sharing a
+                        # stable id and a new call getting a different one —
+                        # true for all four configured providers, and true in
+                        # general because `langchain_core`'s own streaming
+                        # loop stamps an id-less chunk with the call's
+                        # `run_id` (`chat_models.py`, `_generate_with_cache`:
+                        # `if chunk.message.id is None: chunk.message.id =
+                        # run_id`). It stops being true for a provider whose
+                        # *own* chunks already carry ids that change mid-call
+                        # — OpenAI's Responses API does this (e.g.
+                        # `resp_1` on early chunks, then `lc_run--x` on
+                        # later ones of the SAME reply) — because
+                        # `langchain_core` only fills in a missing id, it
+                        # never overrides one a provider already set. On such
+                        # a provider this silently drops every chunk before
+                        # the id change instead of resetting on a real
+                        # message boundary. Not reachable with the providers
+                        # `llm/provider.py` builds today; re-check this
+                        # assumption before pointing `LLM_PROVIDER`/
+                        # `LLM_MODEL` at a Responses-API-shaped model.
                         parts = []
                         current_message_id = message.id
                     text = chunk_text(message)
@@ -569,8 +591,15 @@ def _answer(console, deps, saver, user, session_id, question):
     for change in result.get("preference_changes") or []:
         # Said by the CLI rather than left to the model: a setting that changed
         # without the reader being told is the failure this design cares about.
+        # `change["note"]` is `note_preference`'s own text — the same
+        # untrusted, model-paraphrased note `render_preferences` shows and
+        # escapes later, via `/prefs` — so it is escaped here too, same
+        # reason as every other model/store text this file no longer trusts
+        # as console markup (see `_stream_turn` and `render_error`).
+        # `action` is one of two literals this codebase writes ("added",
+        # "removed"), not model text.
         console.print(
-            f"[dim]Saved {change['action']} = {change['note']} as your "
+            f"[dim]Saved {change['action']} = {escape(change['note'])} as your "
             f"default. /prefs to change it.[/dim]"
         )
     # The trace was written by the recorder middleware, on every path out. This

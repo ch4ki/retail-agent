@@ -6,8 +6,22 @@ from collections.abc import Sequence
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+
+# Every value below that comes from the model or from a store (a report
+# title, a trace answer, a persona body, a typed definition, a preference
+# note...) goes through `escape()` before it reaches an f-string that also
+# carries our own markup tags — Rich parses `[...]` in a plain string
+# regardless of whether it looks intentional, in a `console.print` call, a
+# `Panel` body, or a `Table` cell alike. Unescaped, a stray `[/bold]` in text
+# nobody but the model or a store ever wrote doesn't just print wrong: Rich's
+# parser raises `MarkupError` on it, and that can kill a turn (or, from
+# `render_trace`, the session permanently — the string is persisted, so
+# `/trace <id>` re-raises every time it's read back). Values that are ours —
+# counts, ids we generate, node names, status enums — are left as real markup
+# so their styling still works.
 
 
 def render_answer(console: Console, answer: str, state=None, prefs=None) -> None:
@@ -80,8 +94,12 @@ def render_reports(console: Console, reports) -> None:
             continue
         console.print()
         console.print(Markdown(report["body"]))
+        # The title is the model's own text (`report_writer`'s `title` arg);
+        # `report_id` is a uuid this process generated, never anyone else's
+        # text, so it is left as-is.
         console.print(
-            f"[dim]Saved as '{report['title']}' (id {report['report_id']}) · /reports[/dim]"
+            f"[dim]Saved as '{escape(report['title'])}' "
+            f"(id {report['report_id']}) · /reports[/dim]"
         )
 
 
@@ -92,8 +110,13 @@ def render_confirmation(console: Console, description: str) -> None:
     which resolved the target set against the store before pausing. A
     truncated list would mean asking someone to confirm a deletion they cannot
     see.
+
+    `description` is `render_manifest`'s text, which embeds every matched
+    report's title — the model's own text, via `report_writer` — so it goes
+    through `escape()` before it reaches the panel, the same as everywhere
+    else a title is shown.
     """
-    console.print(Panel(description, title="Confirm deletion", style="yellow"))
+    console.print(Panel(escape(description), title="Confirm deletion", style="yellow"))
 
 
 def render_definition_prompt(
@@ -106,10 +129,14 @@ def render_definition_prompt(
     something to memorise. Both are always present: the generated options can be
     empty — a model call is allowed to fail here — and a prompt with no way out
     would be a worse failure than the assumption it exists to prevent.
+
+    `term` and every `option` are the model's own text — the term it asked
+    about, and the candidate definitions it proposed — so both are escaped
+    before they reach the console.
     """
-    console.print(f"\n[bold]{term}[/bold] needs a definition\n")
+    console.print(f"\n[bold]{escape(term)}[/bold] needs a definition\n")
     for index, option in enumerate(options, 1):
-        console.print(f"  [bold cyan]{index}[/bold cyan]  {option}")
+        console.print(f"  [bold cyan]{index}[/bold cyan]  {escape(option)}")
     console.print(f"  [bold cyan]{len(options) + 1}[/bold cyan]  [dim]something else — I'll type it[/dim]")
     console.print(
         f"  [bold cyan]{len(options) + 2}[/bold cyan]  "
@@ -133,8 +160,6 @@ def render_error(console: Console, message: str, turn_id: str = "") -> None:
     `turn_id` is ours, not the model's, so its `[dim]...[/dim]` wrapping is
     left as real markup.
     """
-    from rich.markup import escape
-
     suffix = f"\n\n[dim]turn {turn_id}[/dim]" if turn_id else ""
     console.print(
         Panel(f"{escape(message)}{suffix}", title="Something went wrong", style="red")
@@ -148,6 +173,10 @@ def render_banner(
     project: str,
     tracing_project: str | None = None,
 ) -> None:
+    """`provider`/`model`/`project`/`tracing_project` all come from `Settings`
+    (env vars), not from the model or a mutable store — the operator who
+    deploys this process controls them, not anyone talking to it — so left as
+    real markup, unlike the values elsewhere in this file."""
     body = (
         "Ask about orders, products, customers or revenue.\n"
         "Type [bold]/help[/bold] for commands, [bold]/quit[/bold] to exit."
@@ -172,6 +201,14 @@ def render_trace(console: Console, trace) -> None:
     both are now a `TraceRecord` — the live one built by `trace_from_state(...)`.
     There used to be two near-identical renderers, which is how they drifted:
     only one of them showed bytes billed.
+
+    `trace.question` is what the executive typed; `trace.answer` is the
+    model's — both go through `escape()`. `intent`/`status` are fixed-vocabulary
+    labels this codebase assigns, and everything else on the header line is a
+    number, so those are left as real markup. This is also the sink the
+    `/trace <id>` command reads back from storage — an unescaped answer here
+    does not just fail once, it fails every time that stored turn is read,
+    which is the shape the C3 regression actually took.
     """
     if trace is None:
         console.print("No turn to trace yet — ask a question first.")
@@ -182,9 +219,9 @@ def render_trace(console: Console, trace) -> None:
         f"{trace.duration_ms} ms · {trace.redactions} masked · "
         f"{trace.bytes_billed} bytes · {trace.context_tokens} ctx tokens[/dim]"
     )
-    console.print(f"[dim]asked:[/dim] {trace.question}")
+    console.print(f"[dim]asked:[/dim] {escape(trace.question)}")
     if trace.answer:
-        console.print(f"[dim]answered:[/dim] {trace.answer}")
+        console.print(f"[dim]answered:[/dim] {escape(trace.answer)}")
     _render_reasons(console, trace)
     _render_events(console, trace.events)
     _render_attempts(console, trace.attempts)
@@ -197,6 +234,14 @@ def _render_reasons(console: Console, trace) -> None:
     challenged on its definition far more often than on its timings. A term
     listed as assumed is the single most useful line in a trace: it says the
     agent chose, and what it chose about.
+
+    `trace.trios` and `trace.report_ids` are ids this codebase mints — trio
+    ids from the curated corpus, report ids this process generated — so they
+    are left as real markup. `assumptions` are the model's own words about a
+    term it chose not to ask about, and a preference's `value` is the note
+    text `note_preference` recorded from the executive's own request
+    (`"keep answers under three sentences"`), so both are escaped. `field` is
+    one of a fixed, code-defined set of preference names.
     """
     if trace.trios:
         console.print(f"[dim]definitions used:[/dim] {', '.join(trace.trios)}")
@@ -205,9 +250,9 @@ def _render_reasons(console: Console, trace) -> None:
         # library, not here — this is the pointer to it.
         console.print(f"[dim]reports written:[/dim] {', '.join(trace.report_ids)}")
     if trace.assumptions:
-        console.print(f"[yellow]assumed:[/yellow] {', '.join(trace.assumptions)}")
+        console.print(f"[yellow]assumed:[/yellow] {escape(', '.join(trace.assumptions))}")
     for field, value in trace.preference_changes:
-        console.print(f"[dim]set as your default:[/dim] {field} = {value}")
+        console.print(f"[dim]set as your default:[/dim] {field} = {escape(value)}")
 
 
 def _render_events(console: Console, events) -> None:
@@ -216,6 +261,13 @@ def _render_events(console: Console, events) -> None:
     An empty list is a fact about the turn — the model answered from the
     conversation without reaching for anything — so it is stated. Printing the
     headers with nothing under them read as a renderer that had broken.
+
+    `node` is a graph node name from this codebase's own fixed topology, left
+    alone. `detail` is a free-text line a tool wrote about what it did, and
+    several tools build it from a term or a value the model or the executive
+    supplied (`ask_for_definitions`' `_describe_settled`, `note_preference`'s
+    "remembered {term}"), so it is escaped — table cells parse markup on a
+    plain string exactly like any other `console.print` target.
     """
     if not events:
         console.print("[dim]no tools were called — answered from the conversation[/dim]")
@@ -226,12 +278,21 @@ def _render_events(console: Console, events) -> None:
     table.add_column("ms", justify="right")
     table.add_column("what happened", overflow="fold")
     for node, duration_ms, detail in events:
-        table.add_row(node, str(duration_ms), detail or "")
+        table.add_row(node, str(duration_ms), escape(detail or ""))
     console.print(table)
 
 
 def _render_attempts(console: Console, attempts) -> None:
-    """Every draft, what became of it, and the query the warehouse actually saw."""
+    """Every draft, what became of it, and the query the warehouse actually saw.
+
+    `sql`/`executed_sql` are the model's own drafts. `violations` are the SQL
+    guard's messages, but they quote the offending table/column name straight
+    out of the model's SQL (`sql_guard._check_tables`/`_check_projections`),
+    and `error` is the warehouse's own message, which can likewise echo back
+    part of the query — so all four are escaped. `step_id` is one of this
+    codebase's own fixed step labels ("draft", "repair-1", ...), not model
+    text, and is left alone.
+    """
     if not attempts:
         return
 
@@ -240,19 +301,19 @@ def _render_attempts(console: Console, attempts) -> None:
         field = attempt.get
         violations, error = field("violations"), field("error")
         if violations:
-            outcome = f"[red]rejected:[/red] {'; '.join(violations)}"
+            outcome = f"[red]rejected:[/red] {escape('; '.join(violations))}"
         elif error:
-            outcome = f"[red]failed:[/red] {error}"
+            outcome = f"[red]failed:[/red] {escape(error)}"
         else:
             billed = field("bytes_billed")
             billed_text = f", {billed} bytes" if billed else ""
             outcome = f"[green]{field('row_count')} row(s){billed_text}[/green]"
 
         console.print(f"  [dim]{index}. {field('step_id')}[/dim] {outcome}")
-        console.print(f"     [dim]drafted:[/dim]  {field('sql')}")
+        console.print(f"     [dim]drafted:[/dim]  {escape(field('sql'))}")
         executed = field("executed_sql")
         if executed and executed != field("sql"):
-            console.print(f"     [dim]executed:[/dim] {executed}")
+            console.print(f"     [dim]executed:[/dim] {escape(executed)}")
 
 
 def render_metrics(console: Console, metrics: dict) -> None:
@@ -290,7 +351,12 @@ def render_metrics(console: Console, metrics: dict) -> None:
 
 
 def render_personas(console: Console, personas, active) -> None:
-    """The tone options and which one is live."""
+    """The tone options and which one is live.
+
+    `name` and `updated_by` are store text — a persona is edited outside this
+    CLI, and nothing validates what goes into either field — so both are
+    escaped even where they carry real `[bold]` styling below.
+    """
     if not personas:
         console.print("No personas saved.")
         return
@@ -302,23 +368,31 @@ def render_personas(console: Console, personas, active) -> None:
     table.add_column("updated by", style="dim")
     for persona in personas:
         live = active is not None and persona.name == active.name
+        name = escape(persona.name)
         table.add_row(
             "→" if live else " ",
-            f"[bold]{persona.name}[/bold]" if live else persona.name,
+            f"[bold]{name}[/bold]" if live else name,
             str(persona.version),
-            persona.updated_by,
+            escape(persona.updated_by),
         )
     console.print(table)
 
 
 def render_persona(console: Console, persona) -> None:
+    """`body` is the persona's full system-prompt text and `name`/`updated_by`
+    land in the panel's `title=`, which Rich parses as markup independently of
+    any `markup=` argument on the `console.print` call — so all three are
+    escaped before they reach `Panel`, not just the body."""
     if persona is None:
         console.print("No persona is active; using the built-in default.")
         return
     console.print(
         Panel(
-            persona.body,
-            title=f"{persona.name} v{persona.version} · set by {persona.updated_by}",
+            escape(persona.body),
+            title=(
+                f"{escape(persona.name)} v{persona.version} · "
+                f"set by {escape(persona.updated_by)}"
+            ),
             style="cyan",
         )
     )
@@ -331,11 +405,14 @@ def render_preferences(console: Console, prefs, notes: Sequence[str] = ()) -> No
     one typed setting is left, and the rest of what an executive asks for lives
     in their own words. Omitting them made this screen actively misleading —
     saving a note ends with "/prefs to change it", and `/prefs` did not show it.
+
+    Each `note` is `note_preference`'s recording of the executive's own
+    request, in the model's paraphrase — store text, escaped before print.
     """
     if notes:
         console.print("[bold]You have asked for[/bold]")
         for note in notes:
-            console.print(f"  • {note}")
+            console.print(f"  • {escape(note)}")
         console.print(
             "[dim]Say 'forget that', or name one, to drop it.[/dim]\n"
         )
@@ -357,6 +434,10 @@ def render_trios(console: Console, trios) -> None:
 
     Shown as definitions rather than as questions, because the definition is
     what actually changes an answer.
+
+    `trio.id` is the corpus's own identifier, left alone. `term`/`meaning` are
+    the analyst-authored content of the corpus — free text, nothing here
+    validates its shape — so both are escaped.
     """
     live = [t for t in trios if t.superseded_by is None]
     if not live:
@@ -369,7 +450,7 @@ def render_trios(console: Console, trios) -> None:
     table.add_column("meaning", overflow="fold")
     for trio in live:
         for index, (term, meaning) in enumerate(sorted(trio.metric_definitions.items())):
-            table.add_row(trio.id if index == 0 else "", term, meaning)
+            table.add_row(trio.id if index == 0 else "", escape(term), escape(meaning))
     console.print(table)
     console.print(
         f"[dim]{len(live)} trio(s). A term with no entry here is stated as an "
@@ -382,6 +463,11 @@ def render_definitions(console: Console, definitions) -> None:
 
     Shown separately from `/trios` on purpose: these are one person's working
     definitions, not decisions the analytics team agreed.
+
+    `entry.term` and `entry.definition` are typed by this executive (or
+    accepted from a model-generated option) through `_vet_definition` — the
+    same untrusted text `render_definition_prompt` shows while it is still
+    being settled, so both are escaped here too.
     """
     if not definitions:
         console.print(
@@ -393,6 +479,6 @@ def render_definitions(console: Console, definitions) -> None:
     table.add_column("term")
     table.add_column("your definition", overflow="fold")
     for entry in definitions:
-        table.add_row(entry.term, entry.definition)
+        table.add_row(escape(entry.term), escape(entry.definition))
     console.print(table)
     console.print("[dim]/definitions forget <term> to be asked again[/dim]")

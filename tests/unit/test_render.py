@@ -14,10 +14,16 @@ from retail_agent.agent.state import attempt_record, step_event
 from retail_agent.cli.render import (
     render_answer,
     render_confirmation,
+    render_definition_prompt,
+    render_definitions,
     render_error,
     render_metrics,
+    render_persona,
+    render_personas,
+    render_preferences,
     render_reports,
     render_trace,
+    render_trios,
 )
 from retail_agent.obs.traces import trace_from_state
 
@@ -349,3 +355,212 @@ def test_prefs_with_no_notes_says_so_rather_than_showing_an_empty_table():
     render_preferences(console, Preferences(), notes=[])
 
     assert "show_attempt_footnote" in text(console), "the typed settings still render"
+
+
+# --- markup safety: every renderer that shows model- or store-supplied text ---
+
+# One string that hits both failure shapes C3 named: `[see appendix]` is a
+# well-formed-looking tag pair that markup would silently swallow if left
+# unescaped, and `[/bold]`/`[red]` are an unmatched close and an unclosed
+# open that raise `rich.errors.MarkupError` outright. A renderer that merely
+# avoids the crash but still eats the bracketed text would pass a "does not
+# raise" test and fail an executive reading their own answer back — this
+# string catches both at once.
+HOSTILE_TEXT = "Margins [/bold] held and costs [red]rose [see appendix]"
+
+
+def _hostile_render_error(console):
+    render_error(console, HOSTILE_TEXT, turn_id="abc123")
+
+
+def _hostile_app_render_error(console):
+    from retail_agent.cli import app
+
+    app.render_error(console, HOSTILE_TEXT, turn_id="abc123")
+
+
+def _hostile_confirmation(console):
+    render_confirmation(console, HOSTILE_TEXT)
+
+
+def _hostile_report_title(console):
+    render_reports(console, [written(title=HOSTILE_TEXT)])
+
+
+def _hostile_definition_prompt_term(console):
+    render_definition_prompt(console, HOSTILE_TEXT, ["a plain option"])
+
+
+def _hostile_definition_prompt_option(console):
+    render_definition_prompt(console, "loyal", [HOSTILE_TEXT])
+
+
+def _hostile_trace_question(console):
+    render_trace(console, trace_for(HOSTILE_TEXT, "a plain answer"))
+
+
+def _hostile_trace_answer(console):
+    render_trace(console, trace_for("a plain question", HOSTILE_TEXT))
+
+
+def _hostile_trace_assumption(console):
+    state = state_with(
+        messages=[HumanMessage(content="who is loyal?")], assumed_terms=[HOSTILE_TEXT]
+    )
+    render_trace(
+        console,
+        trace_from_state(state, "a.", user_id="dana", session_id="s1", turn_id="t1"),
+    )
+
+
+def _hostile_trace_preference_value(console):
+    state = state_with(
+        messages=[HumanMessage(content="q")],
+        preference_changes=[{"action": "answer_format", "note": HOSTILE_TEXT}],
+    )
+    render_trace(
+        console,
+        trace_from_state(state, "a.", user_id="dana", session_id="s1", turn_id="t1"),
+    )
+
+
+def _hostile_trace_event_detail(console):
+    state = state_with(
+        messages=[HumanMessage(content="q")],
+        events=[step_event("run_sql", 0.0, HOSTILE_TEXT)],
+    )
+    render_trace(
+        console,
+        trace_from_state(state, "a.", user_id="dana", session_id="s1", turn_id="t1"),
+    )
+
+
+def _hostile_trace_attempt_sql(console):
+    state = state_with(
+        messages=[HumanMessage(content="q")],
+        attempts=[attempt_record(sql=HOSTILE_TEXT)],
+    )
+    render_trace(
+        console,
+        trace_from_state(state, "a.", user_id="dana", session_id="s1", turn_id="t1"),
+    )
+
+
+def _hostile_trace_attempt_error(console):
+    state = state_with(
+        messages=[HumanMessage(content="q")],
+        attempts=[attempt_record(sql="SELECT 1", error=HOSTILE_TEXT)],
+    )
+    render_trace(
+        console,
+        trace_from_state(state, "a.", user_id="dana", session_id="s1", turn_id="t1"),
+    )
+
+
+def _hostile_trace_attempt_violation(console):
+    state = state_with(
+        messages=[HumanMessage(content="q")],
+        attempts=[attempt_record(sql="SELECT 1", violations=[HOSTILE_TEXT])],
+    )
+    render_trace(
+        console,
+        trace_from_state(state, "a.", user_id="dana", session_id="s1", turn_id="t1"),
+    )
+
+
+def _hostile_preferences_note(console):
+    from retail_agent.store.preferences import Preferences
+
+    render_preferences(console, Preferences(), notes=[HOSTILE_TEXT])
+
+
+def _hostile_definitions_entry(console):
+    from retail_agent.store.definitions import UserDefinition
+
+    render_definitions(
+        console, [UserDefinition(user_id="dana", term=HOSTILE_TEXT, definition="ok")]
+    )
+
+
+def _hostile_persona_body(console):
+    from retail_agent.store.personas import Persona
+
+    render_persona(console, Persona(name="analyst", body=HOSTILE_TEXT))
+
+
+def _hostile_persona_title(console):
+    from retail_agent.store.personas import Persona
+
+    render_persona(console, Persona(name=HOSTILE_TEXT, body="Write plainly."))
+
+
+def _hostile_personas_row(console):
+    from retail_agent.store.personas import Persona
+
+    render_personas(console, [Persona(name=HOSTILE_TEXT, body="x")], active=None)
+
+
+def _hostile_trios_meaning(console):
+    from retail_agent.knowledge.trios import Trio
+
+    trio = Trio(
+        id="trio-loyalty",
+        question="who is loyal?",
+        sql="SELECT 1",
+        report="r",
+        metric_definitions={"loyal": HOSTILE_TEXT},
+    )
+    render_trios(console, [trio])
+
+
+# Every renderer above that can be reached with model- or store-supplied
+# text. Table-driven so the next sink added to this file has to be added
+# here too, rather than trusted on faith — this is the test that would have
+# caught all five C3 instances the re-review found (`render_trace`'s
+# question/answer, `cli/app.py`'s second `render_error`, and
+# `render_confirmation`'s report titles) in one run instead of one at a time.
+MARKUP_HOSTILE_RENDERERS = {
+    "render_error": _hostile_render_error,
+    "app.render_error": _hostile_app_render_error,
+    "render_confirmation": _hostile_confirmation,
+    "render_reports (title)": _hostile_report_title,
+    "render_definition_prompt (term)": _hostile_definition_prompt_term,
+    "render_definition_prompt (option)": _hostile_definition_prompt_option,
+    "render_trace (question)": _hostile_trace_question,
+    "render_trace (answer)": _hostile_trace_answer,
+    "render_trace (assumption)": _hostile_trace_assumption,
+    "render_trace (preference value)": _hostile_trace_preference_value,
+    "render_trace (event detail)": _hostile_trace_event_detail,
+    "render_trace (attempt sql)": _hostile_trace_attempt_sql,
+    "render_trace (attempt error)": _hostile_trace_attempt_error,
+    "render_trace (attempt violation)": _hostile_trace_attempt_violation,
+    "render_preferences (note)": _hostile_preferences_note,
+    "render_definitions (entry)": _hostile_definitions_entry,
+    "render_persona (body)": _hostile_persona_body,
+    "render_persona (title)": _hostile_persona_title,
+    "render_personas (row)": _hostile_personas_row,
+    "render_trios (meaning)": _hostile_trios_meaning,
+}
+
+
+def test_markup_hostile_text_survives_every_renderer_intact():
+    """The class fix, proven as a class: every renderer that can show
+    model- or store-supplied text must neither raise on it nor silently drop
+    it. Table-driven rather than one test per sink, because a per-sink test
+    only proves the sinks someone thought to write a test for — this is the
+    one that would have caught all five C3 instances (and the next one)
+    without anybody having to remember to add it.
+    """
+    failures = []
+    for name, render in MARKUP_HOSTILE_RENDERERS.items():
+        console = recorder()
+        try:
+            render(console)
+        except Exception as err:  # pragma: no cover - failure path, not the happy path
+            failures.append(f"{name}: raised {err!r}")
+            continue
+        printed = text(console)
+        if HOSTILE_TEXT not in printed:
+            failures.append(f"{name}: did not print the text intact — got {printed!r}")
+
+    assert not failures, "\n".join(failures)
