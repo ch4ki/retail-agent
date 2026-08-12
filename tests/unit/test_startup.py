@@ -447,15 +447,17 @@ def test_the_process_deps_are_built_off_the_event_loop(monkeypatch):
 def test_the_process_deps_skip_the_thread_when_there_is_no_loop(monkeypatch):
     """The CLI and the eval have no loop to protect, and paying for a thread
     per process start to protect nothing would be cargo cult."""
+    import threading
+
     from retail_agent.agent import studio
 
-    calls = []
-    monkeypatch.setattr(
-        studio,
-        "_build_process_deps",
-        lambda: calls.append("built")
-        or build_deps(_settings(), llm=_bindable(), source=_schema_only()),
-    )
+    seen = {}
+
+    def spy():
+        seen["thread"] = threading.current_thread()
+        return build_deps(_settings(), llm=_bindable(), source=_schema_only())
+
+    monkeypatch.setattr(studio, "_build_process_deps", spy)
     studio._process_deps.cache_clear()
 
     try:
@@ -463,4 +465,7 @@ def test_the_process_deps_skip_the_thread_when_there_is_no_loop(monkeypatch):
     finally:
         studio._process_deps.cache_clear()
 
-    assert calls == ["built"]
+    assert seen["thread"] is threading.current_thread(), (
+        "deps were built on a worker thread even though no loop was running "
+        "to protect — the no-loop shortcut is being skipped"
+    )

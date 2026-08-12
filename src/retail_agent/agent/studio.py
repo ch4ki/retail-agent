@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from itertools import count
 
 from retail_agent.agent.deps import AgentDeps
 from retail_agent.agent.supervisor import build_agent
@@ -54,6 +55,9 @@ def _build_process_deps() -> AgentDeps:
     )
 
 
+_pool_ids = count()
+
+
 @lru_cache(maxsize=1)
 def _process_deps() -> AgentDeps:
     """Everything expensive, built once for the life of the process.
@@ -77,9 +81,32 @@ def _process_deps() -> AgentDeps:
     `lru_cache` only serialises the dict update, not this function body, so
     two concurrent first requests can both miss the cache and both call
     `_build_process_deps` before either result is stored — one of the two built
-    `AgentDeps` is then discarded. Harmless here (`AgentDeps` is frozen and
-    nothing it holds is mutated), but "built once" is a description of the
-    common case, not a guarantee.
+    `AgentDeps` is then discarded. The discarded object itself is harmless
+    (`AgentDeps` is frozen and nothing it holds is mutated), but building it is
+    not free of side effects: `build_deps` → `build_trio_store` seeds the trio
+    table with a read-then-insert against a primary-keyed table, with no
+    upsert (`knowledge/trios.py:472`, `store/models.py:226`). Two builds racing
+    against a fresh database can both see a trio absent and both INSERT,
+    raising `IntegrityError`. That race is pre-existing and unchanged by this
+    fix — not addressed here — but "built once" is a description of the common
+    case, not a guarantee, and this is what the uncommon case can do.
+
+    `future.result()` below, and the pool's implicit `shutdown(wait=True)` on
+    `__exit__`, both block the loop thread on a `Thread.join()` — itself a
+    blocking lock acquisition BlockBuster would normally catch just as it
+    caught the subprocess call above. This works only because langgraph's dev
+    server deactivates `threading.Lock.acquire` for BlockBuster's purposes
+    (`langgraph_runtime_inmem/queue.py:346`, reasoning that anything using a
+    thread pool would be relying on it). Tightening that exemption anywhere
+    upstream would break the approach taken here.
+
+    Zero loop stall is possible in principle: `langgraph_api/asyncio.py:30-31`
+    awaits a coroutine returned by the factory, and `_factory_utils.py`'s
+    `_classify_factory` classifies by signature alone, so an `async def
+    make_graph(config)` that itself does `await asyncio.to_thread(...)` would
+    never block the loop at all. Not taken here because it changes
+    `make_graph`'s signature and needs its own `langgraph dev` verification —
+    left as a follow-up, not folded into this fix.
     """
     try:
         asyncio.get_running_loop()
@@ -87,7 +114,12 @@ def _process_deps() -> AgentDeps:
         # No loop: the CLI and the eval. Nothing to protect, so no thread.
         return _build_process_deps()
 
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="deps") as pool:
+    # A unique prefix per pool: two concurrent builds would otherwise both
+    # name their single worker "deps_0", and that name is the evidence relied
+    # on elsewhere that a build went off-loop.
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix=f"deps-{next(_pool_ids)}"
+    ) as pool:
         return pool.submit(_build_process_deps).result()
 
 
