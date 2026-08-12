@@ -1,7 +1,10 @@
 """The deployment entrypoint — `langgraph dev`, `langgraph build`, `langgraph up`.
 
+Upstream line numbers below were re-verified against langgraph-api 0.12.3; they
+drift on upgrade, so treat a mismatch as stale documentation, not as a finding.
+
 `langgraph_api` invokes a graph factory once per request rather than once at
-registration (`langgraph_api/graph.py:390`), handing it that run's config. So
+registration (`langgraph_api/graph.py:397`), handing it that run's config. So
 this module exports a factory rather than a graph, and the split between what
 is built per process and what is built per run is the whole design:
 
@@ -12,9 +15,11 @@ is built per process and what is built per run is the whole design:
   `TurnState`), not something a shared object could attribute to the wrong
   thread.
 
-No checkpointer and no store are attached. The server injects both after this
-returns (`graph.py:402`), and supplying our own is a hard `ValueError` under
-`langgraph dev` (`graph.py:801`). That constraint outlives this module: nothing
+No checkpointer and no store are attached. The server supplies both itself, by
+writing them into the `configurable` of the very config it then hands this
+factory (`graph.py:377-385`, immediately before the `invoke_factory` call), and
+supplying our own is a hard `ValueError` under `langgraph dev`
+(`graph.py:808-828`). That constraint outlives this module: nothing
 downstream may attach persistence here either.
 
 It does not construct `AgentDeps` itself, for a reason worth keeping: a second
@@ -163,7 +168,7 @@ def build_studio_graph(*, llm=None, source=None):
 def make_graph(config):
     """The name `langgraph.json` points at. Called once per run.
 
-    One parameter, named `config`: `_factory_utils.py:91-140` classifies a
+    One parameter, named `config`: `_factory_utils.py:92-142` classifies a
     factory by its signature, and a second parameter would be read as a
     `ServerRuntime`. Left unused otherwise — this used to resolve `user_id`
     and `thread_id` out of `config["configurable"]` and thread them into

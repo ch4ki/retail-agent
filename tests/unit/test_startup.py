@@ -155,13 +155,13 @@ def test_both_entry_points_use_the_same_wiring():
 # --- the deployment entrypoint ---
 #
 # `langgraph_api` invokes a graph factory once per request
-# (langgraph_api/graph.py:390), passing that run's config. These tests pin the
+# (langgraph_api/graph.py:397), passing that run's config. These tests pin the
 # three properties that depend on: one dependency container per process, one
 # freshly compiled agent per run, and no persistence of our own.
 
 
 def test_the_factory_takes_exactly_a_config():
-    """`langgraph_api/_factory_utils.py:91-140` classifies a factory by its
+    """`langgraph_api/_factory_utils.py:92-142` classifies a factory by its
     signature. A second parameter would be read as a `ServerRuntime` and fail
     to resolve. Checked directly rather than through that private helper."""
     import inspect
@@ -243,9 +243,9 @@ def test_the_expensive_dependencies_are_built_once(_fake_deps, monkeypatch):
 
 
 def test_the_returned_graph_carries_no_persistence(_fake_deps):
-    """`langgraph_api/graph.py:801-822` raises under `langgraph dev` if the
+    """`langgraph_api/graph.py:808-828` raises under `langgraph dev` if the
     graph has a checkpointer or a store; the server injects its own at
-    graph.py:402. The assertion mirrors that isinstance check exactly."""
+    graph.py:377-385. The assertion mirrors that isinstance check exactly."""
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.store.base import BaseStore
 
