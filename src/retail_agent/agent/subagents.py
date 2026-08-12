@@ -99,10 +99,22 @@ def build_subagents(deps: AgentDeps) -> list[BaseTool]:
             middleware=analyst_middleware(deps),
             state_schema=TurnState,
         )
-        result = agent.invoke(
+        # Streamed, not invoked: a `stream_writer` inside the subagent
+        # writes into a stream nobody reads, so `run_sql`'s progress would
+        # never reach the executive. The final `values` chunk is the same
+        # completed state `invoke` returned, which is what the lift below
+        # carries into the parent turn.
+        result = {}
+        for mode, chunk in agent.stream(
             {"messages": [{"role": "user", "content": question}]},
             config=runtime.config,
-        )
+            stream_mode=["custom", "values"],
+        ):
+            if mode == "custom":
+                if runtime.stream_writer:
+                    runtime.stream_writer(chunk)
+            else:
+                result = chunk
 
         answer = final_text(result)
         if assumed:
