@@ -440,74 +440,92 @@ def _stream_turn(console, agent, payload, config, context) -> str:
     # relies on has changed, and silently rendering nothing would be a worse
     # bug than the one this replaced.
     seen_nodes: set[str] = set()
-    for mode, chunk in agent.stream(
-        payload, config, context=context, stream_mode=["messages", "custom"]
-    ):
-        if mode == "custom":
-            if mid_line:
-                # The last thing printed was an answer or narration token,
-                # left mid-line by `end=""` below. Left alone, this progress
-                # line would glue onto it: "Let me look that up.1 row(s)...".
-                console.print()
-                mid_line = False
-            # `markup=False, highlight=False`: `chunk["progress"]` can embed
-            # a tool's own text (a report title, a search term) verbatim, and
-            # that text is not console markup. Unescaped, a stray `[/bold]`
-            # in it does not just print wrong — it raises `MarkupError` and
-            # takes the whole turn down with it (see the answer print below).
-            # `style="dim"` gets the same look the old `[dim]...[/dim]`
-            # wrapping gave, without parsing the interpolated text as markup.
-            console.print(
-                str(chunk.get("progress", chunk)),
-                style="dim",
-                markup=False,
-                highlight=False,
-            )
-        elif mode == "messages":
-            message, meta = chunk
-            if isinstance(message, AIMessage):
-                # `str(...)`: a chunk with no `langgraph_node` at all must still
-                # land somewhere sortable in `seen_nodes` below, not raise a
-                # `TypeError` from comparing `None` against a string.
-                node = str(meta.get("langgraph_node"))
-                seen_nodes.add(node)
-                if node == _SUPERVISOR_NODE:
-                    if message.id != current_message_id:
-                        # A new supervisor message has started — narration
-                        # from an earlier one in this same turn is not part
-                        # of the answer this function returns.
-                        #
-                        # Depends on every chunk of one model call sharing a
-                        # stable id and a new call getting a different one —
-                        # true for all four configured providers, and true in
-                        # general because `langchain_core`'s own streaming
-                        # loop stamps an id-less chunk with the call's
-                        # `run_id` (`chat_models.py`, `_generate_with_cache`:
-                        # `if chunk.message.id is None: chunk.message.id =
-                        # run_id`). It stops being true for a provider whose
-                        # *own* chunks already carry ids that change mid-call
-                        # — OpenAI's Responses API does this (e.g.
-                        # `resp_1` on early chunks, then `lc_run--x` on
-                        # later ones of the SAME reply) — because
-                        # `langchain_core` only fills in a missing id, it
-                        # never overrides one a provider already set. On such
-                        # a provider this silently drops every chunk before
-                        # the id change instead of resetting on a real
-                        # message boundary. Not reachable with the providers
-                        # `llm/provider.py` builds today; re-check this
-                        # assumption before pointing `LLM_PROVIDER`/
-                        # `LLM_MODEL` at a Responses-API-shaped model.
-                        parts = []
-                        current_message_id = message.id
-                    text = chunk_text(message)
-                    if text:
-                        parts.append(text)
-                        # `markup=False, highlight=False`: the model's own
-                        # words are not console markup either, for the same
-                        # reason as the progress line above — see C3 in the
-                        # streaming-the-turn review.
-                        console.print(text, end="", markup=False, highlight=False)
-                        mid_line = True
+
+    # Held until the first thing reaches the screen, then dropped. Removing
+    # the whole-turn spinner was right — it hid three queries and a report
+    # behind one unchanging line — but it also removed the only feedback
+    # before the first token, and a turn that opens with an `analyst` call
+    # says nothing until that subagent does. `ExitStack.close()` is
+    # idempotent, so each render site below can drop it without knowing
+    # whether it is the first.
+    waiting = ExitStack()
+    waiting.enter_context(console.status("thinking…"))
+    try:
+        for mode, chunk in agent.stream(
+            payload, config, context=context, stream_mode=["messages", "custom"]
+        ):
+            if mode == "custom":
+                # First output of the turn? The wait is over.
+                waiting.close()
+                if mid_line:
+                    # The last thing printed was an answer or narration token,
+                    # left mid-line by `end=""` below. Left alone, this progress
+                    # line would glue onto it: "Let me look that up.1 row(s)...".
+                    console.print()
+                    mid_line = False
+                # `markup=False, highlight=False`: `chunk["progress"]` can embed
+                # a tool's own text (a report title, a search term) verbatim, and
+                # that text is not console markup. Unescaped, a stray `[/bold]`
+                # in it does not just print wrong — it raises `MarkupError` and
+                # takes the whole turn down with it (see the answer print below).
+                # `style="dim"` gets the same look the old `[dim]...[/dim]`
+                # wrapping gave, without parsing the interpolated text as markup.
+                console.print(
+                    str(chunk.get("progress", chunk)),
+                    style="dim",
+                    markup=False,
+                    highlight=False,
+                )
+            elif mode == "messages":
+                message, meta = chunk
+                if isinstance(message, AIMessage):
+                    # `str(...)`: a chunk with no `langgraph_node` at all must still
+                    # land somewhere sortable in `seen_nodes` below, not raise a
+                    # `TypeError` from comparing `None` against a string.
+                    node = str(meta.get("langgraph_node"))
+                    seen_nodes.add(node)
+                    if node == _SUPERVISOR_NODE:
+                        if message.id != current_message_id:
+                            # A new supervisor message has started — narration
+                            # from an earlier one in this same turn is not part
+                            # of the answer this function returns.
+                            #
+                            # Depends on every chunk of one model call sharing a
+                            # stable id and a new call getting a different one —
+                            # true for all four configured providers, and true in
+                            # general because `langchain_core`'s own streaming
+                            # loop stamps an id-less chunk with the call's
+                            # `run_id` (`chat_models.py`, `_generate_with_cache`:
+                            # `if chunk.message.id is None: chunk.message.id =
+                            # run_id`). It stops being true for a provider whose
+                            # *own* chunks already carry ids that change mid-call
+                            # — OpenAI's Responses API does this (e.g.
+                            # `resp_1` on early chunks, then `lc_run--x` on
+                            # later ones of the SAME reply) — because
+                            # `langchain_core` only fills in a missing id, it
+                            # never overrides one a provider already set. On such
+                            # a provider this silently drops every chunk before
+                            # the id change instead of resetting on a real
+                            # message boundary. Not reachable with the providers
+                            # `llm/provider.py` builds today; re-check this
+                            # assumption before pointing `LLM_PROVIDER`/
+                            # `LLM_MODEL` at a Responses-API-shaped model.
+                            parts = []
+                            current_message_id = message.id
+                        text = chunk_text(message)
+                        if text:
+                            parts.append(text)
+                            # `markup=False, highlight=False`: the model's own
+                            # words are not console markup either, for the same
+                            # reason as the progress line above — see C3 in the
+                            # streaming-the-turn review.
+                            # First output of the turn? The wait is over.
+                            waiting.close()
+                            console.print(text, end="", markup=False, highlight=False)
+                            mid_line = True
+    finally:
+        waiting.close()
+
     if seen_nodes and _SUPERVISOR_NODE not in seen_nodes:
         raise RuntimeError(
             f"expected an AIMessage chunk from node {_SUPERVISOR_NODE!r}, saw "

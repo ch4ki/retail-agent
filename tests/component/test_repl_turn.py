@@ -385,3 +385,42 @@ def test_a_failed_turn_prints_no_report(make_deps, monkeypatch):
     printed = console.export_text()
     assert "Something went wrong" in printed
     assert "Saved as" not in printed
+
+
+def test_the_wait_is_shown_until_the_first_output(make_deps):
+    """Streaming replaced a spinner that covered the whole turn — rightly, it
+    hid three queries and a report behind one unchanging line. But it also
+    removed the only feedback before the FIRST token, and a turn that opens
+    with an `analyst` call says nothing until that subagent does.
+
+    So the wait indicator is held, and dropped the moment anything reaches the
+    screen. Both halves matter: shown at all, and gone before the first print
+    rather than left spinning over the answer.
+    """
+    events: list[str] = []
+
+    class Watching(FakeConsole):
+        def status(self, *args, **kwargs):
+            events.append("wait:start")
+
+            class _Ctx:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    events.append("wait:stop")
+                    return False
+
+            return _Ctx()
+
+        def print(self, *args, **kwargs):
+            events.append("print")
+            super().print(*args, **kwargs)
+
+    console = Watching()
+    answer(console, make_deps(script=["Denim fell 11.8% in Q1."]), "how did denim do?")
+
+    assert "wait:start" in events, "no wait indicator was shown at all"
+    assert events.index("wait:stop") < events.index("print"), (
+        f"the wait indicator outlived the first output: {events[:6]}"
+    )
