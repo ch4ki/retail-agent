@@ -438,11 +438,19 @@ def _require_identity(runtime) -> None:
     context = runtime.context
     if context is None or not getattr(context, "user_id", ""):
         raise MissingTurnIdentity(
-            "This turn has no caller identity. Pass "
-            "context=TurnContext(user_id=..., session_id=..., turn_id=...) "
-            "to agent.invoke()/.ainvoke() — every tool that reads or writes "
-            "report, definition or preference data reads it from "
-            "runtime.context.user_id now, not from how the agent was built."
+            "This turn has no caller identity, so it was refused before any "
+            "tool ran. Every tool that reads or writes report, definition or "
+            "preference data takes the executive from runtime.context.user_id "
+            "now, not from how the agent was built — without one they would "
+            "all silently share an empty-string user.\n"
+            "  In LangGraph Studio: set user_id in the run's configurable "
+            "panel (session_id and turn_id are optional).\n"
+            "  Over the API: post "
+            '{"config": {"configurable": {"user_id": "..."}}} — supplying '
+            "both configurable and a top-level context in one request is a "
+            "400.\n"
+            "  From Python: pass context=TurnContext(user_id=..., "
+            "session_id=..., turn_id=...) to agent.invoke()/.ainvoke()."
         )
 
 

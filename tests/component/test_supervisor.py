@@ -5,6 +5,8 @@ model, what never runs, and what is left behind for `/trace` afterwards.
 """
 
 import pandas as pd
+from types import SimpleNamespace
+
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
@@ -401,3 +403,27 @@ def test_a_failed_turn_keeps_what_it_did(make_deps):
     assert [a["sql"] for a in recovered["attempts"]] == ["SELECT 1"], (
         "the completed query is still in the checkpoint after the turn died"
     )
+
+
+def test_the_identity_refusal_names_every_route_that_fixes_it():
+    """The message is the whole remedy — a caller who hits this is stopped
+    until they act on it, and the surfaces they hit it from are different.
+
+    A Studio operator cannot "pass context= to agent.invoke()", which is what
+    this used to say; they need the configurable panel. An API caller needs to
+    know that sending configurable AND a top-level context in one request is a
+    400. Only the SDK caller was ever served by the original wording.
+
+    Pinned because nothing else does: the guard's other tests assert the
+    exception type, so the guidance could be reworded to uselessness without a
+    single failure.
+    """
+    from retail_agent.agent.middleware import MissingTurnIdentity, _require_identity
+
+    with pytest.raises(MissingTurnIdentity) as raised:
+        _require_identity(SimpleNamespace(context=None))
+
+    message = str(raised.value)
+    assert "Studio" in message and "configurable" in message
+    assert "user_id" in message
+    assert "TurnContext" in message, "the Python route is still named"
