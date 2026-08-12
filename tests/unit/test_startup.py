@@ -395,3 +395,72 @@ def test_only_the_analyst_is_an_agent():
         "real tools. A tool-less capability belongs in a plain model call "
         f"through `resilient_call`. Found {total} call(s) across: {counts}"
     )
+
+
+def test_the_process_deps_are_built_off_the_event_loop(monkeypatch):
+    """`langgraph dev` runs BlockBuster, which raises on a blocking call made
+    from the loop thread — and it does: `BlockingError: Blocking call to
+    os.read`, on the first run.
+
+    Constructing the BigQuery client resolves Google's application default
+    credentials, and for authorized-user credentials (`gcloud auth
+    application-default login`) `google/auth/_default.py` falls through to
+    `_cloud_sdk.get_project_id()`, which shells out to `gcloud`. The
+    credentials file carries no project of its own, so that fallback is not an
+    edge case — it is the normal path for a developer.
+
+    `make_graph` is called per request by `langgraph_api`, from the loop. So
+    the construction has to happen somewhere BlockBuster tolerates, and it only
+    raises when `asyncio.get_running_loop()` succeeds.
+    """
+    import asyncio
+
+    from retail_agent.agent import studio
+
+    where = {}
+
+    def spy():
+        try:
+            asyncio.get_running_loop()
+            where["on_loop_thread"] = True
+        except RuntimeError:
+            where["on_loop_thread"] = False
+        return build_deps(_settings(), llm=_bindable(), source=_schema_only())
+
+    monkeypatch.setattr(studio, "_build_process_deps", spy)
+    studio._process_deps.cache_clear()
+
+    async def drive():
+        return studio.make_graph({"configurable": {"thread_id": "t", "user_id": "u"}})
+
+    try:
+        assert asyncio.run(drive())
+    finally:
+        studio._process_deps.cache_clear()
+
+    assert where["on_loop_thread"] is False, (
+        "deps were built on the event loop thread; BlockBuster will kill the "
+        "first request under `langgraph dev`"
+    )
+
+
+def test_the_process_deps_skip_the_thread_when_there_is_no_loop(monkeypatch):
+    """The CLI and the eval have no loop to protect, and paying for a thread
+    per process start to protect nothing would be cargo cult."""
+    from retail_agent.agent import studio
+
+    calls = []
+    monkeypatch.setattr(
+        studio,
+        "_build_process_deps",
+        lambda: calls.append("built")
+        or build_deps(_settings(), llm=_bindable(), source=_schema_only()),
+    )
+    studio._process_deps.cache_clear()
+
+    try:
+        assert studio.make_graph({"configurable": {"thread_id": "t", "user_id": "u"}})
+    finally:
+        studio._process_deps.cache_clear()
+
+    assert calls == ["built"]

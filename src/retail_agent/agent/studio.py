@@ -24,6 +24,8 @@ to only one path. `build_deps` is the one place.
 
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
 from retail_agent.agent.deps import AgentDeps
@@ -35,19 +37,11 @@ from retail_agent.llm.provider import build_models
 from retail_agent.obs.tracing import configure_tracing
 
 
-@lru_cache(maxsize=1)
-def _process_deps() -> AgentDeps:
-    """Everything expensive, built once for the life of the process.
+def _build_process_deps() -> AgentDeps:
+    """The construction itself. Blocking, by way of the BigQuery client.
 
     Tracing is configured from in here rather than at import, so its os.environ
     write happens on the first request and happens once.
-
-    `lru_cache` only serialises the dict update, not this function body, so
-    two concurrent first requests can both miss the cache and both call
-    `build_deps` before either result is stored — one of the two built
-    `AgentDeps` is then discarded. Harmless here (`AgentDeps` is frozen and
-    nothing it holds is mutated), but "built once" is a description of the
-    common case, not a guarantee.
     """
     settings = get_settings()
     configure_tracing(settings)
@@ -58,6 +52,43 @@ def _process_deps() -> AgentDeps:
         llm_fallbacks=fallbacks,
         source=BigQuerySource(settings),
     )
+
+
+@lru_cache(maxsize=1)
+def _process_deps() -> AgentDeps:
+    """Everything expensive, built once for the life of the process.
+
+    Built on a worker thread whenever an event loop is running, and directly
+    otherwise. `make_graph` is called per request by `langgraph_api`, which
+    calls it from the loop — and constructing the BigQuery client resolves
+    Google's application default credentials, which for authorized-user
+    credentials (`gcloud auth application-default login`) shells out to
+    `gcloud config get project`: `google/auth/_default.py` falls through to
+    `_cloud_sdk.get_project_id()` whenever the credentials file carries no
+    project of its own, which an authorized-user file never does.
+
+    A blocking subprocess on the loop thread is exactly what `langgraph dev`'s
+    BlockBuster exists to catch, and it caught it — `BlockingError: Blocking
+    call to os.read` on the first run. BlockBuster only raises when
+    `asyncio.get_running_loop()` succeeds (`blockbuster.py:77-79`), so a worker
+    thread is enough; the loop still waits for the result, but it waits once
+    per process rather than dying.
+
+    `lru_cache` only serialises the dict update, not this function body, so
+    two concurrent first requests can both miss the cache and both call
+    `_build_process_deps` before either result is stored — one of the two built
+    `AgentDeps` is then discarded. Harmless here (`AgentDeps` is frozen and
+    nothing it holds is mutated), but "built once" is a description of the
+    common case, not a guarantee.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop: the CLI and the eval. Nothing to protect, so no thread.
+        return _build_process_deps()
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="deps") as pool:
+        return pool.submit(_build_process_deps).result()
 
 
 def _deps(*, llm=None, source=None) -> AgentDeps:
